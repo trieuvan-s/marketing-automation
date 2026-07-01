@@ -1,2 +1,3 @@
-# Marketing-Automation-Platform
-Auto crawl data -> export content
+# Marketing Automation
+
+Bootstrap MVP v0.1.0
