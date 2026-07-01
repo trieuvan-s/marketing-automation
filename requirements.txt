@@ -1,4 +1,0 @@
-crawl4ai
-openpyxl
-pandas
-python-dotenv
