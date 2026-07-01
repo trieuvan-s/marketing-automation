@@ -1,0 +1,98 @@
+# =====================================================================
+# twmkt — cấu hình trung tâm. Nguyên tắc: KHÔNG hard-code trong code,
+# mọi giá trị điều chỉnh nằm ở đây. Bí mật (id, key) tham chiếu qua ${ENV}.
+# Đọc bằng src/twmkt/config.py -> load_settings().
+# =====================================================================
+
+project:
+  name: "Turtle Wealth Marketing"
+  version: "0.2.0"
+
+paths:
+  data_dir: "data"
+  storage_dir: "storage"          # documents / logs / output
+
+# --- Nguồn crawl (thay cho hard-code trong sources.py) ---------------
+sources:
+  - key: "cafef-doanh-nghiep"
+    name: "CafeF - Doanh nghiệp"
+    url: "https://cafef.vn/doanh-nghiep.chn"
+    type: "news"
+    enabled: true
+  - key: "cafef-vi-mo"
+    name: "CafeF - Vĩ mô"
+    url: "https://cafef.vn/vi-mo.chn"
+    type: "news"
+    enabled: false
+  - key: "cafef-tai-chinh-quoc-te"
+    name: "CafeF - Tài chính quốc tế"
+    url: "https://cafef.vn/tai-chinh-quoc-te.chn"
+    type: "news"
+    enabled: false
+
+# --- Tầng crawl (robustness) ----------------------------------------
+crawl:
+  limit_per_source: 8
+  http_first: true                # thử HTTP tĩnh trước, fallback Playwright
+  respect_robots: true
+  rate_limit_s: 1.5
+  rate_limit_jitter_s: 0.7
+  concurrency: 1
+  max_retries: 3
+  backoff_base_s: 2.0
+  user_agent: "TurtleWealthBot/0.2 (+contact: set-your-email)"
+  stealth: true
+
+# --- Chuẩn hóa & lọc (Tầng 0 - free) --------------------------------
+curation:
+  tickers_file: "data/tickers.txt"
+  ambiguous_file: "data/tickers_ambiguous.txt"
+  ambiguous_context_window: 40
+  relevance:
+    keywords_file: "data/keywords_macro.txt"
+    min_macro_keywords: 2         # giữ bài macro khi >= n từ khóa (nếu 0 mã)
+
+# --- Knowledge / RAG (Tầng 0-1) -------------------------------------
+knowledge:
+  chunk_size: 500
+  chunk_overlap: 80
+  embedder: "hashing"             # hashing (free) | sentence-transformers
+  top_k: 5
+  vector_store: "memory"          # memory | qdrant
+
+# --- LLM: phân tầng token -------------------------------------------
+llm:
+  provider: "mock"                # mock | anthropic
+  triage_model: "claude-haiku-4-5-20251001"
+  content_model: "claude-sonnet-4-6"
+  max_tokens: 1500
+
+# --- Sản xuất nội dung ----------------------------------------------
+producers:
+  hook: true                      # bước Hook (góc marketing) - mục b/c
+  article: true
+  infographic: true               # tất định, $0
+  video_script: true
+  newsletter: true                # tất định, $0
+
+# --- Cổng duyệt người-trong-vòng-lặp --------------------------------
+gates:
+  research:
+    type: "console"               # console | auto | sheets
+  content:
+    type: "console"
+
+# --- Google Sheets (control-plane cho cổng duyệt) -------------------
+sheets:
+  spreadsheet_id: "${TWMKT_SHEET_ID}"
+  creds_path: "${TWMKT_SHEETS_CREDS}"   # đường dẫn JSON service account
+  research_worksheet: "ResearchReview"
+  content_worksheet: "ContentReview"
+  poll_interval_s: 15
+  timeout_s: 86400                # 24h; hết giờ -> hành động mặc định
+  on_timeout: "reject"
+
+# --- Phân phối ------------------------------------------------------
+publishers:
+  - key: "console"
+    enabled: true
