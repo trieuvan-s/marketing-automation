@@ -515,6 +515,46 @@ def test_full_ticker_whitelist_loads_and_includes_vn30():
     assert {"FPT", "HPG", "VHM", "VIC"} <= cfg.tickers   # VN30 vẫn có mặt
 
 
+def test_sheets_sources_from_rows_filters_enable():
+    """sources_from_rows: chỉ giữ hàng Enable bật, ánh xạ cột theo tên header, $0."""
+    from twmkt.sheets_board import sources_from_rows, SOURCES_HEADER
+    from twmkt.models import SourceType
+
+    rows = [
+        SOURCES_HEADER,  # Enable | key | name | url | type
+        ["TRUE", "dn", "CafeF - Doanh nghiệp", "https://cafef.vn/doanh-nghiep.chn", "news"],
+        ["FALSE", "vm", "CafeF - Vĩ mô", "https://cafef.vn/vi-mo-dau-tu.chn", "news"],
+        ["", "x", "Tắt mặc định", "https://cafef.vn/x.chn", "news"],
+        ["yes", "qt", "Quốc tế", "https://cafef.vn/tai-chinh-quoc-te.chn", "other"],
+        ["TRUE", "no", "Thiếu url", "", "news"],   # không url -> bỏ
+    ]
+    srcs = sources_from_rows(rows)
+    assert [s.name for s in srcs] == ["CafeF - Doanh nghiệp", "Quốc tế"]
+    assert srcs[0].url == "https://cafef.vn/doanh-nghiep.chn"
+    assert srcs[0].source_type is SourceType.NEWS
+    assert srcs[1].source_type is SourceType.OTHER
+    assert sources_from_rows([]) == []                 # rỗng -> []
+
+
+def test_sheets_context_row_column_order():
+    """context_row đúng thứ tự CONTEXT_HEADER; Decision mặc định PENDING."""
+    from twmkt.sheets_board import context_row, CONTEXT_HEADER, score_item
+
+    row = context_row("Tiêu đề bài", "FPT: hook hấp dẫn", "http://u", 5,
+                      ["FPT", "HPG"], ts="2026-07-02T00:00:00+00:00")
+    assert len(row) == len(CONTEXT_HEADER)
+    d = dict(zip(CONTEXT_HEADER, row))
+    assert d["timestamp"] == "2026-07-02T00:00:00+00:00"
+    assert d["title"] == "Tiêu đề bài"
+    assert d["hook"] == "FPT: hook hấp dẫn"
+    assert d["url"] == "http://u"
+    assert d["score"] == "5"
+    assert d["tickers"] == "FPT, HPG"
+    assert d["Decision"] == "PENDING" and d["Notes"] == ""
+    # score_item: mỗi mã +2, mỗi từ khóa vĩ mô +1 (dedup mã)
+    assert score_item(["FPT", "FPT", "HPG"], 3) == 2 * 2 + 3
+
+
 def _run_all():
     fns = [v for k, v in globals().items() if k.startswith("test_")]
     for fn in fns:

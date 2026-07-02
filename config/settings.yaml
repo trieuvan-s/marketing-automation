@@ -76,6 +76,7 @@ crawl:
 # --- Chuẩn hóa & lọc (Tầng 0 - free) --------------------------------
 curation:
   tickers_file: "data/tickers_full.txt"   # whitelist đầy đủ (1526 mã); VN30 (tickers.txt) giữ cho test
+  vn30_file: "data/tickers.txt"            # whitelist nhỏ cho demo review_to_sheet (sạch, ít nhiễu)
   ambiguous_file: "data/tickers_ambiguous.txt"
   ambiguous_context_window: 40
   relevance:
