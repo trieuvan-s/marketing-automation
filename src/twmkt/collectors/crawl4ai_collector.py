@@ -68,6 +68,21 @@ class Crawl4aiCollector(Collector):
         self.respect_robots = respect_robots
         self.timeout_s = timeout_s
 
+    @classmethod
+    def from_settings(cls, settings) -> "Crawl4aiCollector":
+        """Dựng từ config/settings.yaml (config-first). Crawl4AI dùng 1 bộ selector
+        chung cho mọi nguồn nên lấy từ crawl.* (mặc định = selector CafeF)."""
+        pattern = settings.get("crawl.article_url_pattern")
+        content = settings.get("crawl.body_selector") or _CAFEF_CONTENT_SELECTOR
+        return cls(
+            article_link_pattern=re.compile(pattern) if pattern else _DEFAULT_ARTICLE_RE,
+            content_css_selector=content,
+            excluded_selector=settings.get("crawl.excluded_selector", _CAFEF_EXCLUDED_SELECTOR),
+            rate_limit_s=float(settings.get("crawl.rate_limit_s", 1.5)),
+            respect_robots=bool(settings.get("crawl.respect_robots", True)),
+            timeout_s=int(settings.get("crawl.timeout_s", 30)),
+        )
+
     def collect(self, source: Source, *, limit: int = 10) -> list[RawDocument]:
         import asyncio
 

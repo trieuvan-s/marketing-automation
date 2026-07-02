@@ -30,16 +30,28 @@ class ResearcherAgent(Agent):
             if c.url not in sources:
                 sources.append(c.url)
 
-        context = "\n".join(f"- {c.text[:200]}" for c in chunks)
-        thesis = self._ask(f"Chủ đề: {topic}\n\nTrích đoạn liên quan:\n{context}\n\n"
-                           "Viết 1 câu luận điểm.")
-
         # key_points lấy tất định từ tiêu đề chunk (không để LLM tự chế danh sách).
         seen: list[str] = []
         for c in chunks:
             if c.title not in seen:
                 seen.append(c.title)
         key_points = seen[:3]
+
+        # Prompt BÁM tiêu đề + trích đoạn bài GIỮ LẠI, yêu cầu luận điểm về diễn
+        # biến/doanh nghiệp cụ thể trong bài — KHÔNG nhắc lại cụm chủ đề thô.
+        titles = "\n".join(f"- {t}" for t in key_points) or "- (không có)"
+        context = "\n".join(f"- {c.text[:200]}" for c in chunks) or "- (không có trích đoạn)"
+        prompt = (
+            f"Chủ đề tra cứu (chỉ để định hướng, KHÔNG lặp lại nguyên văn): {topic}\n\n"
+            f"Tiêu đề các bài liên quan giữ lại:\n{titles}\n\n"
+            f"Trích đoạn liên quan:\n{context}\n\n"
+            "Viết 1 câu luận điểm SÚC TÍCH về diễn biến/doanh nghiệp CỤ THỂ nêu "
+            "trong các bài trên (nêu tên/mã nếu có), bám sát trích đoạn."
+        )
+        thesis = self._ask(prompt).strip()
+        # LLM trả rỗng -> luận điểm tất định theo bài giữ lại (không echo topic thô).
+        if not thesis:
+            thesis = key_points[0] if key_points else topic
 
         return ResearchBrief(
             topic=topic,

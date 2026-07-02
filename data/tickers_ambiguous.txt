@@ -1,2 +1,13 @@
+# Mã CK vừa là mã vừa là từ/viết tắt thường gặp trong văn xuôi tài chính VN.
+# Chỉ tính là mã khi quanh nó có ngữ cảnh CK (cổ phiếu/mã/HOSE/(...)/mã xác định
+# đứng gần). Dùng cùng whitelist đầy đủ (tickers_full.txt) để lọc dương tính giả.
 GAS
 BID
+USD
+HCM
+MTV
+PPP
+CEO
+CPA
+TST
+CBI

@@ -72,9 +72,11 @@ def _has_ticker_context(ctx_raw: str, ctx_low: str, config: "CurationConfig",
                         *, exclude: str) -> bool:
     if any(mk in ctx_low for mk in _TICKER_CONTEXT_MARKERS):
         return True
-    # có mã whitelist khác đứng gần -> nhiều khả năng đang liệt kê mã CK
+    # Có mã CK XÁC ĐỊNH (không phải mã dễ nhầm) đứng gần -> đang liệt kê mã CK.
+    # Chỉ tính mã non-ambiguous để 2 token dễ nhầm (vd USD ~ HCM trong "tỷ USD cho
+    # TP.HCM") KHÔNG tự xác nhận lẫn nhau -> tránh dương tính giả.
     for other in _TICKER_RE.findall(ctx_raw):
-        if other != exclude and other in config.tickers:
+        if other != exclude and other in config.tickers and other not in config.ambiguous:
             return True
     return False
 

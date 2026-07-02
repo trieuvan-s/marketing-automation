@@ -5,12 +5,14 @@ Không cần mạng, không cần khóa API, $0 token.
 """
 from __future__ import annotations
 
+from ._encoding import ensure_utf8_stdio
 from .collectors.mock import MockCollector
 from .models import Source, SourceType
 from .orchestrator import MarketingPipeline
 
 
 def main() -> None:
+    ensure_utf8_stdio()
     sources = [
         Source("CafeF", "https://cafef.vn", SourceType.NEWS),
         Source("Vietstock", "https://vietstock.vn", SourceType.NEWS),

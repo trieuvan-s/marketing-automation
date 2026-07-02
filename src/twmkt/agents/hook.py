@@ -78,13 +78,15 @@ def _try_json(s: str):
 def _fallback(brief) -> MarketingHook:
     tickers = getattr(brief, "tickers", [])
     tick = ", ".join(tickers) if tickers else "thị trường"
-    topic = brief.topic
+    # Bám nội dung BÀI GIỮ LẠI (tiêu đề bài = key_points[0]), KHÔNG lặp 'topic' thô.
+    key_points = getattr(brief, "key_points", []) or []
+    lead = (key_points[0] if key_points else brief.topic).strip()
     return MarketingHook(
-        topic=topic,
-        angle=f"Điều nhà đầu tư nên chú ý về {tick}: {topic}",
+        topic=brief.topic,
+        angle=f"Điều nhà đầu tư nên chú ý về {tick}: {lead}",
         headlines=[
-            f"{tick}: {topic}",
-            f"3 điều rút ra từ {topic}",
+            f"{tick}: {lead}",
+            f"3 điều rút ra từ tin: {lead}",
             f"Vì sao {tick} đáng chú ý lúc này?",
         ],
     )

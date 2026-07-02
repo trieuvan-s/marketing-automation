@@ -5,9 +5,11 @@ pyyaml>=6.0          # đọc config/settings.yaml
 gspread>=6.0
 google-auth>=2.0
 
+# LLM thật cho Researcher + Hook (llm.provider = anthropic). Cần ANTHROPIC_API_KEY.
+anthropic>=0.40
+
 # Tùy chọn khi lên production (xem pyproject optional-dependencies):
-#   crawl4ai>=0.4      # Crawl4aiCollector
-#   anthropic>=0.40    # AnthropicLLM
+#   crawl4ai>=0.4      # Crawl4aiCollector (fallback nguồn cần JS)
 #   langgraph>=0.2     # orchestrator production
 
 # Bước 2 — HTTP-first collector (thuần Python, chạy cả trên 3.14)

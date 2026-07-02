@@ -10,10 +10,12 @@ Không gọi mạng / không gọi LLM khi chỉ *dựng* pipeline: các client 
 from __future__ import annotations
 
 from .agents.base import AnthropicLLM, LLMClient, MockLLM
+from .agents.router import LLMRouter, Tier
 from .approval import sheets_gate
 from .approval.gate import ApprovalGate, AutoApproveGate, ConsoleApprovalGate
 from .collectors.base import Collector
 from .collectors.crawl4ai_collector import Crawl4aiCollector
+from .collectors.http_collector import HttpFirstCollector
 from .collectors.mock import MockCollector
 from .config import Settings, load_settings
 from .curation.config import CurationConfig
@@ -49,6 +51,22 @@ def _build_llm(settings: Settings, *, model_key: str, default_model: str) -> LLM
     raise ValueError(f"llm.provider không hỗ trợ: {provider} (mock|anthropic)")
 
 
+def build_research_llm(settings: Settings, *, offline: bool = False) -> LLMRouter:
+    """LLM cho Researcher + Hook, BỌC LLMRouter để đo token + ước tính chi phí.
+
+    - offline=True hoặc provider=mock -> MockLLM ($0 token, không mạng/không khóa).
+    - provider=anthropic -> tầng RẺ (triage_model = Haiku) để nếm chất lượng + đo
+      token trước khi bật tầng đắt. Không gọi mạng khi *dựng* (SDK/khóa lazy).
+    Router dùng tier CHEAP để định giá và áp `llm.budget_usd` (hạn mức mềm)."""
+    base: LLMClient = MockLLM() if offline else build_hook_llm(settings)
+    budget = settings.get("llm.budget_usd")
+    return LLMRouter(
+        base,
+        default_tier=Tier.CHEAP,
+        budget_usd=float(budget) if budget else None,
+    )
+
+
 # --- Cổng duyệt: console | auto | sheets -----------------------------------
 def build_gate(settings: Settings, *, gate: str) -> ApprovalGate:
     """gate = 'research' | 'content'. Đọc gates.<gate>.type."""
@@ -75,11 +93,19 @@ def build_sources(settings: Settings) -> list[Source]:
     return out
 
 
-# --- Collector: mock (offline) hoặc crawl4ai (production) -------------------
+# --- Collector: mock (offline) | http (mặc định) | crawl4ai (fallback JS) ---
 def build_collector(settings: Settings, *, offline: bool = True) -> Collector:
+    """offline=True -> MockCollector ($0, không mạng). Ngược lại chọn engine thật
+    theo crawl.engine: 'http' = HttpFirstCollector (httpx+bs4, $0 token);
+    'crawl4ai' = Crawl4aiCollector (fallback cho nguồn cần JS)."""
     if offline:
         return MockCollector()
-    return Crawl4aiCollector.from_settings(settings)
+    engine = (settings.get("crawl.engine", "http") or "http").lower()
+    if engine == "http":
+        return HttpFirstCollector.from_settings(settings)
+    if engine == "crawl4ai":
+        return Crawl4aiCollector.from_settings(settings)
+    raise ValueError(f"crawl.engine không hỗ trợ: {engine} (http|crawl4ai)")
 
 
 def build_retriever(settings: Settings) -> Retriever:

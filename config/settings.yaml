@@ -19,39 +19,63 @@ storage:
   output_dir: "storage/output"
 
 # --- Nguồn crawl (thay cho hard-code trong sources.py) ---------------
+# Mỗi nguồn tự khai selector (config-first): article_url_pattern nhận diện link
+# bài trên trang mục; title_selector/body_selector bóc tiêu đề + thân bài. Nếu
+# một nguồn bỏ trống selector -> HttpFirstCollector dùng mặc định ở mục crawl.*.
 sources:
   - key: "cafef-doanh-nghiep"
     name: "CafeF - Doanh nghiệp"
     url: "https://cafef.vn/doanh-nghiep.chn"
     type: "news"
     enabled: true
+    article_url_pattern: "-\\d{6,}\\.chn$"        # link bài: /<slug>-<id>.chn
+    title_selector: "h1"
+    body_selector: "div.detail-content.afcbc-body"  # thân bài (soi DOM thật)
   - key: "cafef-vi-mo"
     name: "CafeF - Vĩ mô"
-    url: "https://cafef.vn/vi-mo.chn"
+    url: "https://cafef.vn/vi-mo-dau-tu.chn"   # slug thật (vi-mo.chn -> 404)
     type: "news"
-    enabled: false
+    enabled: true
+    article_url_pattern: "-\\d{6,}\\.chn$"
+    title_selector: "h1"
+    body_selector: "div.detail-content.afcbc-body"   # cùng template doanh-nghiep
   - key: "cafef-tai-chinh-quoc-te"
     name: "CafeF - Tài chính quốc tế"
     url: "https://cafef.vn/tai-chinh-quoc-te.chn"
     type: "news"
-    enabled: false
+    enabled: true
+    article_url_pattern: "-\\d{6,}\\.chn$"
+    title_selector: "h1"
+    body_selector: "div.detail-content.afcbc-body"   # cùng template doanh-nghiep
 
 # --- Tầng crawl (robustness) ----------------------------------------
 crawl:
-  limit_per_source: 8
+  engine: "http"                  # http (httpx+bs4, $0) | crawl4ai (fallback JS)
+  limit_per_source: 12
   http_first: true                # thử HTTP tĩnh trước, fallback Playwright
   respect_robots: true
   rate_limit_s: 1.5
   rate_limit_jitter_s: 0.7
+  timeout_s: 30
   concurrency: 1
   max_retries: 3
   backoff_base_s: 2.0
-  user_agent: "TurtleWealthBot/0.2 (+contact: set-your-email)"
+  user_agent: "TurtleWealthBot/0.2 (+contact: trieuvanstock@gmail.com)"
   stealth: true
+  # Selector mặc định (dùng khi source không tự khai) + box nhiễu cần loại.
+  article_url_pattern: "-\\d{6,}\\.chn$"
+  title_selector: "h1"
+  body_selector: "div.detail-content.afcbc-body"
+  ticker_box_selector: ".chisochungkhoan"  # box mã CK CafeF: trích mã rồi loại chrome giá
+  noise_selectors:
+    - "#listNewsInContent"        # box "TIN MỚI" nhúng trong thân bài
+    - ".VCSortableInPreviewMode"  # widget xem trước ảnh/box
+    - "script"
+    - "style"
 
 # --- Chuẩn hóa & lọc (Tầng 0 - free) --------------------------------
 curation:
-  tickers_file: "data/tickers.txt"
+  tickers_file: "data/tickers_full.txt"   # whitelist đầy đủ (1526 mã); VN30 (tickers.txt) giữ cho test
   ambiguous_file: "data/tickers_ambiguous.txt"
   ambiguous_context_window: 40
   relevance:
@@ -67,11 +91,15 @@ knowledge:
   vector_store: "memory"          # memory | qdrant
 
 # --- LLM: phân tầng token -------------------------------------------
+# BẬT LLM thật CHỈ cho Researcher + Hook (tầng rẻ Haiku) để nếm chất lượng trên
+# dữ liệu CafeF thật + đo token. Producers (article/video) tầng đắt (content_model)
+# CHỈ chạy SAU cổng duyệt 1 -> run_pipeline dừng trước cổng nên chúng chưa tốn token.
 llm:
-  provider: "mock"                # mock | anthropic
-  triage_model: "claude-haiku-4-5-20251001"
-  content_model: "claude-sonnet-4-6"
+  provider: "anthropic"           # mock | anthropic
+  triage_model: "claude-haiku-4-5-20251001"   # Researcher + Hook (rẻ, đo token trước)
+  content_model: "claude-sonnet-4-6"          # Producers (tầng 2) — chưa bật ở bước này
   max_tokens: 1500
+  budget_usd: 1.0                 # hạn mức mềm cho 1 lần chạy (LLMRouter -> BudgetExceeded)
 
 # --- Sản xuất nội dung ----------------------------------------------
 producers:
