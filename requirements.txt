@@ -1,0 +1,11 @@
+# Phụ thuộc lõi (config-first). Cài: pip install -r requirements.txt
+pyyaml>=6.0          # đọc config/settings.yaml
+
+# Cổng duyệt qua Google Sheets (approval.sheets_gate) — chỉ cần khi gates.*.type = sheets
+gspread>=6.0
+google-auth>=2.0
+
+# Tùy chọn khi lên production (xem pyproject optional-dependencies):
+#   crawl4ai>=0.4      # Crawl4aiCollector
+#   anthropic>=0.40    # AnthropicLLM
+#   langgraph>=0.2     # orchestrator production

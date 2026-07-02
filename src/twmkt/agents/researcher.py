@@ -17,7 +17,8 @@ class ResearcherAgent(Agent):
         "lập, BÁM SÁT các trích đoạn được cung cấp. Không bịa số, không hứa lợi nhuận."
     )
 
-    def run(self, topic: str, retriever: Retriever, *, k: int = 5) -> ResearchBrief:
+    def run(self, topic: str, retriever: Retriever, *, k: int | None = None) -> ResearchBrief:
+        # k=None -> dùng top_k đã cấu hình cho retriever (config-first).
         chunks = retriever.retrieve(topic, k=k)
 
         tickers: list[str] = []

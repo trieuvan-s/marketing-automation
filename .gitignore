@@ -11,3 +11,14 @@ dist/
 .DS_Store
 .idea/
 .vscode/
+
+# Artefact runtime (documents đã persist + output brief/hook)
+storage/
+
+# Bí mật — KHÔNG commit khóa service account / token
+secrets/
+*.json
+# ...nhưng vẫn cho phép các file JSON cấu hình đã biết (không phải khóa)
+!.vscode/*.json
+!.claude/*.json
+!tsconfig*.json

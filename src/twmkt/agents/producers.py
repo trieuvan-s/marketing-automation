@@ -7,9 +7,13 @@ sau (có thể đẩy sang Claude Design hoặc công cụ đồ họa). Tách "
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING
 
 from ..models import ContentDraft, ContentFormat, ResearchBrief
 from .base import Agent
+
+if TYPE_CHECKING:
+    from .hook import MarketingHook
 
 _DISCLAIMER = (
     "Nội dung chỉ mang tính thông tin, không phải khuyến nghị đầu tư. "
@@ -21,16 +25,20 @@ class ArticleWriter(Agent):
     role = "ArticleWriter"
     system = "Viết bài phân tích cổ phiếu, văn phong rõ ràng, trung lập, có disclaimer."
 
-    def run(self, brief: ResearchBrief) -> ContentDraft:
+    def run(self, brief: ResearchBrief,
+            hook: "MarketingHook | None" = None) -> ContentDraft:
         points = "\n".join(f"- {p}" for p in brief.key_points)
         narrative = self._ask(f"Viết bài về: {brief.topic}\nLuận điểm: {brief.thesis}")
+        # Có hook -> dùng headline gợi ý làm tiêu đề + CTA từ hook; không có -> hành vi cũ.
+        title = hook.headlines[0] if hook and hook.headlines else brief.topic
+        cta = f"\n\n{hook.cta}" if hook and hook.cta else ""
         body = (
             f"{narrative}\n\nĐiểm chính:\n{points}\n\n"
-            f"Mã liên quan: {', '.join(brief.tickers) or 'N/A'}\n\n_{_DISCLAIMER}_"
+            f"Mã liên quan: {', '.join(brief.tickers) or 'N/A'}{cta}\n\n_{_DISCLAIMER}_"
         )
         return ContentDraft(
             fmt=ContentFormat.ARTICLE,
-            title=brief.topic,
+            title=title,
             body=body,
             brief_topic=brief.topic,
         )
@@ -41,9 +49,10 @@ class InfographicDesigner(Agent):
     system = "Tạo spec infographic dạng JSON từ brief nghiên cứu."
     uses_llm = False   # tất định, 0 token
 
-    def run(self, brief: ResearchBrief) -> ContentDraft:
+    def run(self, brief: ResearchBrief,
+            hook: "MarketingHook | None" = None) -> ContentDraft:
         spec = {
-            "headline": brief.topic,
+            "headline": (hook.headlines[0] if hook and hook.headlines else brief.topic),
             "tickers": brief.tickers,
             "highlights": brief.evidence[:4],
             "takeaways": brief.key_points[:3],
@@ -61,18 +70,28 @@ class VideoScripter(Agent):
     role = "VideoScripter"
     system = "Viết kịch bản video ngắn (~60s) gồm hook, thân, CTA, có disclaimer."
 
-    def run(self, brief: ResearchBrief) -> ContentDraft:
-        hook = self._ask(f"Viết câu hook 1 dòng cho video về: {brief.topic}")
+    def run(self, brief: ResearchBrief,
+            hook: "MarketingHook | None" = None) -> ContentDraft:
+        # Có hook (tất định) -> dùng góc + headline + CTA từ hook, KHÔNG gọi LLM lại.
+        # Không có hook -> giữ hành vi cũ (gọi LLM sinh câu hook).
+        if hook:
+            hook_line = hook.angle or (hook.headlines[0] if hook.headlines else brief.topic)
+            title = hook.headlines[0] if hook.headlines else f"[Video] {brief.topic}"
+            cta = hook.cta or "Theo dõi Turtle Wealth để cập nhật phân tích."
+        else:
+            hook_line = self._ask(f"Viết câu hook 1 dòng cho video về: {brief.topic}")
+            title = f"[Video] {brief.topic}"
+            cta = "Theo dõi Turtle Wealth để cập nhật phân tích."
         scenes = "\n".join(
             f"[Cảnh {i+1}] {p}" for i, p in enumerate(brief.key_points[:3])
         )
         body = (
-            f"HOOK: {hook}\n\n{scenes}\n\n"
-            f"[CTA] Theo dõi Turtle Wealth để cập nhật phân tích.\n\n{_DISCLAIMER}"
+            f"HOOK: {hook_line}\n\n{scenes}\n\n"
+            f"[CTA] {cta}\n\n{_DISCLAIMER}"
         )
         return ContentDraft(
             fmt=ContentFormat.VIDEO_SCRIPT,
-            title=f"[Video] {brief.topic}",
+            title=title,
             body=body,
             brief_topic=brief.topic,
         )
@@ -83,7 +102,8 @@ class NewsletterBuilder(Agent):
     system = "Lắp newsletter từ brief — tất định, không LLM."
     uses_llm = False   # tất định, 0 token
 
-    def run(self, brief: ResearchBrief) -> ContentDraft:
+    def run(self, brief: ResearchBrief,
+            hook: "MarketingHook | None" = None) -> ContentDraft:
         points = "\n".join(f"• {p}" for p in brief.key_points)
         body = (
             f"# Bản tin Turtle Wealth\n\n## {brief.topic}\n\n"

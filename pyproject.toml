@@ -1,14 +1,15 @@
 [project]
 name = "twmkt"
-version = "0.1.0"
+version = "0.2.0"
 description = "Turtle Wealth VN — Marketing Automation pipeline (deterministic orchestration + specialized agents + human gates)"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["pyyaml>=6.0"]
 
 [project.optional-dependencies]
 crawl = ["crawl4ai>=0.4"]
 llm = ["anthropic>=0.40"]
 orchestration = ["langgraph>=0.2"]
+sheets = ["gspread>=6.0", "google-auth>=2.0"]
 dev = ["pytest>=8"]
 
 [build-system]

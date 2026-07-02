@@ -12,6 +12,12 @@ paths:
   data_dir: "data"
   storage_dir: "storage"          # documents / logs / output
 
+# --- Lưu trữ tài liệu sạch (persist / audit) ------------------------
+storage:
+  type: "file"                    # file | memory
+  documents_dir: "storage/documents"
+  output_dir: "storage/output"
+
 # --- Nguồn crawl (thay cho hard-code trong sources.py) ---------------
 sources:
   - key: "cafef-doanh-nghiep"

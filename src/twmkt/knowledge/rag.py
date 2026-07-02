@@ -94,16 +94,53 @@ class InMemoryVectorStore(VectorStore):
         return scored[:k]
 
 
+# ---- chọn embedder theo cấu hình -------------------------------------------
+def build_embedder(kind: str = "hashing") -> Embedder:
+    """hashing (free, mặc định) | sentence-transformers (local, lazy import)."""
+    kind = (kind or "hashing").lower()
+    if kind in ("hashing", "hash"):
+        return HashingEmbedder()
+    if kind in ("sentence-transformers", "st", "sbert"):  # pragma: no cover
+        raise RuntimeError(
+            "embedder 'sentence-transformers' cần cài thêm; demo/test offline dùng "
+            "'hashing'. Cấu hình knowledge.embedder trong settings.yaml."
+        )
+    raise ValueError(f"knowledge.embedder không hỗ trợ: {kind}")
+
+
 # ---- Retriever: gói chunk + embed + store ----------------------------------
 class Retriever:
-    def __init__(self, embedder: Embedder | None = None, store: VectorStore | None = None):
+    def __init__(
+        self,
+        embedder: Embedder | None = None,
+        store: VectorStore | None = None,
+        *,
+        chunk_size: int = 500,
+        chunk_overlap: int = 80,
+        top_k: int = 5,
+    ):
         self.embedder = embedder or HashingEmbedder()
         self.store = store or InMemoryVectorStore()
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
+        self.top_k = top_k
 
-    def index(self, docs: list[CleanDocument], *, size: int = 500) -> int:
+    @classmethod
+    def from_settings(cls, settings) -> "Retriever":
+        return cls(
+            embedder=build_embedder(settings.get("knowledge.embedder", "hashing")),
+            chunk_size=int(settings.get("knowledge.chunk_size", 500)),
+            chunk_overlap=int(settings.get("knowledge.chunk_overlap", 80)),
+            top_k=int(settings.get("knowledge.top_k", 5)),
+        )
+
+    def index(self, docs: list[CleanDocument], *,
+              size: int | None = None, overlap: int | None = None) -> int:
+        size = self.chunk_size if size is None else size
+        overlap = self.chunk_overlap if overlap is None else overlap
         chunks: list[Chunk] = []
         for d in docs:
-            for piece in chunk_text(f"{d.title}. {d.markdown}", size=size):
+            for piece in chunk_text(f"{d.title}. {d.markdown}", size=size, overlap=overlap):
                 chunks.append(
                     Chunk(text=piece, source=d.source, url=d.url,
                           title=d.title, tickers=d.tickers)
@@ -114,6 +151,7 @@ class Retriever:
             self.store.add(chunks)
         return len(chunks)
 
-    def retrieve(self, query: str, k: int = 5) -> list[Chunk]:
+    def retrieve(self, query: str, k: int | None = None) -> list[Chunk]:
+        k = self.top_k if k is None else k
         qvec = self.embedder.embed([query])[0]
         return [c for _, c in self.store.search(qvec, k)]

@@ -9,6 +9,10 @@ import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # tránh vòng import (agents import models)
+    from .agents.hook import MarketingHook
 
 
 def _now() -> datetime:
@@ -130,6 +134,7 @@ class PipelineState:
     raw_docs: list[RawDocument] = field(default_factory=list)
     clean_docs: list[CleanDocument] = field(default_factory=list)
     brief: ResearchBrief | None = None
+    hook: "MarketingHook | None" = None       # góc marketing (sau research, trước cổng 1)
     drafts: list[ContentDraft] = field(default_factory=list)
     published: list[PublishResult] = field(default_factory=list)
     cost: dict = field(default_factory=dict)   # báo cáo token/chi phí
