@@ -261,6 +261,32 @@ def test_build_store_by_type():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_crawl4ai_extracts_article_links_from_fake_listing():
+    """Từ company: parsing link bài tất định trên fixture (không mạng, $0)."""
+    from twmkt.collectors.crawl4ai_collector import Crawl4aiCollector
+    from twmkt.collectors.sources import CAFEF_DOANH_NGHIEP
+
+    class FakeListing:
+        links = {
+            "internal": [
+                {"href": "https://cafef.vn/doanh-nghiep.chn", "text": "Doanh nghiệp", "title": "", "base_domain": "cafef.vn"},
+                {"href": "https://cafef.vn/du-lieu/top/ceo.chn", "text": "CEO", "title": "", "base_domain": "cafef.vn"},
+                {"href": "https://cafef.vn/ceo-dat-bike-trai-long-188260701104607570.chn", "text": "CEO Dat Bike", "title": "", "base_domain": "cafef.vn"},
+                {"href": "/g-group-gia-nhap-duong-dua-188260630190724738.chn", "text": "G-Group", "title": "", "base_domain": "cafef.vn"},
+                {"href": None, "text": "", "title": "", "base_domain": "cafef.vn"},
+            ],
+            "external": [
+                {"href": "https://ads.example.com/banner.chn", "text": "qc", "title": "", "base_domain": "example.com"},
+            ],
+        }
+
+    collector = Crawl4aiCollector(article_link_pattern=CAFEF_DOANH_NGHIEP.article_link_re)
+    links = collector._extract_article_links(FakeListing(), "https://cafef.vn/doanh-nghiep.chn")
+    assert len(links) == 2
+    assert all(l.endswith(".chn") for l in links)
+    assert not any("ads.example.com" in l for l in links)
+
+
 def _run_all():
     fns = [v for k, v in globals().items() if k.startswith("test_")]
     for fn in fns:

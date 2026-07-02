@@ -1,104 +1,188 @@
 """Adapter Crawl4AI cho production.
 
-Crawl4AI là async + Playwright nên KHÔNG nhúng vào process FastAPI; chạy ở
-worker riêng. Import được hoãn (lazy) để demo/test offline không cần cài đặt nó.
-
-Tham số robustness (limit, rate limit + jitter, retries, http_first, user_agent)
-đọc từ settings (mục `crawl`) qua from_settings — config-first, không hard-code.
+Crawl4AI import được hoãn (lazy) để demo/test offline không cần cài đặt nó.
 
 Cài đặt khi triển khai thật:
     pip install crawl4ai
-    crawl4ai-setup            # tải Playwright browser
+    crawl4ai-setup            # tải Playwright browser (dự phòng, xem ghi chú dưới)
+
+CafeF render HTML sẵn ở server (không cần JS để có nội dung bài) nên ta dùng
+`AsyncHTTPCrawlerStrategy` của crawl4ai — fetch HTTP thuần (aiohttp), KHÔNG mở
+Playwright/Chromium. Việc này vừa nhanh hơn nhiều lần vừa né được hẳn lớp lỗi
+renderer headless không ổn định (đã thấy trên máy Windows dùng để phát triển:
+Chromium crash ngẫu nhiên khi crawl nhiều bài liên tiếp). Nếu sau này có nguồn
+cần JS để render nội dung, đổi strategy này sang AsyncPlaywrightCrawlerStrategy
+cho riêng nguồn đó — không ảnh hưởng các nguồn HTTP-only khác.
+
+Luồng collect(): crawl trang chuyên mục (source.url) -> tìm link bài khớp
+`article_link_pattern` (chỉ xét link nội bộ cùng domain, tự loại link
+mục/quảng cáo/ngoại miền) -> crawl đồng thời từng bài bằng `arun_many` (giới
+hạn 1 request/lần + nghỉ `rate_limit_s` giây, dùng SemaphoreDispatcher +
+RateLimiter của crawl4ai) -> trả RawDocument (markdown đã cắt gọn theo
+`content_css_selector`, bỏ box liên quan/quảng cáo theo `excluded_selector`).
+
+Tôn trọng robots.txt qua cơ chế `check_robots_txt` sẵn có của crawl4ai — bài
+nào bị chặn sẽ có `success=False, status_code=403`, ta in cảnh báo rõ và bỏ
+qua thay vì crawl chui. Bài lỗi vì lý do khác (timeout/mạng — sự cố tạm thời)
+được thử lại đúng 1 lần.
 """
 from __future__ import annotations
 
-import asyncio
-import random
+import re
+from urllib.parse import urljoin, urlparse
 
 from ..models import RawDocument, Source
 from .base import Collector
+
+# Fallback nếu không truyền pattern riêng: link có phần đuôi nhiều chữ số
+# (id bài viết) trước phần mở rộng .chn/.html — khác link trang mục.
+_DEFAULT_ARTICLE_RE = re.compile(r"/[a-z0-9-]+-\d{10,}\.(?:chn|html?)$")
+
+# Selector thân bài CafeF (soi từ 1 bài mẫu: div.detail-content.afcbc-body),
+# loại bỏ box "TIN MỚI" nhúng trong thân bài (#listNewsInContent).
+_CAFEF_CONTENT_SELECTOR = "div.detail-content.afcbc-body"
+_CAFEF_EXCLUDED_SELECTOR = "#listNewsInContent"
+
+# User-Agent mô tả rõ danh tính bot, tôn trọng lịch sự với server nguồn.
+_USER_AGENT = (
+    "TurtleWealthMktBot/0.1 (+marketing automation nội bộ, thu thập tin tài "
+    "chính VN; liên hệ: trieuvanstock@gmail.com)"
+)
 
 
 class Crawl4aiCollector(Collector):
     def __init__(
         self,
         *,
-        limit: int = 10,
-        http_first: bool = True,
-        respect_robots: bool = True,
+        article_link_pattern: re.Pattern[str] = _DEFAULT_ARTICLE_RE,
+        content_css_selector: str = _CAFEF_CONTENT_SELECTOR,
+        excluded_selector: str = _CAFEF_EXCLUDED_SELECTOR,
         rate_limit_s: float = 1.5,
-        rate_limit_jitter_s: float = 0.7,
-        max_retries: int = 3,
-        backoff_base_s: float = 2.0,
-        user_agent: str = "TurtleWealthBot/0.2",
+        respect_robots: bool = True,
         timeout_s: int = 30,
     ):
-        self.limit = limit
-        self.http_first = http_first
-        self.respect_robots = respect_robots
+        self.article_link_pattern = article_link_pattern
+        self.content_css_selector = content_css_selector
+        self.excluded_selector = excluded_selector
         self.rate_limit_s = rate_limit_s
-        self.rate_limit_jitter_s = rate_limit_jitter_s
-        self.max_retries = max_retries
-        self.backoff_base_s = backoff_base_s
-        self.user_agent = user_agent
+        self.respect_robots = respect_robots
         self.timeout_s = timeout_s
 
-    @classmethod
-    def from_settings(cls, settings) -> "Crawl4aiCollector":
-        return cls(
-            limit=int(settings.get("crawl.limit_per_source", 10)),
-            http_first=bool(settings.get("crawl.http_first", True)),
-            respect_robots=bool(settings.get("crawl.respect_robots", True)),
-            rate_limit_s=float(settings.get("crawl.rate_limit_s", 1.5)),
-            rate_limit_jitter_s=float(settings.get("crawl.rate_limit_jitter_s", 0.7)),
-            max_retries=int(settings.get("crawl.max_retries", 3)),
-            backoff_base_s=float(settings.get("crawl.backoff_base_s", 2.0)),
-            user_agent=settings.get("crawl.user_agent", "TurtleWealthBot/0.2"),
-        )
+    def collect(self, source: Source, *, limit: int = 10) -> list[RawDocument]:
+        import asyncio
 
-    def collect(self, source: Source, *, limit: int | None = None) -> list[RawDocument]:
-        limit = self.limit if limit is None else limit
         return asyncio.run(self._collect_async(source, limit))
 
     async def _collect_async(self, source: Source, limit: int) -> list[RawDocument]:
         try:
-            from crawl4ai import AsyncWebCrawler  # noqa: F401
+            from crawl4ai import (  # noqa: F401
+                AsyncWebCrawler,
+                BrowserConfig,
+                CrawlerRunConfig,
+                HTTPCrawlerConfig,
+                RateLimiter,
+                SemaphoreDispatcher,
+            )
+            from crawl4ai.async_crawler_strategy import AsyncHTTPCrawlerStrategy
         except ImportError as e:  # pragma: no cover - phụ thuộc tùy chọn
             raise RuntimeError(
                 "Chưa cài crawl4ai. Chạy: pip install crawl4ai && crawl4ai-setup"
             ) from e
 
-        from crawl4ai import AsyncWebCrawler
+        # config= chỉ dùng để robots.txt-checker biết User-Agent xưng danh gì;
+        # việc fetch thật sự đi qua AsyncHTTPCrawlerStrategy (không mở trình duyệt).
+        browser_cfg = BrowserConfig(user_agent=_USER_AGENT)
+        http_strategy = AsyncHTTPCrawlerStrategy(
+            browser_config=HTTPCrawlerConfig(headers={"User-Agent": _USER_AGENT})
+        )
+
+        timeout_ms = self.timeout_s * 1000
+        listing_cfg = CrawlerRunConfig(
+            check_robots_txt=self.respect_robots, page_timeout=timeout_ms,
+        )
+        article_cfg = CrawlerRunConfig(
+            check_robots_txt=self.respect_robots,
+            css_selector=self.content_css_selector,
+            excluded_selector=self.excluded_selector,
+            page_timeout=timeout_ms,
+        )
 
         docs: list[RawDocument] = []
-        async with AsyncWebCrawler() as crawler:
-            result = await self._arun_with_retry(crawler, source.url)
-            if result is not None and result.success:
-                docs.append(
-                    RawDocument(
-                        source=source.name,
-                        url=source.url,
-                        title=(result.metadata or {}).get("title", source.name),
-                        markdown=result.markdown or "",
-                        source_type=source.source_type,
-                    )
+        async with AsyncWebCrawler(crawler_strategy=http_strategy, config=browser_cfg) as crawler:
+            listing = await crawler.arun(url=source.url, config=listing_cfg)
+            if not listing.success:
+                if listing.status_code == 403:
+                    print(f"[CẢNH BÁO] robots.txt chặn crawl trang mục: {source.url}")
+                else:
+                    print(f"[CẢNH BÁO] Không crawl được trang mục: {source.url} "
+                          f"({listing.error_message})")
+                return []
+
+            article_urls = self._extract_article_links(listing, source.url)[:limit]
+            if not article_urls:
+                return []
+
+            dispatcher = SemaphoreDispatcher(
+                semaphore_count=1,
+                rate_limiter=RateLimiter(
+                    base_delay=(self.rate_limit_s, self.rate_limit_s),
+                    max_delay=self.rate_limit_s * 4,
+                ),
+            )
+            results = await crawler.arun_many(
+                urls=article_urls, config=article_cfg, dispatcher=dispatcher
+            )
+
+            docs, retry_urls = self._collect_results(results, source)
+
+            # Lỗi mạng/timeout thoáng qua -> thử lại 1 lần cho các URL đó.
+            if retry_urls:
+                retry_results = await crawler.arun_many(
+                    urls=retry_urls, config=article_cfg, dispatcher=dispatcher
                 )
-        return docs[:limit]
+                retry_docs, _ = self._collect_results(retry_results, source)
+                docs.extend(retry_docs)
+        return docs
 
-    async def _arun_with_retry(self, crawler, url):  # pragma: no cover - cần mạng
-        """Thử lại với exponential backoff + jitter; tôn trọng rate limit."""
-        last_exc = None
-        for attempt in range(self.max_retries):
-            try:
-                await self._sleep_rate_limit()
-                return await crawler.arun(url=url)
-            except Exception as e:  # noqa: BLE001 - crawl có thể lỗi mạng đủ kiểu
-                last_exc = e
-                await asyncio.sleep(self.backoff_base_s * (2 ** attempt))
-        if last_exc is not None:
-            raise last_exc
-        return None
+    def _collect_results(
+        self, results, source: Source
+    ) -> tuple[list[RawDocument], list[str]]:
+        docs: list[RawDocument] = []
+        retry_urls: list[str] = []
+        for result in results:
+            if not result.success:
+                if result.status_code == 403:
+                    print(f"[CẢNH BÁO] robots.txt chặn crawl bài: {result.url}")
+                else:
+                    retry_urls.append(result.url)
+                continue
+            if not (result.markdown or "").strip():
+                continue
+            title = (result.metadata or {}).get("title") or source.name
+            docs.append(
+                RawDocument(
+                    source=source.name,
+                    url=result.url,
+                    title=title,
+                    markdown=str(result.markdown),
+                    source_type=source.source_type,
+                )
+            )
+        return docs, retry_urls
 
-    async def _sleep_rate_limit(self):  # pragma: no cover - cần mạng
-        jitter = random.uniform(0, self.rate_limit_jitter_s)
-        await asyncio.sleep(self.rate_limit_s + jitter)
+    def _extract_article_links(self, listing_result, base_url: str) -> list[str]:
+        """Chỉ xét link nội bộ (internal) — crawl4ai đã tự loại link ngoại miền
+        (quảng cáo/đối tác) khỏi danh sách này."""
+        seen: set[str] = set()
+        links: list[str] = []
+        internal = (listing_result.links or {}).get("internal", [])
+        for link in internal:
+            href = (link or {}).get("href")
+            if not href:
+                continue
+            full = urljoin(base_url, href)
+            path = urlparse(full).path
+            if self.article_link_pattern.search(path) and full not in seen:
+                seen.add(full)
+                links.append(full)
+        return links
