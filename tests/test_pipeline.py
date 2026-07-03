@@ -555,6 +555,197 @@ def test_sheets_context_row_column_order():
     assert score_item(["FPT", "FPT", "HPG"], 3) == 2 * 2 + 3
 
 
+def test_build_format_requests_covers_features_and_is_deterministic():
+    """Hàm thuần build_format_requests: đủ loại request + idempotent (xóa trước thêm)."""
+    from twmkt.sheets_board import (
+        build_format_requests, TabMeta, TABS,
+        SOURCES_HEADER, CONTEXT_HEADER,
+    )
+    tabs = []
+    for i, (name, header) in enumerate(TABS.items()):
+        # CONTEXT có sẵn 1 banding + 3 conditional -> phải sinh request XÓA.
+        if name == "CONTEXT":
+            tabs.append(TabMeta(name, header, i, n_rows=5, banding_ids=[7],
+                                cond_format_count=3))
+        else:
+            tabs.append(TabMeta(name, header, i, n_rows=3))
+    reqs = build_format_requests(tabs)
+    kinds = [next(iter(r)) for r in reqs]
+
+    for k in ("updateSheetProperties", "updateDimensionProperties", "repeatCell",
+              "updateBorders", "addBanding", "setDataValidation",
+              "addConditionalFormatRule"):
+        assert k in kinds, f"thiếu request {k}"
+    # idempotent: banding cũ + rule cũ của CONTEXT bị xóa trước khi thêm lại
+    assert kinds.count("deleteBanding") == 1
+    assert kinds.count("deleteConditionalFormatRule") == 3
+    assert kinds.count("addConditionalFormatRule") == 4   # APPROVE/PENDING/REJECT + score scale
+    # checkbox cho SOURCES.Enable + dropdown cho CONTEXT.Decision
+    sd = [r["setDataValidation"] for r in reqs if "setDataValidation" in r]
+    conds = [v["rule"]["condition"]["type"] for v in sd]
+    assert "BOOLEAN" in conds and "ONE_OF_LIST" in conds
+    # determinism = idempotent theo cấu trúc
+    assert build_format_requests(tabs) == reqs
+    assert SOURCES_HEADER[0].lower() == "enable" and "decision" in [c.lower() for c in CONTEXT_HEADER]
+
+
+def test_format_board_smoke_no_network():
+    """format_board dựng + gửi batchUpdate qua fake spreadsheet, KHÔNG chạm mạng."""
+    from twmkt.sheets_board import SheetsBoard, TABS
+
+    class _FakeWS:
+        def __init__(self, values): self._v = values
+        def get_all_values(self): return self._v
+
+    class _FakeSheet:
+        def __init__(self, meta): self._meta = meta; self.last_body = None
+        def fetch_sheet_metadata(self, params=None): return self._meta
+        def batch_update(self, body): self.last_body = body; return {}
+
+    sheets = []
+    for i, name in enumerate(TABS):
+        s = {"properties": {"sheetId": i, "title": name,
+                            "gridProperties": {"rowCount": 1000}}}
+        if name == "CONTEXT":     # có sẵn banding + rule -> nhánh idempotent
+            s["bandedRanges"] = [{"bandedRangeId": 42}]
+            s["conditionalFormats"] = [{}, {}]
+        sheets.append(s)
+
+    board = SheetsBoard(spreadsheet_id="SID", creds_path="creds")
+    board._sh = _FakeSheet({"sheets": sheets})          # tránh _spreadsheet() -> mạng
+    for name, header in TABS.items():
+        board._ws[name] = _FakeWS([header])             # chỉ header
+
+    n = board.format_board()
+    body = board._sh.last_body
+    assert n > 0 and body and len(body["requests"]) == n
+    kinds = {next(iter(r)) for r in body["requests"]}
+    assert {"updateSheetProperties", "repeatCell", "updateBorders", "addBanding",
+            "setDataValidation", "addConditionalFormatRule", "deleteBanding",
+            "deleteConditionalFormatRule"} <= kinds
+
+
+def test_write_context_dedup_by_url():
+    """write_context bỏ trùng theo url: url đã có -> không ghi, trả False."""
+    from twmkt.sheets_board import SheetsBoard, CONTEXT_HEADER
+
+    class _FakeWS:
+        def __init__(self, values): self._v = values; self.appended = []
+        def get_all_values(self): return self._v
+        def append_row(self, row, value_input_option=None):
+            self.appended.append(row); self._v.append(row)
+
+    board = SheetsBoard(spreadsheet_id="SID", creds_path="creds")
+    ws = _FakeWS([CONTEXT_HEADER,
+                  ["ts", "Bài cũ", "hook", "http://u/1", "2", "FPT", "PENDING", ""]])
+    board._ws["CONTEXT"] = ws
+
+    assert board.write_context(title="Trùng", hook_line="h", url="http://u/1",
+                               score=1) is False          # url đã có -> bỏ
+    assert ws.appended == []
+    assert board.write_context(title="Mới", hook_line="h", url="http://u/2",
+                               score=1) is True            # url mới -> ghi
+    assert len(ws.appended) == 1 and ws.appended[0][3] == "http://u/2"
+
+
+# --- Lập lịch tự động ------------------------------------------------------
+def test_schedule_parse_hhmm_and_config():
+    from twmkt.schedule import parse_hhmm, ScheduleConfig
+
+    assert parse_hhmm("08:30") == (8, 30) and parse_hhmm("0:00") == (0, 0)
+    for bad in ("24:00", "8:60", "abc", "8"):
+        try:
+            parse_hhmm(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"parse_hhmm phải lỗi với {bad!r}")
+
+    cfg = ScheduleConfig.from_settings(Settings({"schedule": {
+        "enabled": True, "mode": "daily", "at_times": ["08:30", "16:00"],
+        "timezone": "Asia/Ho_Chi_Minh", "interval_minutes": 45, "max_runs": 2,
+        "job": "run_pipeline",
+    }}))
+    assert cfg.enabled and cfg.mode == "daily"
+    assert cfg.at_times == [(8, 30), (16, 0)] and cfg.job == "run_pipeline"
+    # mode lạ -> ValueError
+    try:
+        ScheduleConfig(mode="hourly")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("mode không hợp lệ phải raise")
+
+
+def test_next_run_at_interval_and_daily():
+    from datetime import datetime, timezone
+    from twmkt.schedule import ScheduleConfig, next_run_at
+
+    utc = timezone.utc
+    itv = ScheduleConfig(mode="interval", interval_minutes=60)
+    t0 = datetime(2026, 7, 3, 8, 0, tzinfo=utc)
+    assert next_run_at(t0, itv) == datetime(2026, 7, 3, 9, 0, tzinfo=utc)
+
+    daily = ScheduleConfig(mode="daily", at_times=[(8, 30), (16, 0)])
+    # trước cả 2 mốc -> 08:30 hôm nay
+    assert next_run_at(datetime(2026, 7, 3, 7, 0, tzinfo=utc), daily) == \
+        datetime(2026, 7, 3, 8, 30, tzinfo=utc)
+    # giữa 2 mốc -> 16:00 hôm nay
+    assert next_run_at(datetime(2026, 7, 3, 9, 0, tzinfo=utc), daily) == \
+        datetime(2026, 7, 3, 16, 0, tzinfo=utc)
+    # sau cả 2 mốc -> 08:30 NGÀY MAI
+    assert next_run_at(datetime(2026, 7, 3, 17, 0, tzinfo=utc), daily) == \
+        datetime(2026, 7, 4, 8, 30, tzinfo=utc)
+
+
+def test_scheduler_loop_uses_fake_clock_no_wait():
+    from datetime import datetime, timedelta, timezone
+    from twmkt.schedule import ScheduleConfig, Scheduler
+
+    class _Clock:
+        def __init__(self, start): self.t = start
+        def now(self): return self.t
+        def sleep(self, s): self.t += timedelta(seconds=s)
+
+    utc = timezone.utc
+    t0 = datetime(2026, 7, 3, 8, 0, tzinfo=utc)
+    clock = _Clock(t0)
+    calls: list[datetime] = []
+    cfg = ScheduleConfig(mode="interval", interval_minutes=30, run_on_start=True,
+                         max_runs=3, jitter_s=0.0)
+    sched = Scheduler(lambda: calls.append(clock.now()) or "ok", cfg,
+                      now_fn=clock.now, sleep_fn=clock.sleep,
+                      jitter_fn=lambda a, b: 0.0, log=lambda *a: None)
+    n = sched.run()
+    assert n == 3
+    assert calls == [t0, t0 + timedelta(minutes=30), t0 + timedelta(minutes=60)]
+
+
+def test_scheduler_survives_job_error():
+    from datetime import datetime, timedelta, timezone
+    from twmkt.schedule import ScheduleConfig, Scheduler
+
+    class _Clock:
+        def __init__(self, start): self.t = start
+        def now(self): return self.t
+        def sleep(self, s): self.t += timedelta(seconds=s)
+
+    clock = _Clock(datetime(2026, 7, 3, 8, 0, tzinfo=timezone.utc))
+    n_calls = {"i": 0}
+
+    def flaky():
+        n_calls["i"] += 1
+        if n_calls["i"] == 2:
+            raise RuntimeError("boom")   # 1 lần lỗi KHÔNG được làm chết scheduler
+        return "ok"
+
+    cfg = ScheduleConfig(mode="interval", interval_minutes=10, run_on_start=True,
+                         max_runs=3, jitter_s=0.0)
+    sched = Scheduler(flaky, cfg, now_fn=clock.now, sleep_fn=clock.sleep,
+                      jitter_fn=lambda a, b: 0.0, log=lambda *a: None)
+    assert sched.run() == 3 and n_calls["i"] == 3
+
+
 def _run_all():
     fns = [v for k, v in globals().items() if k.startswith("test_")]
     for fn in fns:

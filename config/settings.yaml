@@ -131,3 +131,18 @@ sheets:
 publishers:
   - key: "console"
     enabled: true
+
+# --- Lập lịch tự động chạy crawl ------------------------------------
+# python scripts/run_scheduler.py            (loop nội bộ, cần enabled=true)
+# python scripts/run_scheduler.py --once     (1 lần — dùng cho OS scheduler)
+# python scripts/run_scheduler.py --print-os (in lệnh Task Scheduler/cron)
+schedule:
+  enabled: false                  # true = bật vòng lặp nội bộ
+  mode: "interval"                # interval | daily
+  interval_minutes: 60            # dùng khi mode=interval
+  at_times: ["08:30", "16:00"]    # dùng khi mode=daily (giờ địa phương theo timezone)
+  timezone: "Asia/Ho_Chi_Minh"
+  jitter_s: 30                    # nhiễu +[0..jitter_s]s tránh dồn tải đúng mốc
+  run_on_start: true              # chạy ngay 1 lần khi khởi động loop
+  max_runs: 0                     # 0 = vô hạn; >0 = dừng sau N lần (test/CI)
+  job: "review_to_sheet"          # review_to_sheet (crawl thật -> Sheet) | run_pipeline

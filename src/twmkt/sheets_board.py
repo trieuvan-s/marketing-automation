@@ -13,6 +13,7 @@ hàng, dựng hàng CONTEXT, chấm điểm) tách thành hàm module — test �
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from .models import Source, SourceType
@@ -115,6 +116,201 @@ def score_item(tickers: list[str] | None, macro_hits: int) -> int:
 
 
 # =====================================================================
+# UI / định dạng bảng — dựng request batchUpdate THUẦN (test không mạng).
+# Toàn bộ chỉ đổi ĐỊNH DẠNG, KHÔNG đổi dữ liệu. Idempotent: banding &
+# conditional format được XÓA cái cũ trước khi thêm lại (dựa metadata).
+# =====================================================================
+# Bảng màu (tông xanh Turtle Wealth), lưu hex -> chuyển sang {red,green,blue} 0..1.
+_C_HEADER_BG = "#0F5132"   # xanh đậm header
+_C_HEADER_FG = "#FFFFFF"
+_C_BAND = "#F3F3F3"        # xám nhạt hàng xen kẽ
+_C_BORDER = "#D9D9D9"      # xám khung
+_C_APPROVE = "#D9EAD3"     # xanh lá nhạt
+_C_PENDING = "#FFF2CC"     # vàng nhạt
+_C_REJECT = "#F4CCCC"      # đỏ nhạt
+_C_SCORE_MIN = "#FFFFFF"
+_C_SCORE_MID = "#B6D7A8"
+_C_SCORE_MAX = "#38761D"
+
+# Tab có cột đầu là mốc thời gian -> freeze cột đầu cho tiện cuộn ngang.
+_FREEZE_FIRST_COL = {"CONTEXT", "LOG", "ResearchReview", "ContentReview"}
+
+# Bề rộng cột (px) theo TÊN header (chữ thường). Cột dài rộng, score/Decision hẹp.
+_COL_WIDTH = {
+    "timestamp": 155, "title": 360, "hook": 320, "url": 260, "score": 70,
+    "tickers": 120, "decision": 110, "notes": 220, "level": 80, "message": 440,
+    "gate": 110, "label": 170, "payload": 380, "enable": 80, "key": 120,
+    "name": 210, "type": 90, "status": 110, "context": 380, "output": 380,
+    "prompt": 380, "template": 380,
+}
+_COL_WIDTH_DEFAULT = 140
+# Cột nội dung dài -> wrap text.
+_WRAP_COLS = {"title", "hook", "notes", "message", "payload", "context",
+              "output", "prompt", "template", "label"}
+
+
+def _rgb(hex_str: str) -> dict:
+    h = hex_str.lstrip("#")
+    return {"red": int(h[0:2], 16) / 255, "green": int(h[2:4], 16) / 255,
+            "blue": int(h[4:6], 16) / 255}
+
+
+@dataclass
+class TabMeta:
+    """Ảnh chụp 1 tab để dựng request (lấy từ metadata + đếm hàng dữ liệu)."""
+    name: str
+    header: list[str]
+    sheet_id: int
+    n_rows: int                 # số hàng CÓ dữ liệu (gồm header)
+    grid_rows: int = 1000       # rowCount cấp phát (giới hạn range)
+    banding_ids: list[int] = field(default_factory=list)
+    cond_format_count: int = 0
+
+    @property
+    def n_cols(self) -> int:
+        return len(self.header)
+
+    @property
+    def fmt_rows(self) -> int:
+        """Vùng định dạng có đệm để hàng mới thêm vào vẫn đẹp; cắt theo grid."""
+        return min(max(self.n_rows + 100, 200), self.grid_rows)
+
+
+def _grid_range(sid: int, r0: int, r1: int, c0: int, c1: int) -> dict:
+    return {"sheetId": sid, "startRowIndex": r0, "endRowIndex": r1,
+            "startColumnIndex": c0, "endColumnIndex": c1}
+
+
+def _set_validation(sid: int, r0: int, r1: int, c: int, rule: dict) -> dict:
+    return {"setDataValidation": {"range": _grid_range(sid, r0, r1, c, c + 1),
+                                  "rule": rule}}
+
+
+def _one_of_list(values: list[str]) -> dict:
+    return {
+        "condition": {"type": "ONE_OF_LIST",
+                      "values": [{"userEnteredValue": v} for v in values]},
+        "showCustomUi": True, "strict": False,   # không phủ nhận giá trị cũ (vd REVISE)
+    }
+
+
+def _text_eq_rule(sid: int, col: int, r0: int, r1: int, text: str, bg: str) -> dict:
+    return {"addConditionalFormatRule": {"index": 0, "rule": {
+        "ranges": [_grid_range(sid, r0, r1, col, col + 1)],
+        "booleanRule": {
+            "condition": {"type": "TEXT_EQ", "values": [{"userEnteredValue": text}]},
+            "format": {"backgroundColor": _rgb(bg)},
+        }}}}
+
+
+def _score_scale_rule(sid: int, col: int, r0: int, r1: int) -> dict:
+    return {"addConditionalFormatRule": {"index": 0, "rule": {
+        "ranges": [_grid_range(sid, r0, r1, col, col + 1)],
+        "gradientRule": {
+            "minpoint": {"color": _rgb(_C_SCORE_MIN), "type": "MIN"},
+            "midpoint": {"color": _rgb(_C_SCORE_MID), "type": "PERCENTILE", "value": "50"},
+            "maxpoint": {"color": _rgb(_C_SCORE_MAX), "type": "MAX"},
+        }}}}
+
+
+def build_format_requests(tabs: list[TabMeta]) -> list[dict]:
+    """Dựng list request cho spreadsheets().batchUpdate. Hàm THUẦN -> test được."""
+    reqs: list[dict] = []
+    for t in tabs:
+        reqs.extend(_tab_requests(t))
+    return reqs
+
+
+def _tab_requests(t: TabMeta) -> list[dict]:
+    sid, ncols = t.sheet_id, t.n_cols
+    low = [h.strip().lower() for h in t.header]
+    n_rows, fmt_rows = max(t.n_rows, 1), t.fmt_rows
+    is_readme = t.name == "README"
+    out: list[dict] = []
+
+    # 1) Freeze hàng tiêu đề (+ cột đầu nếu hợp).
+    frozen_cols = 1 if t.name in _FREEZE_FIRST_COL else 0
+    out.append({"updateSheetProperties": {
+        "properties": {"sheetId": sid, "gridProperties": {
+            "frozenRowCount": 1, "frozenColumnCount": frozen_cols}},
+        "fields": "gridProperties.frozenRowCount,gridProperties.frozenColumnCount"}})
+
+    # 2) Hàng header cao hơn.
+    out.append({"updateDimensionProperties": {
+        "range": {"sheetId": sid, "dimension": "ROWS", "startIndex": 0, "endIndex": 1},
+        "properties": {"pixelSize": 34}, "fields": "pixelSize"}})
+
+    # 3) Header: đậm, chữ trắng, nền xanh đậm, canh giữa, wrap.
+    out.append({"repeatCell": {
+        "range": _grid_range(sid, 0, 1, 0, ncols),
+        "cell": {"userEnteredFormat": {
+            "backgroundColor": _rgb(_C_HEADER_BG),
+            "horizontalAlignment": "CENTER", "verticalAlignment": "MIDDLE",
+            "wrapStrategy": "WRAP",
+            "textFormat": {"bold": True, "foregroundColor": _rgb(_C_HEADER_FG)}}},
+        "fields": "userEnteredFormat(backgroundColor,horizontalAlignment,"
+                  "verticalAlignment,wrapStrategy,textFormat)"}})
+
+    # 4) Kẻ khung quanh + giữa các ô, vùng dữ liệu (header + hàng có dữ liệu).
+    border = {"style": "SOLID", "color": _rgb(_C_BORDER)}
+    out.append({"updateBorders": {
+        "range": _grid_range(sid, 0, n_rows, 0, ncols),
+        "top": border, "bottom": border, "left": border, "right": border,
+        "innerHorizontal": border, "innerVertical": border}})
+
+    # 5) Banding: xóa cái cũ (idempotent) rồi thêm mới cho hàng dữ liệu.
+    for bid in t.banding_ids:
+        out.append({"deleteBanding": {"bandedRangeId": bid}})
+    if fmt_rows > 1:
+        out.append({"addBanding": {"bandedRange": {
+            "range": _grid_range(sid, 1, fmt_rows, 0, ncols),
+            "rowProperties": {"firstBandColor": _rgb("#FFFFFF"),
+                              "secondBandColor": _rgb(_C_BAND)}}}})
+
+    # 6) Bề rộng cột + wrap cột dài.
+    for i, colname in enumerate(low):
+        width = 720 if is_readme else _COL_WIDTH.get(colname, _COL_WIDTH_DEFAULT)
+        out.append({"updateDimensionProperties": {
+            "range": {"sheetId": sid, "dimension": "COLUMNS",
+                      "startIndex": i, "endIndex": i + 1},
+            "properties": {"pixelSize": width}, "fields": "pixelSize"}})
+        if is_readme or colname in _WRAP_COLS:
+            out.append({"repeatCell": {
+                "range": _grid_range(sid, 0, fmt_rows, i, i + 1),
+                "cell": {"userEnteredFormat": {"wrapStrategy": "WRAP"}},
+                "fields": "userEnteredFormat.wrapStrategy"}})
+
+    # 7) Data validation.
+    if "enable" in low:  # SOURCES.Enable / PROMPTS.Enable -> checkbox
+        c = low.index("enable")
+        out.append(_set_validation(sid, 1, fmt_rows, c,
+                                   {"condition": {"type": "BOOLEAN"}, "showCustomUi": True}))
+    if t.name == "CONTEXT" and "decision" in low:  # -> dropdown
+        c = low.index("decision")
+        out.append(_set_validation(sid, 1, fmt_rows, c,
+                                   _one_of_list(["PENDING", "APPROVE", "REJECT"])))
+    if t.name == "CONTENT" and "status" in low:  # -> dropdown (khi có tab CONTENT)
+        c = low.index("status")
+        out.append(_set_validation(sid, 1, fmt_rows, c,
+                                   _one_of_list(["PENDING", "RUNNING", "DONE", "ERROR"])))
+
+    # 8) Conditional formatting cho CONTEXT (xóa rule cũ trước -> idempotent).
+    if t.name == "CONTEXT":
+        for i in range(t.cond_format_count - 1, -1, -1):
+            out.append({"deleteConditionalFormatRule": {"sheetId": sid, "index": i}})
+        if "decision" in low:
+            c = low.index("decision")
+            out.append(_text_eq_rule(sid, c, 1, fmt_rows, "APPROVE", _C_APPROVE))
+            out.append(_text_eq_rule(sid, c, 1, fmt_rows, "PENDING", _C_PENDING))
+            out.append(_text_eq_rule(sid, c, 1, fmt_rows, "REJECT", _C_REJECT))
+        if "score" in low:
+            c = low.index("score")
+            out.append(_score_scale_rule(sid, c, 1, fmt_rows))
+
+    return out
+
+
+# =====================================================================
 # Adapter Google Sheets (gspread) — import hoãn.
 # =====================================================================
 class SheetsBoard:
@@ -167,7 +363,46 @@ class SheetsBoard:
                 sh.del_worksheet(sh.worksheet("Sheet1"))
             except gspread.GSpreadException:  # pragma: no cover
                 pass
+        # UI: định dạng bảng (idempotent, chỉ đổi format). Lỗi cosmetic KHÔNG
+        # được chặn luồng dữ liệu -> bắt và cảnh báo.
+        try:
+            self.format_board()
+        except Exception as e:  # pragma: no cover - cosmetic, không ảnh hưởng dữ liệu
+            print(f"[CẢNH BÁO] format_board lỗi (bỏ qua): {e}")
         return created
+
+    def format_board(self) -> int:
+        """Áp toàn bộ định dạng cho 6 tab qua 1 lần batchUpdate. Idempotent, KHÔNG
+        đổi dữ liệu. Trả về số request đã gửi (0 nếu không có tab nào)."""
+        sh = self._spreadsheet()
+        meta = sh.fetch_sheet_metadata(params={
+            "fields": "sheets(properties(sheetId,title,gridProperties(rowCount)),"
+                      "bandedRanges(bandedRangeId),conditionalFormats)"
+        })
+        by_title = {s["properties"]["title"]: s for s in meta.get("sheets", [])}
+
+        tabs: list[TabMeta] = []
+        for name, header in TABS.items():
+            s = by_title.get(name)
+            if not s:
+                continue
+            props = s["properties"]
+            grid_rows = props.get("gridProperties", {}).get("rowCount", 1000)
+            try:
+                n_rows = len(self._tab(name).get_all_values()) or 1
+            except Exception:  # pragma: no cover - tab đọc lỗi -> chỉ format header
+                n_rows = 1
+            banding_ids = [b["bandedRangeId"] for b in s.get("bandedRanges", [])
+                           if b.get("bandedRangeId") is not None]
+            cond_count = len(s.get("conditionalFormats", []))
+            tabs.append(TabMeta(name=name, header=header, sheet_id=props["sheetId"],
+                                n_rows=n_rows, grid_rows=grid_rows,
+                                banding_ids=banding_ids, cond_format_count=cond_count))
+
+        requests = build_format_requests(tabs)
+        if requests:
+            sh.batch_update({"requests": requests})
+        return len(requests)
 
     def _tab(self, name: str):
         if name not in self._ws:
@@ -184,12 +419,31 @@ class SheetsBoard:
         return sources_from_rows(rows)
 
     def write_context(self, *, title: str, hook_line: str, url: str, score: int,
-                      tickers: list[str] | None = None) -> None:
-        """Ghi 1 dòng chờ duyệt (PENDING) vào tab CONTEXT."""
-        self._tab("CONTEXT").append_row(
+                      tickers: list[str] | None = None) -> bool:
+        """Ghi 1 dòng chờ duyệt (PENDING) vào tab CONTEXT.
+
+        BỎ TRÙNG theo url: nếu url đã có ở tab CONTEXT thì KHÔNG ghi lại (idempotent
+        across-run). Trả về True nếu đã ghi, False nếu bỏ qua vì trùng.
+        """
+        ws = self._tab("CONTEXT")
+        if url and url.strip() in self._context_urls(ws):
+            return False
+        ws.append_row(
             context_row(title, hook_line, url, score, tickers),
             value_input_option="RAW",
         )
+        return True
+
+    def _context_urls(self, ws) -> set[str]:
+        """Tập url đã có ở tab CONTEXT (ánh xạ theo tên cột 'url')."""
+        rows = ws.get_all_values()
+        if not rows:
+            return set()
+        header = [c.strip().lower() for c in rows[0]]
+        if "url" not in header:
+            return set()
+        i = header.index("url")
+        return {r[i].strip() for r in rows[1:] if i < len(r) and r[i].strip()}
 
     def log(self, level: str, message: str) -> None:
         """Ghi 1 dòng nhật ký vào tab LOG."""

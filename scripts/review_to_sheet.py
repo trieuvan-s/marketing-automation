@@ -86,9 +86,9 @@ def run(*, limit: int = 3) -> dict:
                                   thesis=doc.title, key_points=[doc.title])
             hook = HookAgent(llm).run(brief)          # $0 (MockLLM -> fallback)
             score = score_item(doc.tickers, curation.macro_hits(full))
-            board.write_context(title=doc.title, hook_line=hook.headlines[0],
-                                 url=doc.url, score=score, tickers=doc.tickers)
-            written += 1
+            if board.write_context(title=doc.title, hook_line=hook.headlines[0],
+                                    url=doc.url, score=score, tickers=doc.tickers):
+                written += 1   # bỏ trùng theo url -> chỉ đếm dòng thực ghi
 
         msg = f"{s.name}: crawled {len(raw)} / kept {len(clean)} / stored {stored} / CONTEXT {written}"
         board.log("INFO", msg)
