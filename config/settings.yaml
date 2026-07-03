@@ -75,13 +75,79 @@ crawl:
 
 # --- Chuẩn hóa & lọc (Tầng 0 - free) --------------------------------
 curation:
-  tickers_file: "data/tickers_full.txt"   # whitelist đầy đủ (1526 mã); VN30 (tickers.txt) giữ cho test
-  vn30_file: "data/tickers.txt"            # whitelist nhỏ cho demo review_to_sheet (sạch, ít nhiễu)
+  tickers_file: "data/tickers_full.txt"   # whitelist đầy đủ (1526 mã); VN30 giữ cho test
+  watchlist_file: "data/tickers.txt"       # watchlist CỐ ĐỊNH (~325 mã) do team quản lý thủ công —
+                                            # đọc NGUYÊN file, không có script nào tính/sinh lại nó
   ambiguous_file: "data/tickers_ambiguous.txt"
   ambiguous_context_window: 40
   relevance:
     keywords_file: "data/keywords_macro.txt"
     min_macro_keywords: 2         # giữ bài macro khi >= n từ khóa (nếu 0 mã)
+
+  # Nhóm chủ đề (curation/enrich.py: classify) — khớp từ khóa không phân biệt
+  # hoa/thường trên title+thân bài. 1 bài có thể khớp nhiều/0 nhóm. Mirror
+  # DEFAULT_GROUPS trong code (dự phòng khi mục này rỗng) — đưa ra đây để team
+  # chỉnh không cần sửa code. LƯU Ý: "nhóm ƯU TIÊN hiện hành" (PriorityGroups)
+  # KHÔNG cấu hình ở đây — đọc LIVE từ tab SETTINGS trên Google Sheet mỗi lần
+  # chạy, để team đổi theo pha thị trường mà không cần sửa code/deploy lại
+  # (xem sheets_board.SheetsBoard.read_priority_groups).
+  groups:
+    ChinhSach:            # chính sách, pháp lý, quản lý nhà nước
+      - "nghị định"
+      - "nghị quyết"
+      - "thông tư"
+      - "chính phủ"
+      - "thủ tướng"
+      - "sbv"
+      - "ngân hàng nhà nước"
+      - "nhnn"
+      - "bộ tài chính"
+      - "quốc hội"
+      - "lãi suất điều hành"
+      - "room tín dụng"
+    ViMoVN:               # vĩ mô Việt Nam
+      - "gdp"
+      - "lạm phát"
+      - "cpi"
+      - "tỷ giá"
+      - "tỉ giá"
+      - "tăng trưởng"
+      - "xuất khẩu"
+      - "nhập khẩu"
+      - "fdi"
+      - "dự trữ ngoại hối"
+      - "cung tiền"
+    ViMoTheGioi:          # vĩ mô / thị trường quốc tế
+      - "fed"
+      - "phố wall"
+      - "dow jones"
+      - "nasdaq"
+      - "s&p"
+      - "ecb"
+      - "opec"
+      - "trung quốc"
+      - "nhật bản"
+      - "châu âu"
+      - "giá dầu"
+      - "vàng thế giới"
+      - "nga"
+      - "iran"
+      - "ukraine"
+      - "thị trường mỹ"
+      - "lao động mỹ"
+
+  # Trọng số marketing_score/hotness_pct (curation/enrich.py). Giá trị dưới =
+  # mặc định code hiện tại (đưa ra config để team chỉnh không cần sửa code).
+  score:
+    marketing:
+      ticker: 3      # mỗi mã CK khớp whitelist thanh khoản
+      macro: 2       # mỗi từ khóa vĩ mô khớp (data/keywords_macro.txt)
+      news: 1        # tín hiệu "đáng lên bài" (%, kỷ lục, tăng/giảm mạnh...)
+    hotness:
+      priority: 4    # bài thuộc >=1 nhóm ưu tiên hiện hành (đọc LIVE từ SETTINGS)
+      ticker: 2
+      news: 2
+      macro: 2
 
 # --- Knowledge / RAG (Tầng 0-1) -------------------------------------
 knowledge:
@@ -119,12 +185,13 @@ gates:
 
 # --- Google Sheets (control-plane cho cổng duyệt) -------------------
 sheets:
-  spreadsheet_id: "${TWMKT_SHEET_ID}"
-  creds_path: "${TWMKT_SHEETS_CREDS}"   # đường dẫn JSON service account
+  # Ưu tiên biến môi trường nếu đặt; nếu không, dùng giá trị dưới đây.
+  spreadsheet_id: "157b9WY9cpgLvzNP2TH8loN-6AiEy6YXmGpFdObYhNwo"
+  creds_path: "secrets/sa.json"        # forward slash chạy cả Windows/Linux
   research_worksheet: "ResearchReview"
   content_worksheet: "ContentReview"
   poll_interval_s: 15
-  timeout_s: 86400                # 24h; hết giờ -> hành động mặc định
+  timeout_s: 86400
   on_timeout: "reject"
 
 # --- Phân phối ------------------------------------------------------

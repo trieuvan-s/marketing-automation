@@ -71,6 +71,30 @@ python tests/test_pipeline.py      # hoặc: python -m pytest
 5. `AutoApproveGate` → cổng duyệt thật trên React UI (LangGraph interrupt).
 6. `ConsolePublisher` → adapter nền tảng thật (xem ghi chú giới hạn API trong `publishers/base.py`).
 
+## Cấu hình Google Sheets
+
+Demo duyệt qua Google Sheet (`scripts/review_to_sheet.py`: crawl thật → ghi
+title + hook lên tab CONTEXT để duyệt) cần **2 tham số**, đều nằm ở
+`config/settings.yaml` (mục `sheets`) và **CÓ THỂ THAY ĐỔI** trực tiếp tại đây:
+
+```yaml
+sheets:
+  spreadsheet_id: "157b9WY9cpgLvzNP2TH8loN-6AiEy6YXmGpFdObYhNwo"  # ID lấy từ URL Sheet
+  creds_path: "secrets/sa.json"        # đường dẫn khóa service account (JSON)
+```
+
+- **`spreadsheet_id`** — lấy từ URL: `https://docs.google.com/spreadsheets/d/<ID>/edit`.
+- **`creds_path`** — trỏ tới file khóa service account JSON.
+
+**Thứ tự ưu tiên** khi chạy: biến môi trường `TWMKT_SHEET_ID` / `TWMKT_SHEETS_CREDS`
+(nếu đặt, để override tạm) **→** giá trị trong `settings.yaml`. Không bắt buộc đặt
+biến môi trường; cả hai trống mới báo lỗi hướng dẫn.
+
+**Bí mật (`secrets/`)** — đặt file khóa `sa.json` vào thư mục `secrets/`. Thư mục
+này (và mọi `*.json`) đã nằm trong `.gitignore` nên **KHÔNG commit** khóa lên git.
+Chia sẻ Sheet với email service account (quyền Editor). Chi tiết:
+[docs/google_sheets_setup.md](docs/google_sheets_setup.md).
+
 ## Lưu ý
 
 - Tôn trọng robots.txt, rate-limit, ToS khi crawl.

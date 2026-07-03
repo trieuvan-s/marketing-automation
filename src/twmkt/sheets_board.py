@@ -2,14 +2,17 @@
 
 Một Sheet = control-plane khép kín (Sheets chỉ là UI, thay được):
   • SOURCES  — người dùng khai/nguồn crawl (cột Enable để bật/tắt).  [đầu vào]
-  • CONTEXT  — pipeline ghi title + hook (1 dòng/bài) để user DUYỆT.  [đầu ra chính]
+  • SETTINGS — cấu hình "sống" (Key/Value), vd PriorityGroups — đọc LIVE mỗi lần
+    chạy để team đổi theo pha thị trường mà KHÔNG cần sửa code/deploy lại.
+  • CONTEXT  — pipeline ghi title + hook + điểm/nhóm/độ hot (1 dòng/bài) để user
+    DUYỆT.  [đầu ra chính]
   • LOG      — nhật ký chạy (INFO/WARN/ERROR).
   • ResearchReview / ContentReview — 2 cổng duyệt (tương thích sheets_gate).
   • README   — hướng dẫn ngắn.
 
 Nguyên tắc adapter: mọi thứ chạm gspread nằm ở lớp SheetsBoard (import hoãn để
 môi trường offline/test KHÔNG cần thư viện/khoá). Logic thuần (dựng Source từ
-hàng, dựng hàng CONTEXT, chấm điểm) tách thành hàm module — test được, không mạng.
+hàng, dựng hàng CONTEXT, đọc SETTINGS) tách thành hàm module — test được, không mạng.
 """
 from __future__ import annotations
 
@@ -20,15 +23,21 @@ from .models import Source, SourceType
 
 # --- HỢP ĐỒNG CỘT từng tab (đổi ở đây = đổi header, giữ 1 nguồn sự thật) ------
 SOURCES_HEADER = ["Enable", "key", "name", "url", "type"]
-CONTEXT_HEADER = ["timestamp", "title", "hook", "url", "score", "tickers", "Decision", "Notes"]
+SETTINGS_HEADER = ["Key", "Value", "Notes"]
+# Use = checkbox người duyệt tự tick (chọn dùng cho sản xuất nội dung), ĐỘC LẬP
+# với Status (PENDING/APPROVE/REJECT — quy trình duyệt). Source = url bài (dùng
+# để bỏ trùng across-run). timestamp/tickers/Notes giữ ở cuối để audit/truy vết.
+CONTEXT_HEADER = ["Use", "Score", "Hot%", "Group", "Context", "Hook", "Source", "Status",
+                  "timestamp", "tickers", "Notes"]
 LOG_HEADER = ["timestamp", "level", "message"]
 REVIEW_HEADER = ["timestamp", "gate", "label", "payload", "Decision", "Notes"]
 README_HEADER = ["Turtle Wealth — Bảng duyệt nội dung (Sheets là UI, thay được)"]
 
-# 6 tab dựng lần đầu (tên : header). Thứ tự = thứ tự tab hiển thị.
+# 7 tab dựng lần đầu (tên : header). Thứ tự = thứ tự tab hiển thị.
 TABS: dict[str, list[str]] = {
     "README": README_HEADER,
     "SOURCES": SOURCES_HEADER,
+    "SETTINGS": SETTINGS_HEADER,
     "CONTEXT": CONTEXT_HEADER,
     "LOG": LOG_HEADER,
     "ResearchReview": REVIEW_HEADER,
@@ -37,12 +46,18 @@ TABS: dict[str, list[str]] = {
 
 _README_ROWS = [
     ["1) Khai nguồn ở tab SOURCES (đặt Enable = TRUE để bật)."],
-    ["2) Chạy scripts/review_to_sheet.py — bot crawl thật, ghi title + hook vào CONTEXT."],
-    ["3) Duyệt ở cột Decision của CONTEXT: APPROVE / REJECT / REVISE (mặc định PENDING)."],
+    ["2) Chỉnh nhóm ưu tiên ở tab SETTINGS (Key=PriorityGroups) — đọc LIVE mỗi lần chạy."],
+    ["3) Chạy scripts/review_to_sheet.py — bot crawl thật, ghi vào CONTEXT (sắp theo Hot% giảm dần)."],
+    ["4) Duyệt ở cột Status của CONTEXT: APPROVE / REJECT (mặc định PENDING); tick Use để chọn dùng."],
     ["Cột CONTEXT: " + " | ".join(CONTEXT_HEADER)],
 ]
 
-# Giá trị coi là "bật" ở cột Enable (không phân biệt hoa/thường).
+_SETTINGS_SEED_ROWS = [
+    ["PriorityGroups", "ChinhSach, ViMoVN",
+     "Nhóm ưu tiên hiện hành (đọc LIVE mỗi lần chạy) — sửa trực tiếp ở đây, không cần đổi code."],
+]
+
+# Giá trị coi là "bật" ở cột Enable/Use (không phân biệt hoa/thường).
 _TRUTHY = {"TRUE", "YES", "Y", "1", "X", "✓", "ĐÚNG", "BẬT"}
 
 
@@ -95,24 +110,52 @@ def sources_from_rows(rows: list[list[str]]) -> list[Source]:
     return out
 
 
-def context_row(title: str, hook_line: str, url: str, score: int,
-                tickers: list[str] | None = None, *, ts: str | None = None) -> list[str]:
-    """Một hàng CONTEXT ĐÚNG thứ tự CONTEXT_HEADER; Decision mặc định PENDING."""
+def context_row(*, title: str, hook_line: str, source_url: str, score: int, hot_pct: float,
+                group: str = "", tickers: list[str] | None = None,
+                ts: str | None = None) -> list[str]:
+    """Một hàng CONTEXT ĐÚNG thứ tự CONTEXT_HEADER.
+
+    Use mặc định FALSE (người duyệt tự tick), Status mặc định PENDING. Điểm
+    (score) và độ hot (hot_pct) do curation/enrich.py tính (marketing_score,
+    hotness_pct) — hàm này CHỈ xếp giá trị đúng cột, không tự chấm điểm.
+    """
     return [
-        ts or _now_iso(),
-        title,
-        hook_line,
-        url,
-        str(score),
-        ", ".join(tickers or []),
-        "PENDING",
-        "",
+        "FALSE",                 # Use
+        str(score),               # Score
+        f"{hot_pct:.1f}",         # Hot%
+        group,                     # Group
+        title,                     # Context
+        hook_line,                 # Hook
+        source_url,                 # Source (url bài)
+        "PENDING",                  # Status
+        ts or _now_iso(),           # timestamp
+        ", ".join(tickers or []),   # tickers
+        "",                          # Notes
     ]
 
 
-def score_item(tickers: list[str] | None, macro_hits: int) -> int:
-    """Điểm ưu tiên duyệt (tất định, $0): mỗi mã +2, mỗi từ khóa vĩ mô +1."""
-    return 2 * len(set(tickers or [])) + int(macro_hits)
+def settings_from_rows(rows: list[list[str]]) -> dict[str, str]:
+    """Dựng dict Key->Value từ hàng tab SETTINGS. Ánh xạ theo TÊN header."""
+    if not rows:
+        return {}
+    header = [c.strip().lower() for c in rows[0]]
+    if "key" not in header or "value" not in header:
+        return {}
+    ik, iv = header.index("key"), header.index("value")
+    out: dict[str, str] = {}
+    for row in rows[1:]:
+        if ik < len(row) and row[ik].strip():
+            out[row[ik].strip()] = row[iv].strip() if iv < len(row) and row[iv] else ""
+    return out
+
+
+def priority_groups_from_rows(rows: list[list[str]], *,
+                              default: list[str] | None = None) -> list[str]:
+    """Đọc Key=PriorityGroups (giá trị dạng 'A, B, C') từ hàng tab SETTINGS.
+    Thiếu khóa/tab rỗng -> `default`."""
+    raw = settings_from_rows(rows).get("PriorityGroups", "")
+    groups = [g.strip() for g in raw.split(",") if g.strip()]
+    return groups or list(default or [])
 
 
 # =====================================================================
@@ -132,16 +175,18 @@ _C_SCORE_MIN = "#FFFFFF"
 _C_SCORE_MID = "#B6D7A8"
 _C_SCORE_MAX = "#38761D"
 
-# Tab có cột đầu là mốc thời gian -> freeze cột đầu cho tiện cuộn ngang.
+# Freeze cột đầu cho tiện cuộn ngang (CONTEXT: cột đầu = Use, dễ tick/thấy khi
+# cuộn sang các cột nội dung dài hơn).
 _FREEZE_FIRST_COL = {"CONTEXT", "LOG", "ResearchReview", "ContentReview"}
 
-# Bề rộng cột (px) theo TÊN header (chữ thường). Cột dài rộng, score/Decision hẹp.
+# Bề rộng cột (px) theo TÊN header (chữ thường). Cột dài rộng, score/status hẹp.
 _COL_WIDTH = {
     "timestamp": 155, "title": 360, "hook": 320, "url": 260, "score": 70,
-    "tickers": 120, "decision": 110, "notes": 220, "level": 80, "message": 440,
+    "tickers": 150, "decision": 110, "notes": 220, "level": 80, "message": 440,
     "gate": 110, "label": 170, "payload": 380, "enable": 80, "key": 120,
     "name": 210, "type": 90, "status": 110, "context": 380, "output": 380,
     "prompt": 380, "template": 380,
+    "use": 60, "hot%": 80, "group": 140, "source": 260, "value": 260,
 }
 _COL_WIDTH_DEFAULT = 140
 # Cột nội dung dài -> wrap text.
@@ -285,8 +330,12 @@ def _tab_requests(t: TabMeta) -> list[dict]:
         c = low.index("enable")
         out.append(_set_validation(sid, 1, fmt_rows, c,
                                    {"condition": {"type": "BOOLEAN"}, "showCustomUi": True}))
-    if t.name == "CONTEXT" and "decision" in low:  # -> dropdown
-        c = low.index("decision")
+    if "use" in low:  # CONTEXT.Use -> checkbox (người duyệt tự tick, độc lập Status)
+        c = low.index("use")
+        out.append(_set_validation(sid, 1, fmt_rows, c,
+                                   {"condition": {"type": "BOOLEAN"}, "showCustomUi": True}))
+    if t.name == "CONTEXT" and "status" in low:  # -> dropdown quy trình duyệt
+        c = low.index("status")
         out.append(_set_validation(sid, 1, fmt_rows, c,
                                    _one_of_list(["PENDING", "APPROVE", "REJECT"])))
     if t.name == "CONTENT" and "status" in low:  # -> dropdown (khi có tab CONTENT)
@@ -298,13 +347,16 @@ def _tab_requests(t: TabMeta) -> list[dict]:
     if t.name == "CONTEXT":
         for i in range(t.cond_format_count - 1, -1, -1):
             out.append({"deleteConditionalFormatRule": {"sheetId": sid, "index": i}})
-        if "decision" in low:
-            c = low.index("decision")
+        if "status" in low:
+            c = low.index("status")
             out.append(_text_eq_rule(sid, c, 1, fmt_rows, "APPROVE", _C_APPROVE))
             out.append(_text_eq_rule(sid, c, 1, fmt_rows, "PENDING", _C_PENDING))
             out.append(_text_eq_rule(sid, c, 1, fmt_rows, "REJECT", _C_REJECT))
         if "score" in low:
             c = low.index("score")
+            out.append(_score_scale_rule(sid, c, 1, fmt_rows))
+        if "hot%" in low:  # thang màu độ hot, cùng kiểu gradient với score
+            c = low.index("hot%")
             out.append(_score_scale_rule(sid, c, 1, fmt_rows))
 
     return out
@@ -340,7 +392,7 @@ class SheetsBoard:
         return self._sh
 
     def ensure_tabs(self) -> list[str]:
-        """Tạo đủ 6 tab + hàng header nếu chưa có. Trả về tên các tab vừa tạo."""
+        """Tạo đủ 7 tab + hàng header nếu chưa có. Trả về tên các tab vừa tạo."""
         import gspread
 
         sh = self._spreadsheet()
@@ -356,6 +408,8 @@ class SheetsBoard:
                 ws.update("A1", [header])
             if name == "README" and len(ws.get_all_values()) <= 1:
                 ws.append_rows(_README_ROWS, value_input_option="RAW")
+            if name == "SETTINGS" and len(ws.get_all_values()) <= 1:
+                ws.append_rows(_SETTINGS_SEED_ROWS, value_input_option="RAW")
             self._ws[name] = ws
         # gspread tạo sẵn "Sheet1" khi tạo spreadsheet — dọn cho gọn (nếu có).
         if "Sheet1" in existing and len(sh.worksheets()) > len(TABS):
@@ -419,31 +473,79 @@ class SheetsBoard:
         return sources_from_rows(rows)
 
     def write_context(self, *, title: str, hook_line: str, url: str, score: int,
+                      hot_pct: float = 0.0, group: str = "",
                       tickers: list[str] | None = None) -> bool:
-        """Ghi 1 dòng chờ duyệt (PENDING) vào tab CONTEXT.
+        """Ghi 1 dòng chờ duyệt (PENDING, Use=FALSE) vào tab CONTEXT.
 
-        BỎ TRÙNG theo url: nếu url đã có ở tab CONTEXT thì KHÔNG ghi lại (idempotent
-        across-run). Trả về True nếu đã ghi, False nếu bỏ qua vì trùng.
+        BỎ TRÙNG theo url (cột Source): nếu url đã có ở tab CONTEXT thì KHÔNG
+        ghi lại (idempotent across-run). Trả về True nếu đã ghi, False nếu bỏ
+        qua vì trùng. Near-duplicate theo TIÊU ĐỀ (nhiều nguồn cùng đưa 1 tin)
+        không kiểm ở đây — gọi curation.enrich.is_near_duplicate với
+        context_titles() TRƯỚC khi gọi hàm này (tránh gọi mạng thừa khi đã biết
+        sẽ bỏ qua).
         """
         ws = self._tab("CONTEXT")
         if url and url.strip() in self._context_urls(ws):
             return False
         ws.append_row(
-            context_row(title, hook_line, url, score, tickers),
+            context_row(title=title, hook_line=hook_line, source_url=url, score=score,
+                       hot_pct=hot_pct, group=group, tickers=tickers),
             value_input_option="RAW",
         )
         return True
 
     def _context_urls(self, ws) -> set[str]:
-        """Tập url đã có ở tab CONTEXT (ánh xạ theo tên cột 'url')."""
+        """Tập url đã có ở tab CONTEXT (ánh xạ theo tên cột 'source')."""
         rows = ws.get_all_values()
         if not rows:
             return set()
         header = [c.strip().lower() for c in rows[0]]
-        if "url" not in header:
+        if "source" not in header:
             return set()
-        i = header.index("url")
+        i = header.index("source")
         return {r[i].strip() for r in rows[1:] if i < len(r) and r[i].strip()}
+
+    def context_titles(self) -> list[str]:
+        """Danh sách tiêu đề (cột Context) đã có trong CONTEXT — dùng để lọc
+        near-duplicate (curation.enrich.is_near_duplicate) TRƯỚC khi write_context."""
+        try:
+            rows = self._tab("CONTEXT").get_all_values()
+        except Exception:  # pragma: no cover - tab chưa tồn tại
+            return []
+        if not rows:
+            return []
+        header = [c.strip().lower() for c in rows[0]]
+        if "context" not in header:
+            return []
+        i = header.index("context")
+        return [r[i].strip() for r in rows[1:] if i < len(r) and r[i].strip()]
+
+    def read_priority_groups(self, *, default: list[str] | None = None) -> list[str]:
+        """Đọc LIVE tab SETTINGS (Key=PriorityGroups) — gọi lại MỖI LẦN chạy để
+        team đổi theo pha thị trường không cần sửa code/deploy lại. Thiếu
+        tab/khóa -> `default`."""
+        try:
+            rows = self._tab("SETTINGS").get_all_values()
+        except Exception:  # pragma: no cover - tab chưa tồn tại
+            return list(default or [])
+        return priority_groups_from_rows(rows, default=default)
+
+    def sort_context_by_hot(self) -> None:
+        """Sắp lại toàn bộ hàng dữ liệu CONTEXT theo Hot% GIẢM DẦN. No-op nếu
+        tab chưa có cột Hot% hoặc chưa có dữ liệu."""
+        import gspread
+
+        ws = self._tab("CONTEXT")
+        header = ws.row_values(1)
+        low = [h.strip().lower() for h in header]
+        if "hot%" not in low:
+            return
+        n_rows = len(ws.get_all_values())
+        if n_rows <= 2:   # 0-1 hàng dữ liệu, không cần sắp
+            return
+        col = low.index("hot%") + 1   # gspread sort dùng chỉ số cột 1-based
+        end_a1 = gspread.utils.rowcol_to_a1(n_rows, len(header))
+        ws.sort((col, "des"), range=f"A2:{end_a1}")
 
     def log(self, level: str, message: str) -> None:
         """Ghi 1 dòng nhật ký vào tab LOG."""

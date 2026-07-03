@@ -537,22 +537,25 @@ def test_sheets_sources_from_rows_filters_enable():
 
 
 def test_sheets_context_row_column_order():
-    """context_row đúng thứ tự CONTEXT_HEADER; Decision mặc định PENDING."""
-    from twmkt.sheets_board import context_row, CONTEXT_HEADER, score_item
+    """context_row đúng thứ tự CONTEXT_HEADER; Use=FALSE, Status=PENDING mặc định."""
+    from twmkt.sheets_board import context_row, CONTEXT_HEADER
 
-    row = context_row("Tiêu đề bài", "FPT: hook hấp dẫn", "http://u", 5,
-                      ["FPT", "HPG"], ts="2026-07-02T00:00:00+00:00")
+    row = context_row(title="Tiêu đề bài", hook_line="FPT: hook hấp dẫn",
+                      source_url="http://u", score=5, hot_pct=42.5, group="ChinhSach, ViMoVN",
+                      tickers=["FPT", "HPG"], ts="2026-07-02T00:00:00+00:00")
     assert len(row) == len(CONTEXT_HEADER)
     d = dict(zip(CONTEXT_HEADER, row))
+    assert d["Use"] == "FALSE"
+    assert d["Score"] == "5"
+    assert d["Hot%"] == "42.5"
+    assert d["Group"] == "ChinhSach, ViMoVN"
+    assert d["Context"] == "Tiêu đề bài"
+    assert d["Hook"] == "FPT: hook hấp dẫn"
+    assert d["Source"] == "http://u"
+    assert d["Status"] == "PENDING"
     assert d["timestamp"] == "2026-07-02T00:00:00+00:00"
-    assert d["title"] == "Tiêu đề bài"
-    assert d["hook"] == "FPT: hook hấp dẫn"
-    assert d["url"] == "http://u"
-    assert d["score"] == "5"
     assert d["tickers"] == "FPT, HPG"
-    assert d["Decision"] == "PENDING" and d["Notes"] == ""
-    # score_item: mỗi mã +2, mỗi từ khóa vĩ mô +1 (dedup mã)
-    assert score_item(["FPT", "FPT", "HPG"], 3) == 2 * 2 + 3
+    assert d["Notes"] == ""
 
 
 def test_build_format_requests_covers_features_and_is_deterministic():
@@ -579,14 +582,17 @@ def test_build_format_requests_covers_features_and_is_deterministic():
     # idempotent: banding cũ + rule cũ của CONTEXT bị xóa trước khi thêm lại
     assert kinds.count("deleteBanding") == 1
     assert kinds.count("deleteConditionalFormatRule") == 3
-    assert kinds.count("addConditionalFormatRule") == 4   # APPROVE/PENDING/REJECT + score scale
-    # checkbox cho SOURCES.Enable + dropdown cho CONTEXT.Decision
+    # APPROVE/PENDING/REJECT (Status) + score scale + Hot% scale
+    assert kinds.count("addConditionalFormatRule") == 5
+    # checkbox cho SOURCES.Enable + CONTEXT.Use, dropdown cho CONTEXT.Status
     sd = [r["setDataValidation"] for r in reqs if "setDataValidation" in r]
     conds = [v["rule"]["condition"]["type"] for v in sd]
-    assert "BOOLEAN" in conds and "ONE_OF_LIST" in conds
+    assert conds.count("BOOLEAN") == 2 and "ONE_OF_LIST" in conds
     # determinism = idempotent theo cấu trúc
     assert build_format_requests(tabs) == reqs
-    assert SOURCES_HEADER[0].lower() == "enable" and "decision" in [c.lower() for c in CONTEXT_HEADER]
+    assert SOURCES_HEADER[0].lower() == "enable"
+    low = [c.lower() for c in CONTEXT_HEADER]
+    assert {"use", "score", "hot%", "group", "context", "hook", "source", "status"} <= set(low)
 
 
 def test_format_board_smoke_no_network():
@@ -626,7 +632,7 @@ def test_format_board_smoke_no_network():
 
 
 def test_write_context_dedup_by_url():
-    """write_context bỏ trùng theo url: url đã có -> không ghi, trả False."""
+    """write_context bỏ trùng theo url (cột Source): url đã có -> không ghi, trả False."""
     from twmkt.sheets_board import SheetsBoard, CONTEXT_HEADER
 
     class _FakeWS:
@@ -636,8 +642,9 @@ def test_write_context_dedup_by_url():
             self.appended.append(row); self._v.append(row)
 
     board = SheetsBoard(spreadsheet_id="SID", creds_path="creds")
+    # Use|Score|Hot%|Group|Context|Hook|Source|Status|timestamp|tickers|Notes
     ws = _FakeWS([CONTEXT_HEADER,
-                  ["ts", "Bài cũ", "hook", "http://u/1", "2", "FPT", "PENDING", ""]])
+                  ["FALSE", "2", "10.0", "", "Bài cũ", "hook", "http://u/1", "PENDING", "ts", "FPT", ""]])
     board._ws["CONTEXT"] = ws
 
     assert board.write_context(title="Trùng", hook_line="h", url="http://u/1",
@@ -645,7 +652,113 @@ def test_write_context_dedup_by_url():
     assert ws.appended == []
     assert board.write_context(title="Mới", hook_line="h", url="http://u/2",
                                score=1) is True            # url mới -> ghi
-    assert len(ws.appended) == 1 and ws.appended[0][3] == "http://u/2"
+    source_idx = CONTEXT_HEADER.index("Source")
+    assert len(ws.appended) == 1 and ws.appended[0][source_idx] == "http://u/2"
+
+
+def test_sheets_settings_from_rows_and_priority_groups():
+    """settings_from_rows/priority_groups_from_rows: đọc Key/Value từ tab SETTINGS, $0."""
+    from twmkt.sheets_board import settings_from_rows, priority_groups_from_rows, SETTINGS_HEADER
+
+    rows = [
+        SETTINGS_HEADER,  # Key | Value | Notes
+        ["PriorityGroups", "ChinhSach, ViMoVN", "ghi chú"],
+        ["Khac", "x", ""],
+    ]
+    d = settings_from_rows(rows)
+    assert d == {"PriorityGroups": "ChinhSach, ViMoVN", "Khac": "x"}
+    assert priority_groups_from_rows(rows) == ["ChinhSach", "ViMoVN"]
+    # thiếu khóa / rỗng -> default
+    assert priority_groups_from_rows([SETTINGS_HEADER], default=["A", "B"]) == ["A", "B"]
+    assert priority_groups_from_rows([]) == []
+
+
+def test_sheets_context_titles_reads_context_column():
+    """context_titles(): đọc cột Context (đã đổi tên từ 'title') để chặn near-duplicate."""
+    from twmkt.sheets_board import SheetsBoard, CONTEXT_HEADER
+
+    class _FakeWS:
+        def __init__(self, values): self._v = values
+        def get_all_values(self): return self._v
+
+    board = SheetsBoard(spreadsheet_id="SID", creds_path="creds")
+    board._ws["CONTEXT"] = _FakeWS([
+        CONTEXT_HEADER,
+        ["FALSE", "1", "0.0", "", "Bài A", "h", "http://u/1", "PENDING", "ts", "", ""],
+        ["FALSE", "1", "0.0", "", "Bài B", "h", "http://u/2", "PENDING", "ts", "", ""],
+    ])
+    assert board.context_titles() == ["Bài A", "Bài B"]
+
+
+def test_sheets_sort_context_by_hot_noop_without_hot_column():
+    """sort_context_by_hot: no-op an toàn khi thiếu cột Hot% hoặc chưa có dữ liệu."""
+    from twmkt.sheets_board import SheetsBoard
+
+    class _FakeWS:
+        def __init__(self, values): self._v = values; self.sorted_with = None
+        def get_all_values(self): return self._v
+        def row_values(self, n): return self._v[0]
+        def sort(self, *specs, range=None): self.sorted_with = (specs, range)
+
+    board = SheetsBoard(spreadsheet_id="SID", creds_path="creds")
+    ws = _FakeWS([["timestamp", "title"], ["ts", "x"]])   # không có cột Hot%
+    board._ws["CONTEXT"] = ws
+    board.sort_context_by_hot()
+    assert ws.sorted_with is None                          # không gọi sort
+
+
+# --- curation/enrich.py: phân nhóm, điểm, near-duplicate ($0, không mạng) ---
+def test_enrich_classify_matches_3_groups():
+    """classify: khớp đúng nhóm theo từ khóa (không phân biệt hoa/thường), có mã -> CoPhieu."""
+    from twmkt.curation.enrich import classify
+
+    groups = {
+        "ChinhSach": ["nghị định", "chính phủ"],
+        "ViMoVN": ["lạm phát", "gdp"],
+        "ViMoTheGioi": ["fed", "trung quốc"],
+    }
+    assert classify("Chính phủ ban hành Nghị định mới", [], groups=groups) == ["ChinhSach"]
+    assert classify("Lạm phát và GDP quý 2", [], groups=groups) == ["ViMoVN"]
+    assert classify("FED họp bàn lãi suất", [], groups=groups) == ["ViMoTheGioi"]
+    # có mã -> luôn có nhãn CoPhieu (không phụ thuộc groups)
+    assert classify("Tin thường", ["FPT"], groups=groups) == ["CoPhieu"]
+    # không khớp gì, không mã -> Khac
+    assert classify("Tin không liên quan gì", [], groups=groups) == ["Khac"]
+
+
+def test_enrich_hotness_pct_increases_with_priority():
+    """hotness_pct: cùng nội dung, thuộc nhóm ưu tiên hiện hành -> Hot% CAO HƠN."""
+    from twmkt.curation.enrich import hotness_pct
+
+    text, tickers, labels = "GDP tăng trưởng mạnh", ["FPT"], ["ViMoVN"]
+    hot_no_priority = hotness_pct(text, tickers, labels, priority_groups=["ChinhSach"], macro_hits=2)
+    hot_priority = hotness_pct(text, tickers, labels, priority_groups=["ViMoVN"], macro_hits=2)
+    assert hot_priority > hot_no_priority
+    assert 0 <= hot_no_priority <= 100 and 0 <= hot_priority <= 100
+
+
+def test_enrich_in_priority_and_marketing_score():
+    from twmkt.curation.enrich import in_priority, marketing_score
+
+    assert in_priority(["ViMoVN"], ["ChinhSach", "ViMoVN"]) is True
+    assert in_priority(["CoPhieu"], ["ChinhSach", "ViMoVN"]) is False
+    assert in_priority([], ["ChinhSach"]) is False
+    # mỗi mã +w_ticker, macro +w_macro/hit, tín hiệu "đáng lên bài" (%, kỷ lục...) +w_news
+    s = marketing_score("Lợi nhuận tăng kỷ lục 50%", ["FPT", "HPG"], macro_hits=1,
+                        w_ticker=3, w_macro=2, w_news=1)
+    assert s == 2 * 3 + 1 * 2 + 2 * 1   # 2 mã, 1 macro hit, 2 tín hiệu (%, kỷ lục)
+
+
+def test_enrich_is_near_duplicate_catches_variants_not_different_titles():
+    """is_near_duplicate: bắt biến thể gần giống (dấu câu/khoảng trắng khác), không
+    báo nhầm 2 tiêu đề khác nội dung."""
+    from twmkt.curation.enrich import is_near_duplicate
+
+    seen = ["FPT báo lãi quý tăng trưởng hai chữ số"]
+    assert is_near_duplicate("FPT báo lãi quý, tăng trưởng hai chữ số!", seen) is True
+    assert is_near_duplicate("HPG: Sản lượng thép phục hồi mạnh", seen) is False
+    assert is_near_duplicate("", seen) is False
+    assert is_near_duplicate("Bất kỳ", []) is False
 
 
 # --- Lập lịch tự động ------------------------------------------------------
