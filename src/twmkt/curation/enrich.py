@@ -1,13 +1,15 @@
 """Làm giàu tất định ($0 token): phân nhóm chủ đề marketing, điểm marketing,
-và phát hiện trùng/near-duplicate. Config-driven (nhận nhóm từ khóa + trọng số).
+phân loại Field/Topic theo TAXONOMY, và phát hiện trùng/near-duplicate.
+Config-driven (nhận nhóm/taxonomy từ khóa + trọng số).
 
 Mục tiêu: để CONTEXT phản ánh ĐÚNG nhu cầu marketing — nổi bài đáng làm, gắn nhãn
-nhóm để đội lọc, và chặn lặp (như 2 dòng Vinhomes/Iran từ 2 lần chạy).
+nhóm/Field/Topic để đội lọc, và chặn lặp (như 2 dòng Vinhomes/Iran từ 2 lần chạy).
 """
 from __future__ import annotations
 
 import re
 import unicodedata
+from dataclasses import dataclass, field
 
 # Nhóm chủ đề mặc định (settings.yaml có thể override).
 DEFAULT_GROUPS: dict[str, list[str]] = {
@@ -105,3 +107,68 @@ def hotness_pct(text: str, tickers: list[str], labels: list[str], *,
            + w_macro * min(int(macro_hits), 4))
     max_raw = w_priority + w_ticker * 3 + w_news * 4 + w_macro * 4
     return round(100 * raw / max_raw) if max_raw else 0
+
+
+# --- TAXONOMY: Field/Topic do user định nghĩa (tab TAXONOMY: Field|Topic|Keywords) ---
+@dataclass
+class TaxonomyRow:
+    """1 hàng TAXONOMY: (Field, Topic) khớp khi text chứa >=1 từ khóa."""
+    field: str
+    topic: str
+    keywords: list[str] = field(default_factory=list)
+
+
+# Mặc định khi TAXONOMY sheet/config trống (dự phòng, offline/test).
+DEFAULT_TAXONOMY: list[TaxonomyRow] = [
+    TaxonomyRow("ChinhSach", "TienTe", ["lãi suất điều hành", "room tín dụng",
+                                        "ngân hàng nhà nước", "nhnn", "sbv"]),
+    TaxonomyRow("ChinhSach", "PhapLy", ["nghị định", "nghị quyết", "thông tư",
+                                        "luật", "quốc hội"]),
+    TaxonomyRow("ViMo", "TrongNuoc", ["gdp", "lạm phát", "cpi", "tăng trưởng",
+                                      "xuất khẩu", "nhập khẩu", "fdi"]),
+    TaxonomyRow("ViMo", "TheGioi", ["fed", "ecb", "phố wall", "dow jones",
+                                    "trung quốc", "giá dầu"]),
+    TaxonomyRow("DoanhNghiep", "KetQuaKinhDoanh", ["lợi nhuận", "doanh thu", "cổ tức"]),
+    TaxonomyRow("DoanhNghiep", "BatDongSan", ["bất động sản", "dự án", "quy hoạch"]),
+]
+
+
+def taxonomy_from_settings(settings) -> list[TaxonomyRow]:
+    """Đọc curation.taxonomy từ settings.yaml (config-first); rỗng -> DEFAULT_TAXONOMY."""
+    raw = settings.get("curation.taxonomy", []) or []
+    rows = [
+        TaxonomyRow(
+            field=str(r.get("field", "")).strip(),
+            topic=str(r.get("topic", "")).strip(),
+            keywords=[str(k).lower() for k in (r.get("keywords") or [])],
+        )
+        for r in raw
+        if r.get("field")
+    ]
+    return rows or DEFAULT_TAXONOMY
+
+
+def classify_field_topic(text: str, *, hints: list[str] | None = None,
+                         taxonomy: list[TaxonomyRow] | None = None) -> tuple[str, str]:
+    """Trả (field, topic) khớp NHIỀU tín hiệu nhất trong `text` theo TAXONOMY.
+
+    Mỗi từ khóa khớp trong `text` (không phân biệt hoa/thường) +1 điểm. Mỗi
+    `hints` (vd <category> RSS, SOURCES.Field) khớp field (chứa nhau, không
+    phân biệt hoa/thường) +2 điểm — ưu tiên gợi ý nhưng KHÔNG override tuyệt
+    đối (bằng chứng từ khóa mạnh vẫn có thể thắng). Không khớp gì -> ("Khac", "")."""
+    taxonomy = taxonomy or DEFAULT_TAXONOMY
+    low = text.lower()
+    hint_low = [h.strip().lower() for h in (hints or []) if h and h.strip()]
+
+    best: TaxonomyRow | None = None
+    best_score = 0
+    for row in taxonomy:
+        score = sum(1 for kw in row.keywords if kw in low)
+        row_field_low = row.field.lower()
+        if any(h in row_field_low or row_field_low in h for h in hint_low):
+            score += 2
+        if score > best_score:
+            best_score, best = score, row
+    if best is None:
+        return "Khac", ""
+    return best.field, best.topic

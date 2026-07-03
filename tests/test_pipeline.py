@@ -95,7 +95,7 @@ def test_load_settings_reads_keys():
     assert s.get("crawl.limit_per_source") == 12
     assert s.get("knowledge.chunk_size") == 500
     assert s.get("gates.research.type") == "console"
-    assert len(s.enabled_sources()) == 3        # 3 nguồn CafeF đã bật
+    assert len(s.enabled_sources()) == 9        # 3 CafeF html + 6 nguồn rss (CafeF/CafeBiz/Vietstock)
     # whitelist trỏ sang danh sách mã đầy đủ (VN30 giữ cho test)
     assert s.get("curation.tickers_file") == "data/tickers_full.txt"
 
@@ -516,42 +516,55 @@ def test_full_ticker_whitelist_loads_and_includes_vn30():
 
 
 def test_sheets_sources_from_rows_filters_enable():
-    """sources_from_rows: chỉ giữ hàng Enable bật, ánh xạ cột theo tên header, $0."""
+    """sources_from_rows (Enable|Publisher|FeedURL|Type|Field|Interval|Priority):
+    chỉ giữ hàng Enable bật, ánh xạ cột theo tên header, sắp theo Priority giảm
+    dần, Type lạ/rỗng -> mặc định html, $0."""
     from twmkt.sheets_board import sources_from_rows, SOURCES_HEADER
-    from twmkt.models import SourceType
 
     rows = [
-        SOURCES_HEADER,  # Enable | key | name | url | type
-        ["TRUE", "dn", "CafeF - Doanh nghiệp", "https://cafef.vn/doanh-nghiep.chn", "news"],
-        ["FALSE", "vm", "CafeF - Vĩ mô", "https://cafef.vn/vi-mo-dau-tu.chn", "news"],
-        ["", "x", "Tắt mặc định", "https://cafef.vn/x.chn", "news"],
-        ["yes", "qt", "Quốc tế", "https://cafef.vn/tai-chinh-quoc-te.chn", "other"],
-        ["TRUE", "no", "Thiếu url", "", "news"],   # không url -> bỏ
+        SOURCES_HEADER,  # Enable | Publisher | FeedURL | Type | Field | Interval | Priority
+        ["TRUE", "CafeF - Doanh nghiệp", "https://cafef.vn/doanh-nghiep.chn", "html", "DoanhNghiep", "", "3"],
+        ["FALSE", "CafeF - Vĩ mô", "https://cafef.vn/vi-mo-dau-tu.chn", "html", "ViMo", "", "9"],
+        ["", "Tắt mặc định", "https://cafef.vn/x.chn", "html", "", "", "1"],
+        ["yes", "CafeF - RSS Chứng khoán", "https://cafef.vn/thi-truong-chung-khoan.rss",
+         "rss", "ChungKhoan", "60", "5"],
+        ["TRUE", "Type lạ -> html", "https://x.com/y.rss", "atom", "", "", "0"],
+        ["TRUE", "Thiếu url", "", "rss", "", "", "9"],   # không FeedURL -> bỏ
     ]
     srcs = sources_from_rows(rows)
-    assert [s.name for s in srcs] == ["CafeF - Doanh nghiệp", "Quốc tế"]
-    assert srcs[0].url == "https://cafef.vn/doanh-nghiep.chn"
-    assert srcs[0].source_type is SourceType.NEWS
-    assert srcs[1].source_type is SourceType.OTHER
+    # bỏ hàng Enable tắt/rỗng + thiếu url; SẮP theo Priority giảm dần (5, 3, 0)
+    assert [s.name for s in srcs] == ["CafeF - RSS Chứng khoán", "CafeF - Doanh nghiệp", "Type lạ -> html"]
+    assert srcs[0].url == "https://cafef.vn/thi-truong-chung-khoan.rss"
+    assert srcs[0].fetch_type == "rss" and srcs[0].field_hint == "ChungKhoan"
+    assert srcs[0].interval_minutes == 60 and srcs[0].priority == 5
+    assert srcs[1].fetch_type == "html" and srcs[1].priority == 3
+    assert srcs[2].fetch_type == "html"          # Type "atom" lạ -> mặc định html
     assert sources_from_rows([]) == []                 # rỗng -> []
 
 
 def test_sheets_context_row_column_order():
-    """context_row đúng thứ tự CONTEXT_HEADER; Use=FALSE, Status=PENDING mặc định."""
+    """context_row đúng thứ tự CONTEXT_HEADER; Use=FALSE, Status=PENDING mặc định;
+    Publisher/Field/Topic/Sources (mô hình 3 lớp) xếp đúng cột."""
     from twmkt.sheets_board import context_row, CONTEXT_HEADER
 
     row = context_row(title="Tiêu đề bài", hook_line="FPT: hook hấp dẫn",
-                      source_url="http://u", score=5, hot_pct=42.5, group="ChinhSach, ViMoVN",
+                      source_url="http://u", score=5, hot_pct=42.5,
+                      publisher="CafeF - RSS Chứng khoán", field="ChungKhoan", topic="ThiTruong",
+                      group="ChinhSach, ViMoVN", other_sources=["http://u2", "http://u3"],
                       tickers=["FPT", "HPG"], ts="2026-07-02T00:00:00+00:00")
     assert len(row) == len(CONTEXT_HEADER)
     d = dict(zip(CONTEXT_HEADER, row))
     assert d["Use"] == "FALSE"
     assert d["Score"] == "5"
     assert d["Hot%"] == "42.5"
+    assert d["Publisher"] == "CafeF - RSS Chứng khoán"
+    assert d["Field"] == "ChungKhoan"
+    assert d["Topic"] == "ThiTruong"
     assert d["Group"] == "ChinhSach, ViMoVN"
     assert d["Context"] == "Tiêu đề bài"
     assert d["Hook"] == "FPT: hook hấp dẫn"
     assert d["Source"] == "http://u"
+    assert d["Sources"] == "http://u2, http://u3"
     assert d["Status"] == "PENDING"
     assert d["timestamp"] == "2026-07-02T00:00:00+00:00"
     assert d["tickers"] == "FPT, HPG"
@@ -633,7 +646,7 @@ def test_format_board_smoke_no_network():
 
 def test_write_context_dedup_by_url():
     """write_context bỏ trùng theo url (cột Source): url đã có -> không ghi, trả False."""
-    from twmkt.sheets_board import SheetsBoard, CONTEXT_HEADER
+    from twmkt.sheets_board import SheetsBoard, CONTEXT_HEADER, context_row
 
     class _FakeWS:
         def __init__(self, values): self._v = values; self.appended = []
@@ -642,9 +655,9 @@ def test_write_context_dedup_by_url():
             self.appended.append(row); self._v.append(row)
 
     board = SheetsBoard(spreadsheet_id="SID", creds_path="creds")
-    # Use|Score|Hot%|Group|Context|Hook|Source|Status|timestamp|tickers|Notes
-    ws = _FakeWS([CONTEXT_HEADER,
-                  ["FALSE", "2", "10.0", "", "Bài cũ", "hook", "http://u/1", "PENDING", "ts", "FPT", ""]])
+    existing_row = context_row(title="Bài cũ", hook_line="hook", source_url="http://u/1",
+                               score=2, hot_pct=10.0, tickers=["FPT"], ts="ts")
+    ws = _FakeWS([CONTEXT_HEADER, existing_row])
     board._ws["CONTEXT"] = ws
 
     assert board.write_context(title="Trùng", hook_line="h", url="http://u/1",
@@ -675,7 +688,7 @@ def test_sheets_settings_from_rows_and_priority_groups():
 
 def test_sheets_context_titles_reads_context_column():
     """context_titles(): đọc cột Context (đã đổi tên từ 'title') để chặn near-duplicate."""
-    from twmkt.sheets_board import SheetsBoard, CONTEXT_HEADER
+    from twmkt.sheets_board import SheetsBoard, CONTEXT_HEADER, context_row
 
     class _FakeWS:
         def __init__(self, values): self._v = values
@@ -684,8 +697,8 @@ def test_sheets_context_titles_reads_context_column():
     board = SheetsBoard(spreadsheet_id="SID", creds_path="creds")
     board._ws["CONTEXT"] = _FakeWS([
         CONTEXT_HEADER,
-        ["FALSE", "1", "0.0", "", "Bài A", "h", "http://u/1", "PENDING", "ts", "", ""],
-        ["FALSE", "1", "0.0", "", "Bài B", "h", "http://u/2", "PENDING", "ts", "", ""],
+        context_row(title="Bài A", hook_line="h", source_url="http://u/1", score=1, hot_pct=0.0, ts="ts"),
+        context_row(title="Bài B", hook_line="h", source_url="http://u/2", score=1, hot_pct=0.0, ts="ts"),
     ])
     assert board.context_titles() == ["Bài A", "Bài B"]
 
@@ -759,6 +772,135 @@ def test_enrich_is_near_duplicate_catches_variants_not_different_titles():
     assert is_near_duplicate("HPG: Sản lượng thép phục hồi mạnh", seen) is False
     assert is_near_duplicate("", seen) is False
     assert is_near_duplicate("Bất kỳ", []) is False
+
+
+# --- Mô hình thu thập 3 lớp: RSS (tầng 1) + Field/Topic + dedup chéo nguồn ---
+_RSS_FIXTURE = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+<title>Kênh mẫu</title>
+<item>
+  <title>FPT báo lãi quý tăng trưởng hai chữ số</title>
+  <link>https://cafef.vn/fpt-bao-lai-quy-188260703000001.chn</link>
+  <description>&lt;a href="x"&gt;&lt;img src="y"&gt;&lt;/a&gt; Doanh thu và lợi nhuận đều tăng.</description>
+  <category>Chứng khoán</category>
+  <pubDate>Fri, 03 Jul 2026 16:12:00 +0700</pubDate>
+</item>
+<item>
+  <title>HPG: Sản lượng thép phục hồi</title>
+  <link>https://cafef.vn/hpg-san-luong-188260703000002.chn</link>
+  <description>Sản lượng tiêu thụ thép tăng nhờ nhu cầu xây dựng.</description>
+  <pubDate>Fri, 03 Jul 26 09:00:00 +0700</pubDate>
+</item>
+<item>
+  <title>Thiếu link -> bị bỏ</title>
+  <description>Không có link.</description>
+</item>
+</channel></rss>"""
+
+
+def test_rss_parse_rss_fixture():
+    """parse_rss: trích title/link/summary (bỏ thẻ HTML)/category/pubDate; bỏ
+    item thiếu <link>; XML hỏng -> [] (không raise). $0, không mạng."""
+    from twmkt.collectors.rss_collector import parse_rss
+
+    items = parse_rss(_RSS_FIXTURE)
+    assert len(items) == 2                              # item thiếu link bị bỏ
+    a, b = items
+    assert a.title == "FPT báo lãi quý tăng trưởng hai chữ số"
+    assert a.link == "https://cafef.vn/fpt-bao-lai-quy-188260703000001.chn"
+    assert a.summary == "Doanh thu và lợi nhuận đều tăng."   # đã bỏ thẻ <a>/<img>
+    assert a.category == "Chứng khoán"
+    assert a.published_at is not None and a.published_at.year == 2026
+    assert b.category == ""                              # item không có <category>
+    assert parse_rss("<not><valid xml") == []             # XML hỏng -> [] không raise
+    assert parse_rss("") == []
+
+
+def test_rss_collector_collect_maps_items_to_raw_documents():
+    """RssCollector.collect: parse_rss -> RawDocument (markdown=summary, CHƯA
+    fetch full bài), category_hint mang gợi ý Field. Ghi đè _fetch (thay _run_all
+    không hỗ trợ fixture pytest) -> $0, không mạng."""
+    from twmkt.collectors.rss_collector import RssCollector
+    from twmkt.models import Source, SourceType
+
+    c = RssCollector()
+    c._fetch = lambda url: _RSS_FIXTURE   # ghi đè instance -> không cần mạng
+    src = Source("CafeF - RSS Chứng khoán", "https://cafef.vn/x.rss", SourceType.NEWS, fetch_type="rss")
+    docs = c.collect(src, limit=10)
+    assert len(docs) == 2
+    assert docs[0].source == "CafeF - RSS Chứng khoán"
+    assert docs[0].markdown == "Doanh thu và lợi nhuận đều tăng."   # summary, KHÔNG phải full bài
+    assert docs[0].category_hint == "Chứng khoán"
+    assert c.collect(src, limit=1)[0] == docs[0]         # limit áp dụng đúng
+
+
+def test_http_collector_fetch_and_extract_reuses_extract_article():
+    """_fetch_and_extract (dùng chung bởi collect() và fetch_one()): tra spec
+    theo source.url, gọi extract_article, dựng RawDocument. respect_robots=False
+    + fake client -> $0, không mạng thật."""
+    from twmkt.collectors.http_collector import HttpFirstCollector, SourceSpec
+    from twmkt.models import Source, SourceType
+    import re
+
+    html = ('<html><body><h1>Tiêu đề bài</h1>'
+           '<div class="detail-content afcbc-body"><p>Nội dung đầy đủ.</p></div>'
+           '</body></html>')
+
+    class _FakeResp:
+        status_code = 200
+        text = html
+
+    class _FakeClient:
+        def get(self, url): return _FakeResp()
+
+    spec = SourceSpec(article_url_re=re.compile(r".chn$"))
+    c = HttpFirstCollector(specs={"https://cafef.vn/x.rss": spec}, respect_robots=False)
+    src = Source("CafeF - RSS X", "https://cafef.vn/x.rss", SourceType.NEWS, fetch_type="rss")
+    doc = c._fetch_and_extract(_FakeClient(), src, spec, "https://cafef.vn/bai-that-123456.chn")
+    assert doc is not None
+    assert doc.title == "Tiêu đề bài"
+    assert doc.markdown == "Nội dung đầy đủ."
+    assert doc.url == "https://cafef.vn/bai-that-123456.chn"
+    assert doc.source == "CafeF - RSS X"
+
+
+def test_enrich_classify_field_topic_uses_taxonomy_and_hints():
+    """classify_field_topic: khớp từ khóa TAXONOMY; hint (category RSS/SOURCES.Field)
+    khớp field -> ưu tiên nhưng không override tuyệt đối khi có bằng chứng khác."""
+    from twmkt.curation.enrich import classify_field_topic, TaxonomyRow
+
+    taxonomy = [
+        TaxonomyRow("ChinhSach", "PhapLy", ["nghị định", "luật"]),
+        TaxonomyRow("ViMo", "TrongNuoc", ["gdp", "lạm phát"]),
+    ]
+    assert classify_field_topic("Chính phủ ban hành Nghị định mới", taxonomy=taxonomy) == (
+        "ChinhSach", "PhapLy")
+    assert classify_field_topic("Không khớp từ khóa nào", taxonomy=taxonomy) == ("Khac", "")
+    # hint khớp field (không phân biệt hoa/thường) -> chọn đúng field dù 0 từ khóa khớp
+    assert classify_field_topic("tin chung chung", hints=["vimo"], taxonomy=taxonomy) == (
+        "ViMo", "TrongNuoc")
+
+
+def test_review_cluster_near_duplicates_merges_cross_source():
+    """cluster_near_duplicates (review_to_sheet.py): gộp near-duplicate CHÉO
+    NGUỒN theo tiêu đề, giữ đại diện đầu tiên, url các báo khác vào other_urls."""
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+    import review_to_sheet as rts
+    from twmkt.models import CleanDocument
+
+    docs = [
+        CleanDocument(source="CafeF", url="http://a/1", title="FPT báo lãi quý tăng mạnh", markdown="m1"),
+        CleanDocument(source="Vietstock", url="http://b/1", title="FPT báo lãi quý, tăng mạnh!", markdown="m2"),
+        CleanDocument(source="CafeBiz", url="http://c/1", title="FPT báo lãi quý tăng mạnh.", markdown="m3"),
+        CleanDocument(source="CafeF", url="http://a/2", title="HPG sản lượng thép phục hồi", markdown="m4"),
+    ]
+    clusters = rts.cluster_near_duplicates(docs)
+    assert len(clusters) == 2                            # 3 bài FPT gộp còn 1 cụm + 1 cụm HPG
+    fpt_cluster = next(cl for cl in clusters if cl["doc"].url == "http://a/1")
+    assert fpt_cluster["other_urls"] == ["http://b/1", "http://c/1"]
+    hpg_cluster = next(cl for cl in clusters if cl["doc"].url == "http://a/2")
+    assert hpg_cluster["other_urls"] == []
+    assert rts.cluster_near_duplicates([]) == []
 
 
 # --- Lập lịch tự động ------------------------------------------------------

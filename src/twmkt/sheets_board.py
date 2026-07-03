@@ -1,43 +1,57 @@
 """SheetsBoard — Google Sheet làm "bảng điều khiển" cho vòng duyệt của con người.
 
 Một Sheet = control-plane khép kín (Sheets chỉ là UI, thay được):
-  • SOURCES  — người dùng khai/nguồn crawl (cột Enable để bật/tắt).  [đầu vào]
+  • SOURCES  — nguồn crawl, mô hình 3 lớp thu thập: Enable|Publisher|FeedURL|
+    Type(rss/html)|Field|Interval|Priority. Type chọn collector (rss=phát hiện
+    nhẹ, html=full ngay); Field là gợi ý taxonomy cho cả nguồn.  [đầu vào]
   • SETTINGS — cấu hình "sống" (Key/Value), vd PriorityGroups — đọc LIVE mỗi lần
     chạy để team đổi theo pha thị trường mà KHÔNG cần sửa code/deploy lại.
-  • CONTEXT  — pipeline ghi title + hook + điểm/nhóm/độ hot (1 dòng/bài) để user
-    DUYỆT.  [đầu ra chính]
+  • TAXONOMY — Field|Topic|Keywords do user định nghĩa (curation.enrich.classify_field_topic
+    đọc bảng này để gắn Field/Topic cho từng bài).
+  • CONTEXT  — pipeline ghi title + hook + điểm/nhóm/Field/Topic/độ hot (1 dòng/
+    bài, ĐÃ gộp near-duplicate chéo nguồn) để user DUYỆT.  [đầu ra chính]
   • LOG      — nhật ký chạy (INFO/WARN/ERROR).
   • ResearchReview / ContentReview — 2 cổng duyệt (tương thích sheets_gate).
   • README   — hướng dẫn ngắn.
 
 Nguyên tắc adapter: mọi thứ chạm gspread nằm ở lớp SheetsBoard (import hoãn để
 môi trường offline/test KHÔNG cần thư viện/khoá). Logic thuần (dựng Source từ
-hàng, dựng hàng CONTEXT, đọc SETTINGS) tách thành hàm module — test được, không mạng.
+hàng, dựng hàng CONTEXT, đọc SETTINGS/TAXONOMY) tách thành hàm module — test
+được, không mạng.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from .curation.enrich import TaxonomyRow
 from .models import Source, SourceType
 
 # --- HỢP ĐỒNG CỘT từng tab (đổi ở đây = đổi header, giữ 1 nguồn sự thật) ------
-SOURCES_HEADER = ["Enable", "key", "name", "url", "type"]
+# Mô hình 3 lớp thu thập: Type=rss -> RssCollector (phát hiện nhẹ, tầng 1);
+# Type=html -> HttpFirstCollector (full ngay). Field = gợi ý taxonomy cho CẢ
+# nguồn (kết hợp với <category> RSS + từ khóa TAXONOMY ở classify_field_topic).
+SOURCES_HEADER = ["Enable", "Publisher", "FeedURL", "Type", "Field", "Interval", "Priority"]
 SETTINGS_HEADER = ["Key", "Value", "Notes"]
+TAXONOMY_HEADER = ["Field", "Topic", "Keywords"]
 # Use = checkbox người duyệt tự tick (chọn dùng cho sản xuất nội dung), ĐỘC LẬP
-# với Status (PENDING/APPROVE/REJECT — quy trình duyệt). Source = url bài (dùng
-# để bỏ trùng across-run). timestamp/tickers/Notes giữ ở cuối để audit/truy vết.
-CONTEXT_HEADER = ["Use", "Score", "Hot%", "Group", "Context", "Hook", "Source", "Status",
-                  "timestamp", "tickers", "Notes"]
+# với Status (PENDING/APPROVE/REJECT — quy trình duyệt). Publisher/Field/Topic
+# đặt trước Group (bổ sung phân loại chi tiết hơn). Source = url bài đại diện
+# (dùng để bỏ trùng across-run theo url); Sources = url các báo KHÁC đưa cùng
+# tin (gộp bởi dedup chéo nguồn near-duplicate). timestamp/tickers/Notes giữ ở
+# cuối để audit/truy vết.
+CONTEXT_HEADER = ["Use", "Score", "Hot%", "Publisher", "Field", "Topic", "Group", "Context",
+                  "Hook", "Source", "Sources", "Status", "timestamp", "tickers", "Notes"]
 LOG_HEADER = ["timestamp", "level", "message"]
 REVIEW_HEADER = ["timestamp", "gate", "label", "payload", "Decision", "Notes"]
 README_HEADER = ["Turtle Wealth — Bảng duyệt nội dung (Sheets là UI, thay được)"]
 
-# 7 tab dựng lần đầu (tên : header). Thứ tự = thứ tự tab hiển thị.
+# 8 tab dựng lần đầu (tên : header). Thứ tự = thứ tự tab hiển thị.
 TABS: dict[str, list[str]] = {
     "README": README_HEADER,
     "SOURCES": SOURCES_HEADER,
     "SETTINGS": SETTINGS_HEADER,
+    "TAXONOMY": TAXONOMY_HEADER,
     "CONTEXT": CONTEXT_HEADER,
     "LOG": LOG_HEADER,
     "ResearchReview": REVIEW_HEADER,
@@ -45,16 +59,29 @@ TABS: dict[str, list[str]] = {
 }
 
 _README_ROWS = [
-    ["1) Khai nguồn ở tab SOURCES (đặt Enable = TRUE để bật)."],
+    ["1) Khai nguồn ở tab SOURCES: Enable=TRUE, Type=rss (feed) hoặc html (trang mục)."],
     ["2) Chỉnh nhóm ưu tiên ở tab SETTINGS (Key=PriorityGroups) — đọc LIVE mỗi lần chạy."],
-    ["3) Chạy scripts/review_to_sheet.py — bot crawl thật, ghi vào CONTEXT (sắp theo Hot% giảm dần)."],
-    ["4) Duyệt ở cột Status của CONTEXT: APPROVE / REJECT (mặc định PENDING); tick Use để chọn dùng."],
+    ["3) Chỉnh Field/Topic/từ khóa phân loại ở tab TAXONOMY (đọc LIVE mỗi lần chạy)."],
+    ["4) Chạy scripts/review_to_sheet.py — bot phát hiện (RSS)/crawl (HTML) thật, "
+     "gộp bài trùng giữa các nguồn, ghi vào CONTEXT (sắp theo Hot% giảm dần)."],
+    ["5) Duyệt ở cột Status của CONTEXT: APPROVE / REJECT (mặc định PENDING); tick Use để chọn dùng."],
+    ["Cột SOURCES: " + " | ".join(SOURCES_HEADER)],
     ["Cột CONTEXT: " + " | ".join(CONTEXT_HEADER)],
 ]
 
 _SETTINGS_SEED_ROWS = [
     ["PriorityGroups", "ChinhSach, ViMoVN",
      "Nhóm ưu tiên hiện hành (đọc LIVE mỗi lần chạy) — sửa trực tiếp ở đây, không cần đổi code."],
+]
+
+# Seed TAXONOMY khớp curation.enrich.DEFAULT_TAXONOMY (dự phòng khi tab trống).
+_TAXONOMY_SEED_ROWS = [
+    ["ChinhSach", "TienTe", "lãi suất điều hành, room tín dụng, ngân hàng nhà nước, nhnn, sbv"],
+    ["ChinhSach", "PhapLy", "nghị định, nghị quyết, thông tư, luật, quốc hội"],
+    ["ViMo", "TrongNuoc", "gdp, lạm phát, cpi, tăng trưởng, xuất khẩu, nhập khẩu, fdi"],
+    ["ViMo", "TheGioi", "fed, ecb, phố wall, dow jones, trung quốc, giá dầu"],
+    ["DoanhNghiep", "KetQuaKinhDoanh", "lợi nhuận, doanh thu, cổ tức"],
+    ["DoanhNghiep", "BatDongSan", "bất động sản, dự án, quy hoạch"],
 ]
 
 # Giá trị coi là "bật" ở cột Enable/Use (không phân biệt hoa/thường).
@@ -65,21 +92,16 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _source_type(value: str) -> SourceType:
-    try:
-        return SourceType((value or "news").strip().lower())
-    except ValueError:
-        return SourceType.OTHER
-
-
 # =====================================================================
 # Hàm THUẦN (không mạng) — test trực tiếp bằng dữ liệu hàng giả.
 # =====================================================================
 def sources_from_rows(rows: list[list[str]]) -> list[Source]:
-    """Dựng list[Source] từ các hàng tab SOURCES; CHỈ giữ hàng Enable bật.
+    """Dựng list[Source] từ hàng tab SOURCES (Enable|Publisher|FeedURL|Type|
+    Field|Interval|Priority); CHỈ giữ hàng Enable bật.
 
     Ánh xạ cột theo TÊN header (bền với việc đổi thứ tự cột). Thiếu cột Enable ->
-    coi như bật tất cả. Hàng không có url -> bỏ.
+    coi như bật tất cả. Hàng không có FeedURL -> bỏ. Type khác rss/html -> mặc
+    định html. Kết quả SẮP theo Priority GIẢM DẦN (ưu tiên cao xử lý trước).
     """
     if not rows:
         return []
@@ -88,12 +110,20 @@ def sources_from_rows(rows: list[list[str]]) -> list[Source]:
     def col(name: str) -> int | None:
         return header.index(name) if name in header else None
 
-    i_en, i_name, i_url, i_type = col("enable"), col("name"), col("url"), col("type")
+    i_en = col("enable"); i_pub = col("publisher"); i_url = col("feedurl")
+    i_type = col("type"); i_field = col("field")
+    i_int = col("interval"); i_pri = col("priority")
     if i_url is None:
         return []
 
     def cell(row: list[str], i: int | None) -> str:
         return row[i].strip() if i is not None and i < len(row) else ""
+
+    def as_int(s: str) -> int:
+        try:
+            return int(s)
+        except ValueError:
+            return 0
 
     out: list[Source] = []
     for row in rows[1:]:
@@ -102,35 +132,75 @@ def sources_from_rows(rows: list[list[str]]) -> list[Source]:
         url = cell(row, i_url)
         if not url:
             continue
+        fetch_type = cell(row, i_type).lower()
+        if fetch_type not in ("rss", "html"):
+            fetch_type = "html"
         out.append(Source(
-            name=cell(row, i_name) or url,
+            name=cell(row, i_pub) or url,
             url=url,
-            source_type=_source_type(cell(row, i_type)),
+            source_type=SourceType.NEWS,
+            fetch_type=fetch_type,
+            field_hint=cell(row, i_field),
+            interval_minutes=as_int(cell(row, i_int)),
+            priority=as_int(cell(row, i_pri)),
         ))
+    out.sort(key=lambda s: s.priority, reverse=True)
+    return out
+
+
+def taxonomy_from_rows(rows: list[list[str]]) -> list[TaxonomyRow]:
+    """Dựng list[TaxonomyRow] từ hàng tab TAXONOMY (Field|Topic|Keywords, mỗi
+    Keywords cách nhau dấu phẩy). Hàng thiếu Field -> bỏ."""
+    if not rows:
+        return []
+    header = [c.strip().lower() for c in rows[0]]
+    if "field" not in header:
+        return []
+    i_field = header.index("field")
+    i_topic = header.index("topic") if "topic" in header else None
+    i_kw = header.index("keywords") if "keywords" in header else None
+
+    def cell(row: list[str], i: int | None) -> str:
+        return row[i].strip() if i is not None and i < len(row) else ""
+
+    out: list[TaxonomyRow] = []
+    for row in rows[1:]:
+        f = cell(row, i_field)
+        if not f:
+            continue
+        kws = [k.strip().lower() for k in cell(row, i_kw).split(",") if k.strip()]
+        out.append(TaxonomyRow(field=f, topic=cell(row, i_topic), keywords=kws))
     return out
 
 
 def context_row(*, title: str, hook_line: str, source_url: str, score: int, hot_pct: float,
-                group: str = "", tickers: list[str] | None = None,
+                publisher: str = "", field: str = "", topic: str = "", group: str = "",
+                other_sources: list[str] | None = None, tickers: list[str] | None = None,
                 ts: str | None = None) -> list[str]:
     """Một hàng CONTEXT ĐÚNG thứ tự CONTEXT_HEADER.
 
     Use mặc định FALSE (người duyệt tự tick), Status mặc định PENDING. Điểm
     (score) và độ hot (hot_pct) do curation/enrich.py tính (marketing_score,
-    hotness_pct) — hàm này CHỈ xếp giá trị đúng cột, không tự chấm điểm.
+    hotness_pct); field/topic từ classify_field_topic — hàm này CHỈ xếp giá
+    trị đúng cột, không tự chấm điểm/phân loại. `other_sources` = url các báo
+    KHÁC đưa cùng tin (dedup chéo nguồn near-duplicate, xem review_to_sheet.py).
     """
     return [
-        "FALSE",                 # Use
-        str(score),               # Score
-        f"{hot_pct:.1f}",         # Hot%
-        group,                     # Group
-        title,                     # Context
-        hook_line,                 # Hook
-        source_url,                 # Source (url bài)
-        "PENDING",                  # Status
-        ts or _now_iso(),           # timestamp
-        ", ".join(tickers or []),   # tickers
-        "",                          # Notes
+        "FALSE",                        # Use
+        str(score),                      # Score
+        f"{hot_pct:.1f}",                # Hot%
+        publisher,                        # Publisher
+        field,                             # Field
+        topic,                              # Topic
+        group,                               # Group
+        title,                                # Context
+        hook_line,                             # Hook
+        source_url,                             # Source (url bài đại diện)
+        ", ".join(other_sources or []),          # Sources (url báo khác đưa cùng tin)
+        "PENDING",                                # Status
+        ts or _now_iso(),                          # timestamp
+        ", ".join(tickers or []),                   # tickers
+        "",                                           # Notes
     ]
 
 
@@ -187,11 +257,13 @@ _COL_WIDTH = {
     "name": 210, "type": 90, "status": 110, "context": 380, "output": 380,
     "prompt": 380, "template": 380,
     "use": 60, "hot%": 80, "group": 140, "source": 260, "value": 260,
+    "publisher": 170, "field": 110, "topic": 130, "sources": 260, "feedurl": 260,
+    "interval": 80, "priority": 80, "keywords": 380,
 }
 _COL_WIDTH_DEFAULT = 140
 # Cột nội dung dài -> wrap text.
 _WRAP_COLS = {"title", "hook", "notes", "message", "payload", "context",
-              "output", "prompt", "template", "label"}
+              "output", "prompt", "template", "label", "keywords", "sources"}
 
 
 def _rgb(hex_str: str) -> dict:
@@ -392,7 +464,7 @@ class SheetsBoard:
         return self._sh
 
     def ensure_tabs(self) -> list[str]:
-        """Tạo đủ 7 tab + hàng header nếu chưa có. Trả về tên các tab vừa tạo."""
+        """Tạo đủ 8 tab + hàng header nếu chưa có. Trả về tên các tab vừa tạo."""
         import gspread
 
         sh = self._spreadsheet()
@@ -410,6 +482,8 @@ class SheetsBoard:
                 ws.append_rows(_README_ROWS, value_input_option="RAW")
             if name == "SETTINGS" and len(ws.get_all_values()) <= 1:
                 ws.append_rows(_SETTINGS_SEED_ROWS, value_input_option="RAW")
+            if name == "TAXONOMY" and len(ws.get_all_values()) <= 1:
+                ws.append_rows(_TAXONOMY_SEED_ROWS, value_input_option="RAW")
             self._ws[name] = ws
         # gspread tạo sẵn "Sheet1" khi tạo spreadsheet — dọn cho gọn (nếu có).
         if "Sheet1" in existing and len(sh.worksheets()) > len(TABS):
@@ -472,24 +546,35 @@ class SheetsBoard:
             return []
         return sources_from_rows(rows)
 
+    def read_taxonomy(self, *, default: list[TaxonomyRow] | None = None) -> list[TaxonomyRow]:
+        """Đọc LIVE tab TAXONOMY (Field|Topic|Keywords) — gọi lại MỖI LẦN chạy để
+        team đổi phân loại không cần sửa code/deploy lại. Rỗng/thiếu tab -> `default`."""
+        try:
+            rows = self._tab("TAXONOMY").get_all_values()
+        except Exception:  # pragma: no cover - tab chưa tồn tại
+            return list(default or [])
+        return taxonomy_from_rows(rows) or list(default or [])
+
     def write_context(self, *, title: str, hook_line: str, url: str, score: int,
-                      hot_pct: float = 0.0, group: str = "",
+                      hot_pct: float = 0.0, publisher: str = "", field: str = "",
+                      topic: str = "", group: str = "", other_sources: list[str] | None = None,
                       tickers: list[str] | None = None) -> bool:
         """Ghi 1 dòng chờ duyệt (PENDING, Use=FALSE) vào tab CONTEXT.
 
         BỎ TRÙNG theo url (cột Source): nếu url đã có ở tab CONTEXT thì KHÔNG
         ghi lại (idempotent across-run). Trả về True nếu đã ghi, False nếu bỏ
-        qua vì trùng. Near-duplicate theo TIÊU ĐỀ (nhiều nguồn cùng đưa 1 tin)
-        không kiểm ở đây — gọi curation.enrich.is_near_duplicate với
-        context_titles() TRƯỚC khi gọi hàm này (tránh gọi mạng thừa khi đã biết
-        sẽ bỏ qua).
+        qua vì trùng. Near-duplicate theo TIÊU ĐỀ (nhiều nguồn cùng đưa 1 tin,
+        gộp vào cột Sources) không kiểm ở đây — gọi curation.enrich.is_near_duplicate
+        với context_titles() TRƯỚC khi gọi hàm này (tránh gọi mạng thừa khi đã
+        biết sẽ bỏ qua).
         """
         ws = self._tab("CONTEXT")
         if url and url.strip() in self._context_urls(ws):
             return False
         ws.append_row(
             context_row(title=title, hook_line=hook_line, source_url=url, score=score,
-                       hot_pct=hot_pct, group=group, tickers=tickers),
+                       hot_pct=hot_pct, publisher=publisher, field=field, topic=topic,
+                       group=group, other_sources=other_sources, tickers=tickers),
             value_input_option="RAW",
         )
         return True

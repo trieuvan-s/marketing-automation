@@ -44,9 +44,10 @@ _CAFEF_CONTENT_SELECTOR = "div.detail-content.afcbc-body"
 _CAFEF_EXCLUDED_SELECTOR = "#listNewsInContent"
 
 # User-Agent mô tả rõ danh tính bot, tôn trọng lịch sự với server nguồn.
+# ASCII-only: header HTTP không chấp nhận giá trị ngoài ASCII/latin-1.
 _USER_AGENT = (
-    "TurtleWealthMktBot/0.1 (+marketing automation nội bộ, thu thập tin tài "
-    "chính VN; liên hệ: trieuvanstock@gmail.com)"
+    "TurtleWealthMktBot/0.1 (+marketing automation noi bo, thu thap tin tai "
+    "chinh VN; lien he: trieuvanstock@gmail.com)"
 )
 
 

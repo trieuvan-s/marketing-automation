@@ -45,9 +45,11 @@ _DEFAULT_NOISE_SELECTORS = (
 # metadata mã liên quan do CafeF gắn — ta TRÍCH mã rồi mới loại phần chrome giá.
 _DEFAULT_TICKER_BOX_SELECTOR = ".chisochungkhoan"
 _TICKER_BOX_CODE_RE = re.compile(r"^\s*([A-Z0-9]{3})\s*:")
+# ASCII-only: header HTTP (httpx/urllib) không chấp nhận giá trị ngoài
+# ASCII/latin-1 -> dấu tiếng Việt trong User-Agent sẽ crash lúc dựng client.
 _DEFAULT_USER_AGENT = (
-    "TurtleWealthMktBot/0.2 (+marketing automation nội bộ, thu thập tin tài "
-    "chính VN; liên hệ: trieuvanstock@gmail.com)"
+    "TurtleWealthMktBot/0.2 (+marketing automation noi bo, thu thap tin tai "
+    "chinh VN; lien he: trieuvanstock@gmail.com)"
 )
 
 
@@ -239,31 +241,53 @@ class HttpFirstCollector(Collector):
             for i, url in enumerate(urls):
                 if i:  # nghỉ giữa các bài (lịch sự với server), bỏ qua trước bài đầu
                     self._sleep()
-                if not self._allowed(client, url):
-                    print(f"[CẢNH BÁO] robots.txt chặn bài: {url}")
-                    continue
-                html = self._fetch(client, url)
-                if html is None:
-                    continue
-                title, body = extract_article(
-                    html,
-                    title_selector=spec.title_selector,
-                    body_selector=spec.body_selector,
-                    noise_selectors=spec.noise_selectors,
-                    ticker_box_selector=spec.ticker_box_selector,
-                )
-                if not body:
-                    continue
-                docs.append(
-                    RawDocument(
-                        source=source.name,
-                        url=url,
-                        title=title or source.name,
-                        markdown=body,
-                        source_type=source.source_type,
-                    )
-                )
+                doc = self._fetch_and_extract(client, source, spec, url)
+                if doc is not None:
+                    docs.append(doc)
         return docs
+
+    def fetch_one(self, source: Source, url: str) -> RawDocument | None:
+        """Fetch + trích 1 bài (TẦNG 3 của mô hình 3 lớp thu thập: full-fetch CHỈ
+        cho item RSS ĐÃ ĐƯỢC GIỮ ở tầng phát hiện/lọc — xem rss_collector.py).
+
+        Selector tra theo `source.url` (đăng ký ở settings.sources[], khớp CẢ
+        nguồn rss lẫn html — nguồn rss khai selector trang BÀI dưới FeedURL của
+        chính nó). Không dùng listing/extract_links — `url` đã biết trước."""
+        import httpx
+
+        spec = self.specs.get(source.url, self.default_spec)
+        headers = {"User-Agent": self.user_agent}
+        with httpx.Client(
+            headers=headers, timeout=self.timeout_s, follow_redirects=True
+        ) as client:
+            return self._fetch_and_extract(client, source, spec, url)
+
+    def _fetch_and_extract(self, client, source: Source, spec: SourceSpec,
+                           url: str) -> RawDocument | None:
+        """Fetch 1 URL bài + trích tiêu đề/thân bài theo `spec`. Dùng chung bởi
+        collect() (vòng lặp listing) và fetch_one() (1 URL biết trước)."""
+        if not self._allowed(client, url):
+            print(f"[CẢNH BÁO] robots.txt chặn bài: {url}")
+            return None
+        html = self._fetch(client, url)
+        if html is None:
+            return None
+        title, body = extract_article(
+            html,
+            title_selector=spec.title_selector,
+            body_selector=spec.body_selector,
+            noise_selectors=spec.noise_selectors,
+            ticker_box_selector=spec.ticker_box_selector,
+        )
+        if not body:
+            return None
+        return RawDocument(
+            source=source.name,
+            url=url,
+            title=title or source.name,
+            markdown=body,
+            source_type=source.source_type,
+        )
 
     # --- Hạ tầng mạng (có retry + backoff) ----------------------------------
     def _fetch(self, client, url: str) -> str | None:

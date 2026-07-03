@@ -55,6 +55,12 @@ class Source:
     name: str
     url: str
     source_type: SourceType = SourceType.NEWS
+    # --- Mô hình thu thập 3 lớp (SOURCES sheet: Enable|Publisher|FeedURL|Type|
+    # Field|Interval|Priority) — mặc định giữ hành vi cũ (html) cho code hiện có. ---
+    fetch_type: str = "html"        # "rss" (tầng 1: phát hiện nhẹ) | "html" (full ngay)
+    field_hint: str = ""            # gợi ý Field (taxonomy) do user khai ở SOURCES.Field
+    interval_minutes: int = 0       # 0 = dùng lịch mặc định (schedule.*); >0 = ghi đè riêng nguồn
+    priority: int = 0               # số lớn hơn = ưu tiên xử lý trước (SOURCES.Priority)
 
 
 @dataclass
@@ -65,6 +71,7 @@ class RawDocument:
     markdown: str
     source_type: SourceType = SourceType.NEWS
     fetched_at: datetime = field(default_factory=_now)
+    category_hint: str = ""   # gợi ý Field từ <category> RSS (rss_collector) — rỗng nếu nguồn html
 
     @property
     def content_hash(self) -> str:
@@ -83,6 +90,7 @@ class CleanDocument:
     tags: list[str] = field(default_factory=list)
     source_type: SourceType = SourceType.NEWS
     fetched_at: datetime = field(default_factory=_now)
+    category_hint: str = ""   # kế thừa từ RawDocument.category_hint (xem curation/normalize.py)
 
 
 @dataclass

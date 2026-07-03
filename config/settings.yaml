@@ -18,15 +18,26 @@ storage:
   documents_dir: "storage/documents"
   output_dir: "storage/output"
 
-# --- Nguồn crawl (thay cho hard-code trong sources.py) ---------------
-# Mỗi nguồn tự khai selector (config-first): article_url_pattern nhận diện link
-# bài trên trang mục; title_selector/body_selector bóc tiêu đề + thân bài. Nếu
-# một nguồn bỏ trống selector -> HttpFirstCollector dùng mặc định ở mục crawl.*.
+# --- Nguồn thu thập: mô hình 3 lớp (config-first, khớp SOURCES sheet) --------
+# fetch_type: "html" (mặc định, chưa khai = html) -> HttpFirstCollector, crawl
+#   trang mục + full bài luôn (như trước). "rss" -> RssCollector: TẦNG 1 phát
+#   hiện nhẹ (title/summary/category, KHÔNG fetch full) — bài GIỮ được sau lọc
+#   mới full-fetch qua HttpFirstCollector.fetch_one (TẦNG 3, xem review_to_sheet.py).
+# field: gợi ý Field (taxonomy) cho CẢ nguồn — kết hợp <category> RSS (nếu có)
+#   + từ khóa TAXONOMY ở curation.enrich.classify_field_topic.
+# title_selector/body_selector/noise_selectors/ticker_box_selector: ĐĂNG KÝ
+#   THEO url CỦA CHÍNH NGUỒN (dù rss hay html) — fetch_one() tra selector theo
+#   url gốc này để full-fetch bài rss được giữ, KHÔNG theo url từng bài riêng lẻ.
+# priority: số lớn hơn = xử lý trước (sources_from_rows/build_sources tự sắp).
 sources:
+  # --- CafeF (html — trang mục, giữ nguyên hành vi cũ) ---
   - key: "cafef-doanh-nghiep"
     name: "CafeF - Doanh nghiệp"
     url: "https://cafef.vn/doanh-nghiep.chn"
     type: "news"
+    fetch_type: "html"
+    field: "DoanhNghiep"
+    priority: 5
     enabled: true
     article_url_pattern: "-\\d{6,}\\.chn$"        # link bài: /<slug>-<id>.chn
     title_selector: "h1"
@@ -35,6 +46,9 @@ sources:
     name: "CafeF - Vĩ mô"
     url: "https://cafef.vn/vi-mo-dau-tu.chn"   # slug thật (vi-mo.chn -> 404)
     type: "news"
+    fetch_type: "html"
+    field: "ViMo"
+    priority: 5
     enabled: true
     article_url_pattern: "-\\d{6,}\\.chn$"
     title_selector: "h1"
@@ -43,10 +57,86 @@ sources:
     name: "CafeF - Tài chính quốc tế"
     url: "https://cafef.vn/tai-chinh-quoc-te.chn"
     type: "news"
+    fetch_type: "html"
+    field: "TheGioi"
+    priority: 5
     enabled: true
     article_url_pattern: "-\\d{6,}\\.chn$"
     title_selector: "h1"
     body_selector: "div.detail-content.afcbc-body"   # cùng template doanh-nghiep
+
+  # --- CafeF (rss — tầng 1 phát hiện; FeedURL thật, lấy từ https://cafef.vn/rss.chn) ---
+  - key: "cafef-rss-chung-khoan"
+    name: "CafeF - RSS Chứng khoán"
+    url: "https://cafef.vn/thi-truong-chung-khoan.rss"
+    type: "news"
+    fetch_type: "rss"
+    field: "ChungKhoan"
+    priority: 4
+    enabled: true
+    article_url_pattern: "-\\d{6,}\\.chn$"       # dùng khi fetch_one() full-fetch bài giữ
+    title_selector: "h1"
+    body_selector: "div.detail-content.afcbc-body"
+  - key: "cafef-rss-bat-dong-san"
+    name: "CafeF - RSS Bất động sản"
+    url: "https://cafef.vn/bat-dong-san.rss"
+    type: "news"
+    fetch_type: "rss"
+    field: "BatDongSan"
+    priority: 4
+    enabled: true
+    article_url_pattern: "-\\d{6,}\\.chn$"
+    title_selector: "h1"
+    body_selector: "div.detail-content.afcbc-body"
+
+  # --- CafeBiz (rss — cafebiz.vn/rss/<muc>.rss; cùng hệ VCCorp nhưng khác class DOM) ---
+  - key: "cafebiz-rss-vi-mo"
+    name: "CafeBiz - RSS Vĩ mô"
+    url: "https://cafebiz.vn/rss/vi-mo.rss"
+    type: "news"
+    fetch_type: "rss"
+    field: "ViMo"
+    priority: 4
+    enabled: true
+    article_url_pattern: "-\\d{6,}\\.chn$"
+    title_selector: "h1"
+    body_selector: ".detail-content"             # KHÔNG có hậu tố afcbc-body như CafeF
+  - key: "cafebiz-rss-chinh-sach"
+    name: "CafeBiz - RSS Chính sách"
+    url: "https://cafebiz.vn/rss/chinh-sach.rss"
+    type: "news"
+    fetch_type: "rss"
+    field: "ChinhSach"
+    priority: 4
+    enabled: true
+    article_url_pattern: "-\\d{6,}\\.chn$"
+    title_selector: "h1"
+    body_selector: ".detail-content"
+  - key: "cafebiz-rss-the-gioi"
+    name: "CafeBiz - RSS Thế giới"
+    url: "https://cafebiz.vn/rss/the-gioi.rss"
+    type: "news"
+    fetch_type: "rss"
+    field: "ViMo"
+    priority: 4
+    enabled: true
+    article_url_pattern: "-\\d{6,}\\.chn$"
+    title_selector: "h1"
+    body_selector: ".detail-content"
+
+  # --- Vietstock (rss — vietstock.vn/rss, khác domain/template hoàn toàn) ---
+  - key: "vietstock-rss-co-phieu"
+    name: "Vietstock - RSS Cổ phiếu"
+    url: "https://vietstock.vn/830/chung-khoan/co-phieu.rss"
+    type: "news"
+    fetch_type: "rss"
+    field: "ChungKhoan"
+    priority: 3
+    enabled: true
+    article_url_pattern: "-\\d+\\.htm$"          # link bài Vietstock: .../<slug>-<id>.htm
+    title_selector: "h1"
+    body_selector: "#vst_detail"                 # sạch hơn .article-content (bỏ chrome thời gian)
+    noise_selectors: ["script", "style"]
 
 # --- Tầng crawl (robustness) ----------------------------------------
 crawl:
@@ -148,6 +238,32 @@ curation:
       ticker: 2
       news: 2
       macro: 2
+
+  # TAXONOMY: Field|Topic|Keywords (curation/enrich.py: classify_field_topic).
+  # Dự phòng khi tab TAXONOMY trên Sheet trống — team thường sửa TRÊN SHEET
+  # (đọc LIVE mỗi lần chạy), mục này chỉ là fallback offline/test.
+  taxonomy:
+    - field: "ChinhSach"
+      topic: "TienTe"
+      keywords: ["lãi suất điều hành", "room tín dụng", "ngân hàng nhà nước", "nhnn", "sbv"]
+    - field: "ChinhSach"
+      topic: "PhapLy"
+      keywords: ["nghị định", "nghị quyết", "thông tư", "luật", "quốc hội"]
+    - field: "ViMo"
+      topic: "TrongNuoc"
+      keywords: ["gdp", "lạm phát", "cpi", "tăng trưởng", "xuất khẩu", "nhập khẩu", "fdi"]
+    - field: "ViMo"
+      topic: "TheGioi"
+      keywords: ["fed", "ecb", "phố wall", "dow jones", "trung quốc", "giá dầu"]
+    - field: "DoanhNghiep"
+      topic: "KetQuaKinhDoanh"
+      keywords: ["lợi nhuận", "doanh thu", "cổ tức"]
+    - field: "DoanhNghiep"
+      topic: "BatDongSan"
+      keywords: ["bất động sản", "dự án", "quy hoạch"]
+    - field: "ChungKhoan"
+      topic: "ThiTruong"
+      keywords: ["vn-index", "vnindex", "hnx-index", "thanh khoản", "khối ngoại", "cổ phiếu"]
 
 # --- Knowledge / RAG (Tầng 0-1) -------------------------------------
 knowledge:

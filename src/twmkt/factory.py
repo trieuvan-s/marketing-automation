@@ -17,6 +17,7 @@ from .collectors.base import Collector
 from .collectors.crawl4ai_collector import Crawl4aiCollector
 from .collectors.http_collector import HttpFirstCollector
 from .collectors.mock import MockCollector
+from .collectors.rss_collector import RssCollector
 from .config import Settings, load_settings
 from .curation.config import CurationConfig
 from .curation.store import DocumentStore, InMemoryStore
@@ -82,14 +83,29 @@ def build_gate(settings: Settings, *, gate: str) -> ApprovalGate:
 
 # --- Nguồn crawl từ settings.sources (enabled) ------------------------------
 def build_sources(settings: Settings) -> list[Source]:
+    """Dựng list[Source] từ settings.sources (mục `enabled: true`). Đọc thêm
+    fetch_type/field/interval_minutes/priority (mô hình 3 lớp thu thập) — khớp
+    các trường sheets_board.sources_from_rows đọc từ SOURCES sheet. Kết quả sắp
+    theo priority GIẢM DẦN (ưu tiên cao xử lý trước)."""
     out: list[Source] = []
     for s in settings.enabled_sources():
         try:
             st = SourceType(s.get("type", "news"))
         except ValueError:
             st = SourceType.OTHER
-        out.append(Source(name=s.get("name") or s.get("key", ""),
-                          url=s.get("url", ""), source_type=st))
+        fetch_type = (s.get("fetch_type") or "html").lower()
+        if fetch_type not in ("rss", "html"):
+            fetch_type = "html"
+        out.append(Source(
+            name=s.get("name") or s.get("key", ""),
+            url=s.get("url", ""),
+            source_type=st,
+            fetch_type=fetch_type,
+            field_hint=s.get("field", "") or "",
+            interval_minutes=int(s.get("interval_minutes", 0) or 0),
+            priority=int(s.get("priority", 0) or 0),
+        ))
+    out.sort(key=lambda src: src.priority, reverse=True)
     return out
 
 
@@ -106,6 +122,23 @@ def build_collector(settings: Settings, *, offline: bool = True) -> Collector:
     if engine == "crawl4ai":
         return Crawl4aiCollector.from_settings(settings)
     raise ValueError(f"crawl.engine không hỗ trợ: {engine} (http|crawl4ai)")
+
+
+def build_collector_for_source(source: Source, settings: Settings, *,
+                               html_collector: HttpFirstCollector | None = None,
+                               rss_collector: RssCollector | None = None) -> Collector:
+    """Chọn collector THEO TỪNG NGUỒN (mô hình 3 lớp thu thập): Source.fetch_type
+    'rss' -> RssCollector (tầng 1: phát hiện nhẹ); 'html' -> HttpFirstCollector
+    (full ngay). Khác `build_collector` (MỘT collector chung cho cả pipeline,
+    dùng bởi run_pipeline.py) — hàm này phục vụ review_to_sheet.py, nơi SOURCES
+    trộn cả nguồn rss lẫn html trong CÙNG 1 lượt chạy.
+
+    Truyền `html_collector`/`rss_collector` đã dựng sẵn để TÁI DÙNG 1 instance
+    cho nhiều nguồn (tránh dựng lại mỗi nguồn); không truyền -> tự dựng theo
+    settings (vẫn không gọi mạng lúc dựng)."""
+    if source.fetch_type == "rss":
+        return rss_collector or RssCollector.from_settings(settings)
+    return html_collector or HttpFirstCollector.from_settings(settings)
 
 
 def build_retriever(settings: Settings) -> Retriever:
