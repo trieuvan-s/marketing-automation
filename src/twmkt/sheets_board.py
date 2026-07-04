@@ -92,26 +92,56 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _col_a1(n: int) -> str:
+    """Số cột (1-based) -> chữ cái A1 (1->A, 15->O). Tránh phụ thuộc gspread ở lõi."""
+    s = ""
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
 # =====================================================================
 # Hàm THUẦN (không mạng) — test trực tiếp bằng dữ liệu hàng giả.
 # =====================================================================
-def sources_from_rows(rows: list[list[str]]) -> list[Source]:
-    """Dựng list[Source] từ hàng tab SOURCES (Enable|Publisher|FeedURL|Type|
-    Field|Interval|Priority); CHỈ giữ hàng Enable bật.
+def engine_for(url: str, type_cell: str) -> str:
+    """Quyết engine thu thập cho 1 nguồn (-> Source.fetch_type).
 
-    Ánh xạ cột theo TÊN header (bền với việc đổi thứ tự cột). Thiếu cột Enable ->
-    coi như bật tất cả. Hàng không có FeedURL -> bỏ. Type khác rss/html -> mặc
-    định html. Kết quả SẮP theo Priority GIẢM DẦN (ưu tiên cao xử lý trước).
+    - Type khai rõ 'rss'/'html' -> dùng luôn (người khai thắng).
+    - Không khai -> SUY TỪ URL: đuôi '.rss' hoặc có '/rss' -> rss; còn lại html.
+    """
+    t = (type_cell or "").strip().lower()
+    if t in ("rss", "html"):
+        return t
+    u = (url or "").strip().lower()
+    if u.endswith(".rss") or "/rss" in u:
+        return "rss"
+    return "html"
+
+
+def sources_from_rows(rows: list[list[str]]) -> list[Source]:
+    """Dựng list[Source] từ hàng tab SOURCES; CHỈ giữ hàng Enable bật.
+
+    HARDENING (đồng bộ schema cũ/mới + né lỗi crawl):
+      - Ánh xạ cột KHOAN DUNG theo tên (chấp nhận cả cũ lẫn mới):
+        Publisher|Name, FeedURL|URL, Type. Bền với việc đổi thứ tự/đổi tên cột.
+      - fetch_type suy bằng engine_for(url, Type) (rss/html) -> collector đúng.
+      - BỎ QUA dòng URL không bắt đầu http(s):// (in cảnh báo) -> tránh crawl vào
+        giá trị rác (vd dữ liệu lệch cột schema cũ) gây UnsupportedProtocol.
+    Thiếu cột Enable -> coi như bật tất cả. Kết quả SẮP theo Priority GIẢM DẦN.
     """
     if not rows:
         return []
     header = [c.strip().lower() for c in rows[0]]
 
-    def col(name: str) -> int | None:
-        return header.index(name) if name in header else None
+    def col(*names: str) -> int | None:
+        for n in names:
+            if n in header:
+                return header.index(n)
+        return None
 
-    i_en = col("enable"); i_pub = col("publisher"); i_url = col("feedurl")
-    i_type = col("type"); i_field = col("field")
+    i_en = col("enable"); i_pub = col("publisher", "name")
+    i_url = col("feedurl", "url"); i_type = col("type"); i_field = col("field")
     i_int = col("interval"); i_pri = col("priority")
     if i_url is None:
         return []
@@ -132,14 +162,15 @@ def sources_from_rows(rows: list[list[str]]) -> list[Source]:
         url = cell(row, i_url)
         if not url:
             continue
-        fetch_type = cell(row, i_type).lower()
-        if fetch_type not in ("rss", "html"):
-            fetch_type = "html"
+        if not url.lower().startswith(("http://", "https://")):
+            print(f"[CẢNH BÁO] SOURCES bỏ dòng URL thiếu scheme http(s):// -> {url!r} "
+                  "(sửa/đồng bộ tab SOURCES bằng --sync-sources).")
+            continue
         out.append(Source(
             name=cell(row, i_pub) or url,
             url=url,
             source_type=SourceType.NEWS,
-            fetch_type=fetch_type,
+            fetch_type=engine_for(url, cell(row, i_type)),
             field_hint=cell(row, i_field),
             interval_minutes=as_int(cell(row, i_int)),
             priority=as_int(cell(row, i_pri)),
@@ -546,6 +577,25 @@ class SheetsBoard:
             return []
         return sources_from_rows(rows)
 
+    def sync_sources_from_settings(self, settings) -> int:
+        """Ghi ĐÈ tab SOURCES bằng nguồn enabled trong settings.yaml theo ĐÚNG
+        schema mới (Enable|Publisher|FeedURL|Type|Field|Interval|Priority), XOÁ
+        sạch dòng cũ/URL rỗng. Đồng bộ SHEET với config sau khi verify collectors.
+        Trả về số nguồn đã ghi. KHÔNG đụng các tab khác."""
+        from .factory import build_sources  # lazy: tránh phụ thuộc vòng lúc import
+
+        sources = build_sources(settings)
+        rows: list[list[str]] = [SOURCES_HEADER]
+        for s in sources:
+            rows.append([
+                "TRUE", s.name, s.url, s.fetch_type, s.field_hint,
+                str(s.interval_minutes or ""), str(s.priority or ""),
+            ])
+        ws = self._tab("SOURCES")
+        ws.clear()                                   # xoá dòng cũ (schema cũ/URL rỗng)
+        ws.update("A1", rows, value_input_option="USER_ENTERED")  # TRUE -> checkbox
+        return len(sources)
+
     def read_taxonomy(self, *, default: list[TaxonomyRow] | None = None) -> list[TaxonomyRow]:
         """Đọc LIVE tab TAXONOMY (Field|Topic|Keywords) — gọi lại MỖI LẦN chạy để
         team đổi phân loại không cần sửa code/deploy lại. Rỗng/thiếu tab -> `default`."""
@@ -578,6 +628,20 @@ class SheetsBoard:
             value_input_option="RAW",
         )
         return True
+
+    def replace_context(self, rows: list[list[str]]) -> int:
+        """UPSERT tab CONTEXT: XÓA vùng dữ liệu (giữ header hàng 1) rồi ghi lại
+        `rows`. Mỗi lần chạy CONTEXT phản ánh ĐÚNG kết quả lần đó — hết cảnh trộn
+        dòng cũ (thiếu Publisher/Field/Topic) với dòng mới do append. `rows` phải
+        ĐÚNG thứ tự CONTEXT_HEADER (dùng context_row). Trả số dòng đã ghi."""
+        ws = self._tab("CONTEXT")
+        n_existing = len(ws.get_all_values())
+        if n_existing > 1:                     # có dữ liệu cũ dưới header -> xóa
+            end = f"{_col_a1(len(CONTEXT_HEADER))}{n_existing}"
+            ws.batch_clear([f"A2:{end}"])
+        if rows:
+            ws.update("A2", rows, value_input_option="USER_ENTERED")
+        return len(rows)
 
     def _context_urls(self, ws) -> set[str]:
         """Tập url đã có ở tab CONTEXT (ánh xạ theo tên cột 'source')."""

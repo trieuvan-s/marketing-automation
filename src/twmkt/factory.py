@@ -110,12 +110,18 @@ def build_sources(settings: Settings) -> list[Source]:
 
 
 # --- Collector: mock (offline) | http (mặc định) | crawl4ai (fallback JS) ---
-def build_collector(settings: Settings, *, offline: bool = True) -> Collector:
-    """offline=True -> MockCollector ($0, không mạng). Ngược lại chọn engine thật
-    theo crawl.engine: 'http' = HttpFirstCollector (httpx+bs4, $0 token);
-    'crawl4ai' = Crawl4aiCollector (fallback cho nguồn cần JS)."""
+def build_collector(settings: Settings, *, offline: bool = True,
+                    source: Source | None = None) -> Collector:
+    """offline=True -> MockCollector ($0, không mạng).
+
+    Có `source` (không offline) -> DISPATCH theo Source.fetch_type: 'rss' =
+    RssCollector (tầng 1 phát hiện), 'html' = HttpFirstCollector (full ngay) —
+    KHÔNG còn mặc định html cho mọi nguồn. Không `source` -> chọn engine chung
+    theo crawl.engine ('http'|'crawl4ai') cho toàn pipeline (run_pipeline.py)."""
     if offline:
         return MockCollector()
+    if source is not None:
+        return build_collector_for_source(source, settings)
     engine = (settings.get("crawl.engine", "http") or "http").lower()
     if engine == "http":
         return HttpFirstCollector.from_settings(settings)

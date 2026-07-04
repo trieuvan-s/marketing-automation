@@ -84,6 +84,52 @@ def is_near_duplicate(title: str, seen_titles: list[str], *, threshold: float = 
     return any(title_similarity(title, s) >= threshold for s in seen_titles)
 
 
+# --- Gom SỰ KIỆN chéo nguồn: giữ báo Priority cao, gộp URL báo khác ----------
+@dataclass
+class EventItem:
+    """1 ứng viên gom sự kiện: title + url + publisher + priority (SOURCES.Priority)."""
+    title: str
+    url: str
+    publisher: str = ""
+    priority: int = 0
+
+
+@dataclass
+class EventCluster:
+    """1 cụm sự kiện: bản đại diện (Priority cao nhất) + url các báo khác cùng tin."""
+    item: EventItem
+    other_urls: list[str] = field(default_factory=list)
+
+
+def cluster_by_event(items: list[EventItem], *, threshold: float = 0.6) -> list[EventCluster]:
+    """Gom `items` cùng SỰ KIỆN (tiêu đề near-duplicate, Jaccard >= threshold),
+    BẤT KỂ nguồn. Mỗi cụm GIỮ item Priority CAO NHẤT làm đại diện (hòa -> item
+    xuất hiện trước); url các item còn lại (báo khác đưa cùng tin) gộp vào
+    `other_urls` (giữ thứ tự, bỏ trùng, loại url đại diện). Hàm THUẦN, $0 —
+    chống trùng chéo báo bằng Priority (xem scripts/review_to_sheet.py)."""
+    buckets: list[list[EventItem]] = []
+    for it in items:
+        bucket = next(
+            (b for b in buckets
+             if is_near_duplicate(it.title, [m.title for m in b], threshold=threshold)),
+            None,
+        )
+        if bucket is None:
+            buckets.append([it])
+        else:
+            bucket.append(it)
+
+    clusters: list[EventCluster] = []
+    for b in buckets:
+        rep = max(b, key=lambda m: m.priority)   # Priority cao nhất; hòa -> first (max ổn định)
+        others: list[str] = []
+        for m in b:
+            if m.url != rep.url and m.url not in others:
+                others.append(m.url)
+        clusters.append(EventCluster(item=rep, other_urls=others))
+    return clusters
+
+
 # --- Ưu tiên theo pha thị trường + % độ hot --------------------------------
 def in_priority(labels: list[str], priority_groups: list[str]) -> bool:
     return any(g in priority_groups for g in labels)

@@ -5,18 +5,17 @@ MÔ HÌNH THU THẬP 3 LỚP:
      "rss" -> RssCollector (nhẹ: title/summary/category, KHÔNG fetch full bài);
      "html" -> HttpFirstCollector (crawl trang mục + full bài luôn, như cũ).
   2) LỌC + GỘP — normalize (dedup content-hash + whitelist watchlist + relevance)
-     trên TOÀN BỘ ứng viên (mọi nguồn) MỘT LƯỢT -> gom near-duplicate CHÉO NGUỒN
-     theo tiêu đề (curation.enrich.is_near_duplicate): giữ 1 đại diện/cụm, gộp
-     url các báo khác vào cột "Sources" -> loại tiếp cụm đã có trong CONTEXT
-     (across-run).
+     trên TOÀN BỘ ứng viên (mọi nguồn) MỘT LƯỢT -> gom SỰ KIỆN chéo nguồn
+     (curation.enrich.cluster_by_event): mỗi cụm GIỮ báo Priority CAO NHẤT làm
+     đại diện, url các báo khác gộp vào cột "Sources".
   3) FULL-FETCH — CHỈ đại diện có nguồn gốc RSS (chưa có full bài) mới được
      HttpFirstCollector.fetch_one() tải full + normalize lại; đại diện gốc html
      đã có full body sẵn từ bước 1. Persist CHỈ bản full cuối cùng.
 
-Sau đó: classify (nhóm + Field/Topic theo TAXONOMY) + marketing_score + hotness_pct
-(curation/enrich.py, $0) + HookAgent(MockLLM) sinh hook ($0) -> ghi 1 dòng PENDING
-vào tab CONTEXT. Sau khi xong TẤT CẢ nguồn: sắp CONTEXT theo Hot% giảm dần. Nhật
-ký ghi tab LOG + in console.
+Sau đó: classify (nhóm, tối đa 2 nhãn) + Field/Topic CHỈ theo TAXONOMY (keyword,
+KHÔNG dùng <category> thô RSS) + marketing_score + hotness_pct (curation/enrich.py,
+$0) + HookAgent(MockLLM) sinh hook ($0). Sắp theo Hot% giảm dần rồi UPSERT tab
+CONTEXT (XÓA vùng dữ liệu, ghi lại) -> hết trộn dòng cũ. Nhật ký ghi tab LOG + console.
 
 KHÔNG scale: bản nếm thử. Không gọi LLM đắt (MockLLM), không sinh nội dung.
 
@@ -49,11 +48,11 @@ from twmkt.config import load_settings  # noqa: E402
 from twmkt.curation import normalize  # noqa: E402
 from twmkt.curation.config import CurationConfig, _load_lines  # noqa: E402
 from twmkt.curation.enrich import (  # noqa: E402
-    classify, classify_field_topic, groups_from_settings, hotness_pct,
-    is_near_duplicate, marketing_score, taxonomy_from_settings,
+    EventItem, classify, classify_field_topic, cluster_by_event,
+    groups_from_settings, hotness_pct, marketing_score, taxonomy_from_settings,
 )
-from twmkt.models import CleanDocument, ResearchBrief, Source  # noqa: E402
-from twmkt.sheets_board import SheetsBoard  # noqa: E402
+from twmkt.models import ResearchBrief, Source  # noqa: E402
+from twmkt.sheets_board import SheetsBoard, context_row  # noqa: E402
 
 # Mặc định nhóm ưu tiên khi tab SETTINGS chưa có/thiếu khóa PriorityGroups
 # (khớp seed row do SheetsBoard.ensure_tabs() ghi lần đầu).
@@ -91,31 +90,7 @@ def _score_weights(settings) -> dict:
     }
 
 
-# =====================================================================
-# Hàm THUẦN (không mạng) — LỚP 2: gộp near-duplicate CHÉO NGUỒN.
-# =====================================================================
-def cluster_near_duplicates(docs: list[CleanDocument]) -> list[dict]:
-    """Gom `docs` (đã qua normalize — MỌI nguồn trộn chung) thành các cụm theo
-    tiêu đề GẦN GIỐNG (curation.enrich.is_near_duplicate), bất kể nguồn gốc.
-
-    Giữ đại diện ĐẦU TIÊN mỗi cụm (`doc`); url các bài trùng còn lại (nguồn
-    KHÁC đưa cùng tin) gộp vào `other_urls`. Hàm THUẦN — test được, không mạng.
-    """
-    clusters: list[dict] = []
-    for doc in docs:
-        matched = next(
-            (cl for cl in clusters if is_near_duplicate(doc.title, [cl["doc"].title])),
-            None,
-        )
-        if matched:
-            if doc.url != matched["doc"].url and doc.url not in matched["other_urls"]:
-                matched["other_urls"].append(doc.url)
-            continue
-        clusters.append({"doc": doc, "other_urls": []})
-    return clusters
-
-
-def run(*, limit: int = 3) -> dict:
+def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False) -> dict:
     settings = load_settings()
 
     # Ưu tiên ENV (ghi đè tạm) -> settings.yaml (mục sheets). ENV không bắt buộc.
@@ -133,8 +108,21 @@ def run(*, limit: int = 3) -> dict:
     if created:
         board.log("INFO", f"Tạo tab lần đầu: {', '.join(created)}")
 
-    # ① Ưu tiên nguồn khai ở tab SOURCES; chưa có -> lấy từ config (settings.yaml).
-    sources = board.read_sources() or factory.build_sources(settings)
+    # --sync-sources: ghi ĐÈ tab SOURCES bằng nguồn đã verify trong settings.yaml
+    # (schema mới), xoá dòng cũ/URL rỗng — sửa lỗi lệch schema gây crawled 0.
+    if sync_sources:
+        n = board.sync_sources_from_settings(settings)
+        board.log("INFO", f"Đồng bộ {n} nguồn settings.yaml -> tab SOURCES (schema mới)")
+        print(f"[sync] ghi {n} nguồn vào tab SOURCES (schema mới, xoá dòng cũ).")
+
+    # ① Nguồn: --from-config -> LẤY THẲNG từ settings.yaml (bỏ qua sheet, kiểm
+    #    chứng nhanh); mặc định -> ưu tiên tab SOURCES, chưa có/không hợp lệ ->
+    #    fallback config.
+    if from_config:
+        sources = factory.build_sources(settings)
+        print(f"[from-config] dùng {len(sources)} nguồn trực tiếp từ settings.yaml (bỏ qua SOURCES).")
+    else:
+        sources = board.read_sources() or factory.build_sources(settings)
     if not sources:
         raise SystemExit("Không có nguồn nào (tab SOURCES trống và config cũng trống).")
     sources_by_name: dict[str, Source] = {s.name: s for s in sources}
@@ -170,74 +158,70 @@ def run(*, limit: int = 3) -> dict:
         per_source.append({"name": s.name, "fetch_type": s.fetch_type, "crawled": len(docs)})
 
     # --- TẦNG 2: chuẩn hóa (dedup content-hash + whitelist + relevance) MỘT
-    # LƯỢT trên TOÀN BỘ ứng viên, rồi gộp near-duplicate CHÉO NGUỒN theo tiêu đề. --
+    # LƯỢT trên TOÀN BỘ ứng viên, rồi gộp SỰ KIỆN chéo nguồn — GIỮ báo Priority
+    # cao (cluster_by_event), url báo khác gộp vào cột Sources. --
     clean = normalize(raw_docs, curation)
-    clusters = cluster_near_duplicates(clean)
-
-    seen_titles = board.context_titles()   # đã có trong CONTEXT (across-run)
-    survivors = []
-    skipped_dup_run = 0
-    for cl in clusters:
-        if is_near_duplicate(cl["doc"].title, seen_titles):
-            skipped_dup_run += 1
-            continue
-        survivors.append(cl)
-        seen_titles.append(cl["doc"].title)
+    by_url = {c.url: c for c in clean}
+    items = [
+        EventItem(
+            title=c.title, url=c.url, publisher=c.source,
+            priority=(sources_by_name[c.source].priority if c.source in sources_by_name else 0),
+        )
+        for c in clean
+    ]
+    clusters = cluster_by_event(items, threshold=0.6)
 
     # --- TẦNG 3: full-fetch CHỈ cho đại diện gốc RSS (chưa có full bài) ------
     final: list[dict] = []
     full_fetch_failed = 0
-    for cl in survivors:
-        c = cl["doc"]
+    for cl in clusters:
+        c = by_url[cl.item.url]
         src = sources_by_name.get(c.source)
         if src is not None and src.fetch_type == "rss":
             full_raw = html_collector.fetch_one(src, c.url)
             if full_raw is None:
                 full_fetch_failed += 1
                 continue
-            full_raw.category_hint = c.category_hint or full_raw.category_hint
             full_clean = normalize([full_raw], curation)
             if not full_clean:
                 full_fetch_failed += 1
                 continue
             c = full_clean[0]
-        final.append({"source": src, "doc": c, "other_urls": cl["other_urls"]})
+        final.append({"source": src, "doc": c, "other_urls": cl.other_urls})
 
-    # --- Persist (CHỈ bản full cuối cùng) + ghi CONTEXT ----------------------
+    # --- Persist + dựng hàng CONTEXT (tất định, $0), sắp Hot% giảm dần -------
     stored = store.upsert([f["doc"] for f in final])
-    written = 0
+    scored_rows: list[tuple[int, list[str]]] = []
     for f in final:
         src, c, other_urls = f["source"], f["doc"], f["other_urls"]
         full = f"{c.title}. {c.markdown}"
         macro_hits = curation.macro_hits(full)
-        labels = classify(full, c.tickers, tags=c.tags, groups=groups)
-        hints = [c.category_hint, src.field_hint if src else ""]
-        field_val, topic_val = classify_field_topic(full, hints=hints, taxonomy=taxonomy)
+        labels = classify(full, c.tickers, tags=c.tags, groups=groups)[:2]  # Group tối đa 2 nhãn
+        # Field/Topic CHỈ theo TAXONOMY (keyword) — KHÔNG dùng <category> thô RSS.
+        field_hint = [src.field_hint] if src and src.field_hint else None
+        field_val, topic_val = classify_field_topic(full, hints=field_hint, taxonomy=taxonomy)
         score = marketing_score(full, c.tickers, macro_hits=macro_hits, **weights["marketing"])
         hot = hotness_pct(full, c.tickers, labels, priority_groups=priority_groups,
                           macro_hits=macro_hits, **weights["hotness"])
+        hook = HookAgent(llm).run(ResearchBrief(   # $0 (MockLLM -> fallback)
+            topic=c.title, tickers=c.tickers, thesis=c.title, key_points=[c.title]))
+        scored_rows.append((hot, context_row(
+            title=c.title, hook_line=hook.headlines[0], source_url=c.url, score=score,
+            hot_pct=hot, publisher=(src.name if src else c.source), field=field_val,
+            topic=topic_val, group=", ".join(labels), other_sources=other_urls,
+            tickers=c.tickers)))
 
-        brief = ResearchBrief(topic=c.title, tickers=c.tickers,
-                              thesis=c.title, key_points=[c.title])
-        hook = HookAgent(llm).run(brief)   # $0 (MockLLM -> fallback)
-
-        if board.write_context(title=c.title, hook_line=hook.headlines[0], url=c.url,
-                               score=score, hot_pct=hot, publisher=(src.name if src else c.source),
-                               field=field_val, topic=topic_val, group=", ".join(labels),
-                               other_sources=other_urls, tickers=c.tickers):
-            written += 1   # bỏ trùng theo url (Source) -> chỉ đếm dòng thực ghi
-
-    board.sort_context_by_hot()   # CONTEXT sắp theo Hot% giảm dần sau khi ghi xong
+    scored_rows.sort(key=lambda x: x[0], reverse=True)   # Hot% giảm dần
+    # UPSERT: xóa vùng dữ liệu CONTEXT (giữ header) rồi ghi lại -> hết trộn dòng cũ.
+    written = board.replace_context([row for _, row in scored_rows])
 
     totals = {
         "crawled": len(raw_docs), "kept": len(clean), "clusters": len(clusters),
-        "stored": stored, "written": written,
-        "skipped_dup": skipped_dup_run, "full_fetch_failed": full_fetch_failed,
+        "stored": stored, "written": written, "full_fetch_failed": full_fetch_failed,
     }
     board.log("INFO", f"TỔNG: crawled {totals['crawled']} / kept {totals['kept']} / "
-                      f"cụm(gộp trùng chéo nguồn) {totals['clusters']} / stored {totals['stored']} / "
-                      f"CONTEXT {totals['written']} / bỏ (đã có) {totals['skipped_dup']} / "
-                      f"full-fetch lỗi {totals['full_fetch_failed']}")
+                      f"cụm(gộp sự kiện chéo nguồn) {totals['clusters']} / stored {totals['stored']} / "
+                      f"CONTEXT {totals['written']} (UPSERT) / full-fetch lỗi {totals['full_fetch_failed']}")
     _print_summary(per_source, totals)
     return {"per_source": per_source, "totals": totals}
 
@@ -246,11 +230,10 @@ def _print_summary(per_source: list[dict], totals: dict) -> None:
     print("\n========== DEMO REVIEW -> GOOGLE SHEET (CONTEXT) ==========")
     for s in per_source:
         print(f"• [{s['fetch_type']}] {s['name']}: crawled {s['crawled']}")
-    print("---------- Tổng (sau lọc + gộp near-duplicate chéo nguồn) ----------")
+    print("---------- Tổng (sau lọc + gộp sự kiện chéo nguồn, giữ báo Priority cao) ----------")
     print(f"crawled {totals['crawled']} | kept(sau normalize) {totals['kept']} | "
           f"cụm duy nhất {totals['clusters']} | full-fetch lỗi {totals['full_fetch_failed']}")
-    print(f"stored {totals['stored']} | CONTEXT {totals['written']} dòng chờ duyệt | "
-          f"bỏ (đã có trong CONTEXT) {totals['skipped_dup']}")
+    print(f"stored {totals['stored']} | CONTEXT {totals['written']} dòng (UPSERT — ghi đè mỗi lần chạy)")
     print("Mở tab CONTEXT trên Google Sheet để duyệt (cột Status; tick Use để chọn dùng);"
          " đã sắp theo Hot% giảm dần.")
 
@@ -260,9 +243,13 @@ def _parse_args(argv: list[str]):
     ap = argparse.ArgumentParser(description="Phát hiện (rss)/crawl (html) thật -> "
                                  "ghi title+hook lên Google Sheet để duyệt ($0).")
     ap.add_argument("--limit", type=int, default=3, help="Số bài tối đa/nguồn (demo nhỏ 2-3).")
+    ap.add_argument("--sync-sources", action="store_true",
+                    help="Ghi đè tab SOURCES bằng nguồn trong settings.yaml (schema mới) rồi chạy.")
+    ap.add_argument("--from-config", action="store_true",
+                    help="Lấy nguồn thẳng từ settings.yaml, bỏ qua tab SOURCES (kiểm chứng nhanh).")
     return ap.parse_args(argv)
 
 
 if __name__ == "__main__":
     args = _parse_args(sys.argv[1:])
-    run(limit=args.limit)
+    run(limit=args.limit, sync_sources=args.sync_sources, from_config=args.from_config)

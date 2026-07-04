@@ -528,7 +528,7 @@ def test_sheets_sources_from_rows_filters_enable():
         ["", "Tắt mặc định", "https://cafef.vn/x.chn", "html", "", "", "1"],
         ["yes", "CafeF - RSS Chứng khoán", "https://cafef.vn/thi-truong-chung-khoan.rss",
          "rss", "ChungKhoan", "60", "5"],
-        ["TRUE", "Type lạ -> html", "https://x.com/y.rss", "atom", "", "", "0"],
+        ["TRUE", "Type lạ -> html", "https://x.com/y.chn", "atom", "", "", "0"],
         ["TRUE", "Thiếu url", "", "rss", "", "", "9"],   # không FeedURL -> bỏ
     ]
     srcs = sources_from_rows(rows)
@@ -538,7 +538,8 @@ def test_sheets_sources_from_rows_filters_enable():
     assert srcs[0].fetch_type == "rss" and srcs[0].field_hint == "ChungKhoan"
     assert srcs[0].interval_minutes == 60 and srcs[0].priority == 5
     assert srcs[1].fetch_type == "html" and srcs[1].priority == 3
-    assert srcs[2].fetch_type == "html"          # Type "atom" lạ -> mặc định html
+    # Type "atom" lạ + URL không .rss -> engine_for suy ra html
+    assert srcs[2].fetch_type == "html"
     assert sources_from_rows([]) == []                 # rỗng -> []
 
 
@@ -881,26 +882,51 @@ def test_enrich_classify_field_topic_uses_taxonomy_and_hints():
         "ViMo", "TrongNuoc")
 
 
-def test_review_cluster_near_duplicates_merges_cross_source():
-    """cluster_near_duplicates (review_to_sheet.py): gộp near-duplicate CHÉO
-    NGUỒN theo tiêu đề, giữ đại diện đầu tiên, url các báo khác vào other_urls."""
-    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
-    import review_to_sheet as rts
-    from twmkt.models import CleanDocument
+def test_enrich_cluster_by_event_keeps_highest_priority():
+    """cluster_by_event: gộp sự kiện CHÉO NGUỒN, GIỮ báo Priority cao làm đại diện
+    (dù không xuất hiện đầu), url báo khác gộp vào other_urls."""
+    from twmkt.curation.enrich import cluster_by_event, EventItem
 
-    docs = [
-        CleanDocument(source="CafeF", url="http://a/1", title="FPT báo lãi quý tăng mạnh", markdown="m1"),
-        CleanDocument(source="Vietstock", url="http://b/1", title="FPT báo lãi quý, tăng mạnh!", markdown="m2"),
-        CleanDocument(source="CafeBiz", url="http://c/1", title="FPT báo lãi quý tăng mạnh.", markdown="m3"),
-        CleanDocument(source="CafeF", url="http://a/2", title="HPG sản lượng thép phục hồi", markdown="m4"),
+    items = [
+        # cụm FPT: bản Priority thấp xuất hiện TRƯỚC, bản cao xuất hiện SAU
+        EventItem("FPT bao lai quy tang manh", "http://low/fpt", "CafeBiz", priority=3),
+        EventItem("FPT bao lai quy tang manh nhe", "http://high/fpt", "Vietstock", priority=9),
+        EventItem("FPT bao lai quy tang", "http://mid/fpt", "CafeF", priority=5),
+        # cụm HPG riêng
+        EventItem("HPG san luong thep phuc hoi", "http://cafef/hpg", "CafeF", priority=5),
     ]
-    clusters = rts.cluster_near_duplicates(docs)
-    assert len(clusters) == 2                            # 3 bài FPT gộp còn 1 cụm + 1 cụm HPG
-    fpt_cluster = next(cl for cl in clusters if cl["doc"].url == "http://a/1")
-    assert fpt_cluster["other_urls"] == ["http://b/1", "http://c/1"]
-    hpg_cluster = next(cl for cl in clusters if cl["doc"].url == "http://a/2")
-    assert hpg_cluster["other_urls"] == []
-    assert rts.cluster_near_duplicates([]) == []
+    clusters = cluster_by_event(items, threshold=0.6)
+    assert len(clusters) == 2
+    fpt = next(c for c in clusters if "fpt" in c.item.title.lower())
+    assert fpt.item.url == "http://high/fpt" and fpt.item.priority == 9   # GIỮ Priority cao
+    assert fpt.other_urls == ["http://low/fpt", "http://mid/fpt"]         # url báo khác, giữ thứ tự
+    hpg = next(c for c in clusters if "hpg" in c.item.title.lower())
+    assert hpg.other_urls == []
+    assert cluster_by_event([]) == []
+
+
+def test_replace_context_clears_then_rewrites():
+    """replace_context: XÓA vùng dữ liệu (A2:..) rồi ghi lại từ A2 (UPSERT), giữ header."""
+    from twmkt.sheets_board import SheetsBoard, CONTEXT_HEADER, context_row
+
+    class _FakeWS:
+        def __init__(self, values):
+            self._v = values; self.cleared = None; self.updated = None
+        def get_all_values(self): return self._v
+        def batch_clear(self, ranges): self.cleared = ranges
+        def update(self, rng, values, value_input_option=None):
+            self.updated = (rng, values, value_input_option)
+
+    board = SheetsBoard(spreadsheet_id="X", creds_path="Y")
+    old = ["FALSE"] * len(CONTEXT_HEADER)
+    ws = _FakeWS([CONTEXT_HEADER, old, old])       # header + 2 dòng cũ
+    board._ws["CONTEXT"] = ws
+
+    row = context_row(title="Bài mới", hook_line="h", source_url="http://u", score=3, hot_pct=42.0)
+    n = board.replace_context([row])
+    assert n == 1
+    assert ws.cleared == ["A2:O3"]                 # xóa 2 dòng dữ liệu cũ, GIỮ header (15 cột -> O)
+    assert ws.updated[0] == "A2" and ws.updated[1] == [row]   # ghi lại từ A2
 
 
 # --- Lập lịch tự động ------------------------------------------------------
@@ -999,6 +1025,63 @@ def test_scheduler_survives_job_error():
     sched = Scheduler(flaky, cfg, now_fn=clock.now, sleep_fn=clock.sleep,
                       jitter_fn=lambda a, b: 0.0, log=lambda *a: None)
     assert sched.run() == 3 and n_calls["i"] == 3
+
+
+# --- SOURCES hardening + dispatch collector theo fetch_type -----------------
+def test_engine_for_rss_vs_html():
+    from twmkt.sheets_board import engine_for
+    assert engine_for("https://cafef.vn/x.rss", "") == "rss"
+    assert engine_for("https://cafebiz.vn/rss/vi-mo.rss", "") == "rss"
+    assert engine_for("https://x.host/rss/foo", "") == "rss"      # '/rss' trong path
+    assert engine_for("https://cafef.vn/doanh-nghiep.chn", "") == "html"
+    # Type khai rõ thắng suy luận từ URL
+    assert engine_for("https://x.chn", "rss") == "rss"
+    assert engine_for("https://x.rss", "html") == "html"
+
+
+def test_sources_from_rows_hardening_skips_bad_url():
+    from twmkt.sheets_board import sources_from_rows, SOURCES_HEADER
+    rows = [
+        SOURCES_HEADER,  # Enable|Publisher|FeedURL|Type|Field|Interval|Priority
+        ["TRUE", "CafeF RSS", "https://cafef.vn/x.rss", "", "ChungKhoan", "", "4"],
+        ["TRUE", "CafeF HTML", "https://cafef.vn/doanh-nghiep.chn", "html", "DN", "", "5"],
+        ["TRUE", "Rác", "not-a-url", "", "", "", ""],          # thiếu scheme -> BỎ
+        ["FALSE", "Tắt", "https://x.rss", "rss", "", "", ""],  # Enable off -> BỎ
+    ]
+    srcs = sources_from_rows(rows)
+    # chỉ 2 nguồn hợp lệ, sắp theo Priority giảm dần (html=5 trước rss=4)
+    assert [s.name for s in srcs] == ["CafeF HTML", "CafeF RSS"]
+    assert srcs[0].fetch_type == "html" and srcs[1].fetch_type == "rss"
+
+
+def test_sources_from_rows_tolerates_old_header():
+    """Header cũ (Name/url) vẫn map được (khoan dung), engine_for suy fetch_type."""
+    from twmkt.sheets_board import sources_from_rows
+    old = [
+        ["Enable", "key", "Name", "url", "type"],
+        ["TRUE", "dn", "CafeF DN", "https://cafef.vn/doanh-nghiep.chn", "html"],
+        ["yes", "rss", "CafeF RSS", "https://cafef.vn/x.rss", ""],
+    ]
+    srcs = sources_from_rows(old)
+    got = {s.name: s.fetch_type for s in srcs}
+    assert got == {"CafeF DN": "html", "CafeF RSS": "rss"}
+
+
+def test_build_collector_dispatch_by_fetch_type():
+    from twmkt.collectors.http_collector import HttpFirstCollector
+    from twmkt.collectors.mock import MockCollector
+    from twmkt.collectors.rss_collector import RssCollector
+    s = Settings({"crawl": {"engine": "http"}})
+    rss_src = Source("a", "https://x.rss", fetch_type="rss")
+    html_src = Source("b", "https://x.chn", fetch_type="html")
+    # dispatch theo từng nguồn
+    assert isinstance(factory.build_collector_for_source(rss_src, s), RssCollector)
+    assert isinstance(factory.build_collector_for_source(html_src, s), HttpFirstCollector)
+    # build_collector với source -> cũng dispatch (không còn mặc định html)
+    assert isinstance(factory.build_collector(s, offline=False, source=rss_src), RssCollector)
+    assert isinstance(factory.build_collector(s, offline=False, source=html_src), HttpFirstCollector)
+    # offline luôn Mock (bất kể fetch_type)
+    assert isinstance(factory.build_collector(s, offline=True, source=rss_src), MockCollector)
 
 
 def _run_all():
