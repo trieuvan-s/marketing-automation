@@ -1132,6 +1132,24 @@ def test_schedule_parse_hhmm_and_config():
         raise AssertionError("mode không hợp lệ phải raise")
 
 
+def test_schedule_config_section_isolated():
+    """2 lịch (crawl + draft) đọc 2 section riêng trong CÙNG settings, không đụng nhau."""
+    from twmkt.schedule import ScheduleConfig
+
+    settings = Settings({
+        "schedule": {"enabled": True, "interval_minutes": 60, "job": "review_to_sheet"},
+        "schedule_draft": {"enabled": True, "interval_minutes": 30, "job": "produce_draft"},
+    })
+    crawl = ScheduleConfig.from_settings(settings)
+    draft = ScheduleConfig.from_settings(settings, section="schedule_draft")
+    assert crawl.interval_minutes == 60 and crawl.job == "review_to_sheet"
+    assert draft.interval_minutes == 30 and draft.job == "produce_draft"
+
+    # section vắng mặt -> dùng default (enabled=False), KHÔNG lỗi
+    missing = ScheduleConfig.from_settings(settings, section="schedule_other")
+    assert missing.enabled is False
+
+
 def test_next_run_at_interval_and_daily():
     from datetime import datetime, timezone
     from twmkt.schedule import ScheduleConfig, next_run_at
@@ -1429,6 +1447,50 @@ def test_infographic_agent_extracts_stats_from_evidence_deterministic():
     assert spec["footer"]["source"] == "cafef.vn"
     assert len(spec["stats"]) >= 2
     assert all(s["value"].lower() in brief.evidence.lower() for s in spec["stats"])
+
+
+# --- Render Infographic (src/twmkt/render, $0 tất định) --------------------
+def test_brand_kit_from_settings_reads_overrides_and_defaults():
+    from twmkt.render import brand_kit_from_settings
+
+    kit = brand_kit_from_settings(Settings({}))
+    assert kit["width"] == 1080 and kit["primary"] == "#E7C873"
+
+    kit2 = brand_kit_from_settings(Settings({"render": {"infographic": {
+        "primary": "#FF0000", "width": 800,
+    }}}))
+    assert kit2["primary"] == "#FF0000" and kit2["width"] == 800
+    assert kit2["bg"] == "#0B1B2B"   # key không khai -> vẫn dùng mặc định
+
+
+def test_render_infographic_svg_contains_headline_stats_and_disclaimer():
+    from twmkt.agents.production import InfographicSpecAgent, ProductionBrief
+    from twmkt.render import brand_kit_from_settings, render_infographic_svg
+    import json as _json
+    import xml.dom.minidom as minidom
+
+    brief = ProductionBrief(title="PNJ tăng 40%", hook="PNJ: kỷ lục doanh thu",
+                            tickers=["PNJ"], url="https://cafef.vn/x.chn",
+                            evidence="Doanh thu tăng 40%, đạt 1.200 tỷ đồng, kỷ lục.")
+    spec = _json.loads(InfographicSpecAgent(None).run(brief).body)
+    brand = brand_kit_from_settings(Settings({}))
+    svg = render_infographic_svg(spec, brand)
+
+    assert svg.startswith("<svg ")
+    minidom.parseString(svg)   # phải là XML hợp lệ, không lỗi parse
+    assert "PNJ" in svg
+    assert spec["stats"][0]["value"] in svg
+    assert "không phải khuyến nghị đầu tư" in svg
+    assert brand["primary"] in svg
+
+
+def test_render_infographic_svg_handles_empty_stats_and_missing_footer():
+    from twmkt.render import render_infographic_svg
+    import xml.dom.minidom as minidom
+
+    svg = render_infographic_svg({"headline": "Chỉ tiêu đề", "tickers": []})
+    minidom.parseString(svg)
+    assert "Chỉ tiêu đề" in svg
 
 
 def test_all_production_agents_applies_prompt_overrides_by_name():

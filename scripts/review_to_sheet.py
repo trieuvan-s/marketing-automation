@@ -89,7 +89,7 @@ def _score_weights(settings) -> dict:
 
 
 def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False,
-        debug: bool = False) -> dict:
+        debug: bool = False, offline: bool = False) -> dict:
     settings = load_settings()
 
     # Ưu tiên ENV (ghi đè tạm) -> settings.yaml (mục sheets). ENV không bắt buộc.
@@ -134,9 +134,12 @@ def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False
     # --- LLM cho HOOK (tầng content_model = Sonnet, bọc LLMRouter đo token/chi phí)
     # LÙI MƯỢT nhưng CÓ CẢNH BÁO RÕ: banner IN RA mỗi lần chạy, không im lặng.
     # CHỈ Hook gọi LLM ở script này (Researcher không chạy ở đây).
+    # `offline=True` ép Hook $0 (fallback tất định) BẤT KỂ API key có hiệu lực
+    # hay không -- dùng cho lịch chạy tự động không giám sát (xem run_scheduler.py
+    # / power_on.py, tránh phát sinh chi phí API mỗi giờ ngoài ý muốn).
     llm = factory.llm_status(settings)
     print(llm.banner)
-    use_llm = llm.use_llm
+    use_llm = llm.use_llm and not offline
     hook_llm = factory.build_hook_llm(settings, offline=not use_llm)   # Sonnet (content_model)
     engine = factory.model_engine_label(llm.hook_model, use_llm=use_llm)
     board.log("INFO", llm.banner, engine=engine)
@@ -282,10 +285,12 @@ def _parse_args(argv: list[str]):
                     help="Lấy nguồn thẳng từ settings.yaml, bỏ qua tab SOURCES (kiểm chứng nhanh).")
     ap.add_argument("--debug", action="store_true",
                     help="In 3 dòng debug Hook (llm type/raw/parsed) cho bài ĐẦU TIÊN.")
+    ap.add_argument("--offline", action="store_true",
+                    help="Ép Hook fallback tất định $0, bỏ qua Sonnet dù có API key.")
     return ap.parse_args(argv)
 
 
 if __name__ == "__main__":
     args = _parse_args(sys.argv[1:])
     run(limit=args.limit, sync_sources=args.sync_sources, from_config=args.from_config,
-        debug=args.debug)
+        debug=args.debug, offline=args.offline)

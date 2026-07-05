@@ -71,18 +71,22 @@ class ScheduleConfig:
             raise ValueError("schedule.at_times trống cho mode=daily")
 
     @classmethod
-    def from_settings(cls, settings) -> "ScheduleConfig":
-        raw_times = settings.get("schedule.at_times", ["08:30"]) or ["08:30"]
+    def from_settings(cls, settings, *, section: str = "schedule") -> "ScheduleConfig":
+        """`section` cho phép nhiều lịch ĐỘC LẬP trong CÙNG settings.yaml (vd
+        "schedule" cho crawl, "schedule_draft" cho --draft sản xuất) — mỗi lịch
+        đọc key riêng dưới `<section>.*`, không đụng nhau. Mặc định "schedule"
+        (tương thích ngược với cấu hình cũ)."""
+        raw_times = settings.get(f"{section}.at_times", ["08:30"]) or ["08:30"]
         return cls(
-            enabled=bool(settings.get("schedule.enabled", False)),
-            mode=(settings.get("schedule.mode", "interval") or "interval").lower(),
-            interval_minutes=int(settings.get("schedule.interval_minutes", 60)),
+            enabled=bool(settings.get(f"{section}.enabled", False)),
+            mode=(settings.get(f"{section}.mode", "interval") or "interval").lower(),
+            interval_minutes=int(settings.get(f"{section}.interval_minutes", 60)),
             at_times=[parse_hhmm(t) for t in raw_times],
-            timezone=settings.get("schedule.timezone", "Asia/Ho_Chi_Minh"),
-            jitter_s=float(settings.get("schedule.jitter_s", 0.0)),
-            run_on_start=bool(settings.get("schedule.run_on_start", True)),
-            max_runs=int(settings.get("schedule.max_runs", 0)),
-            job=settings.get("schedule.job", "review_to_sheet"),
+            timezone=settings.get(f"{section}.timezone", "Asia/Ho_Chi_Minh"),
+            jitter_s=float(settings.get(f"{section}.jitter_s", 0.0)),
+            run_on_start=bool(settings.get(f"{section}.run_on_start", True)),
+            max_runs=int(settings.get(f"{section}.max_runs", 0)),
+            job=settings.get(f"{section}.job", "review_to_sheet"),
         )
 
     def describe(self) -> str:

@@ -24,6 +24,21 @@ storage:
   retention_days: 10              # giữ tối đa 10 ngày dữ liệu
   timezone: "Asia/Ho_Chi_Minh"    # mốc chia ngày
 
+# --- Brand kit render Infographic (src/twmkt/render/infographic.py, $0 tất định) --
+# Đổi màu/font/kích thước ở ĐÂY, KHÔNG sửa code. SVG thuần (không phụ thuộc
+# Pillow/cairo) -> mở trực tiếp bằng trình duyệt hoặc export PNG bằng công cụ
+# thiết kế khi cần đăng MXH.
+render:
+  infographic:
+    width: 1080
+    height: 1350                  # tỉ lệ 4:5 — hợp Facebook/Instagram feed
+    bg: "#0B1B2B"                  # nền navy đậm
+    surface: "#132A3E"             # thẻ số liệu
+    primary: "#E7C873"             # vàng đồng — nhấn số liệu/emphasis
+    text: "#F5F5F0"
+    text_muted: "#9FB3C8"
+    font_family: "Arial, 'Segoe UI', sans-serif"
+
 # --- Prompt agent sản xuất (version-controlled, đổi văn phong không sửa code) --
 # Tab PROMPTS (Name|Version|Enable) trên Sheet chọn version đang dùng; nội dung
 # nằm ở prompts/<name>.<version>.md (repo). Thiếu tab/dòng/file -> default nội bộ.
@@ -328,12 +343,14 @@ publishers:
   - key: "console"
     enabled: true
 
-# --- Lập lịch tự động chạy crawl ------------------------------------
-# python scripts/run_scheduler.py            (loop nội bộ, cần enabled=true)
-# python scripts/run_scheduler.py --once     (1 lần — dùng cho OS scheduler)
-# python scripts/run_scheduler.py --print-os (in lệnh Task Scheduler/cron)
+# --- Lập lịch tự động: CRAWL (Sources -> CONTEXT) --------------------
+# python scripts/run_scheduler.py                       (loop nội bộ, cần enabled=true)
+# python scripts/run_scheduler.py --once                (1 lần — dùng cho OS scheduler)
+# python scripts/run_scheduler.py --print-os            (in lệnh Task Scheduler/cron)
+# python scripts/power_on.py  chạy CẢ 2 lịch (crawl + schedule_draft) 1 lần, 1 tiến trình,
+#   chạy NGAY 1 lượt khi khởi động (run_on_start=true) rồi lặp lại theo interval_minutes.
 schedule:
-  enabled: false                  # true = bật vòng lặp nội bộ
+  enabled: true                   # true = bật vòng lặp nội bộ
   mode: "interval"                # interval | daily
   interval_minutes: 60            # dùng khi mode=interval
   at_times: ["08:30", "16:00"]    # dùng khi mode=daily (giờ địa phương theo timezone)
@@ -342,3 +359,28 @@ schedule:
   run_on_start: true              # chạy ngay 1 lần khi khởi động loop
   max_runs: 0                     # 0 = vô hạn; >0 = dừng sau N lần (test/CI)
   job: "review_to_sheet"          # review_to_sheet (crawl thật -> Sheet) | run_pipeline
+  hook_offline: true              # true = Hook lịch tự động dùng fallback $0 (KHÔNG gọi
+                                   # Sonnet), tránh phát sinh phí API mỗi giờ 24/7 không
+                                   # giám sát. Chạy tay `python scripts/review_to_sheet.py`
+                                   # (không --offline) vẫn dùng Sonnet thật khi cần Hook hay.
+
+# --- Lập lịch tự động: SẢN XUẤT (CONTEXT.APPROVE -> chuẩn bị --draft) ------
+# Chạy độc lập với lịch crawl ở trên (section riêng, không đụng nhau). Job
+# "produce_draft" CHỈ full-fetch + tạo request chờ (KHÔNG tự --ingest — bước
+# viết nội dung vẫn cần Claude Code chủ động đọc + trả lời + chạy --ingest).
+# 100% $0: không gọi LLM nào (infographic tất định, article/video chỉ CHUẨN BỊ
+# file .prompt.md chờ Claude Code trả lời thủ công).
+# python scripts/run_scheduler.py --section schedule_draft --once
+schedule_draft:
+  enabled: true                   # true = bật vòng lặp nội bộ
+  mode: "interval"
+  interval_minutes: 30            # tần suất --draft (mặc định 30 phút/lần)
+  timezone: "Asia/Ho_Chi_Minh"
+  jitter_s: 30
+  run_on_start: true
+  max_runs: 0
+  job: "produce_draft"            # produce_draft (chuẩn bị request) — không có lựa chọn khác
+
+# --- Giới hạn xử lý mỗi lần --draft (config-first, tránh hard-code trong scheduler)
+production:
+  draft_limit: 5                  # số dòng CONTEXT APPROVE tối đa xử lý mỗi lần --draft
