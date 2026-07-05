@@ -13,10 +13,22 @@ paths:
   storage_dir: "storage"          # documents / logs / output
 
 # --- Lưu trữ tài liệu sạch (persist / audit) ------------------------
+# Partition theo NGÀY: storage/documents/<YYYY-MM-DD>/<content_hash>.json.
+# Dedup theo NỘI DUNG chéo các ngày còn giữ -> crawl nhiều lần/ngày không tạo
+# bản trùng. Chỉ giữ `retention_days` ngày mới nhất (folder cũ hơn bị xoá).
 storage:
   type: "file"                    # file | memory
   documents_dir: "storage/documents"
   output_dir: "storage/output"
+  drafts_dir: "storage/production_drafts"   # hàng chờ --draft/--ingest (Claude Code viết nội dung)
+  retention_days: 10              # giữ tối đa 10 ngày dữ liệu
+  timezone: "Asia/Ho_Chi_Minh"    # mốc chia ngày
+
+# --- Prompt agent sản xuất (version-controlled, đổi văn phong không sửa code) --
+# Tab PROMPTS (Name|Version|Enable) trên Sheet chọn version đang dùng; nội dung
+# nằm ở prompts/<name>.<version>.md (repo). Thiếu tab/dòng/file -> default nội bộ.
+prompts:
+  dir: "prompts"
 
 # --- Nguồn thu thập: mô hình 3 lớp (config-first, khớp SOURCES sheet) --------
 # fetch_type: "html" (mặc định, chưa khai = html) -> HttpFirstCollector, crawl
@@ -278,8 +290,9 @@ knowledge:
 # dữ liệu CafeF thật + đo token. Producers (article/video) tầng đắt (content_model)
 # CHỈ chạy SAU cổng duyệt 1 -> run_pipeline dừng trước cổng nên chúng chưa tốn token.
 llm:
-  provider: "anthropic"           # mock | anthropic
-  triage_model: "claude-haiku-4-5-20251001"   # Researcher + Hook (rẻ, đo token trước)
+  provider: "anthropic"           # mock | anthropic (thiếu SDK/khóa -> LÙI MƯỢT về $0)
+  triage_model: "claude-haiku-4-5-20251001"   # RESEARCHER (tầng rẻ, đo token trước)
+  hook_model: "claude-sonnet-4-6"             # HOOK (Sonnet: hook ngắn -> rẻ mà chất lượng cao)
   content_model: "claude-sonnet-4-6"          # Producers (tầng 2) — chưa bật ở bước này
   max_tokens: 1500
   budget_usd: 1.0                 # hạn mức mềm cho 1 lần chạy (LLMRouter -> BudgetExceeded)

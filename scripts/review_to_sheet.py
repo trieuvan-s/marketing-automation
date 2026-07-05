@@ -42,14 +42,12 @@ from twmkt._encoding import ensure_utf8_stdio  # noqa: E402
 ensure_utf8_stdio()
 
 from twmkt import factory  # noqa: E402
-from twmkt.agents.base import MockLLM  # noqa: E402
-from twmkt.agents.hook import HookAgent  # noqa: E402
+from twmkt.agents.hook import HookAgent, _try_json  # noqa: E402
 from twmkt.config import load_settings  # noqa: E402
 from twmkt.curation import normalize  # noqa: E402
 from twmkt.curation.config import CurationConfig, _load_lines  # noqa: E402
 from twmkt.curation.enrich import (  # noqa: E402
-    EventItem, classify, classify_field_topic, cluster_by_event,
-    groups_from_settings, hotness_pct, marketing_score, taxonomy_from_settings,
+    classify, cluster_by_event, groups_from_settings, hotness_pct, marketing_score,
 )
 from twmkt.models import ResearchBrief, Source  # noqa: E402
 from twmkt.sheets_board import SheetsBoard, context_row  # noqa: E402
@@ -90,7 +88,8 @@ def _score_weights(settings) -> dict:
     }
 
 
-def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False) -> dict:
+def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False,
+        debug: bool = False) -> dict:
     settings = load_settings()
 
     # Ưu tiên ENV (ghi đè tạm) -> settings.yaml (mục sheets). ENV không bắt buộc.
@@ -127,11 +126,20 @@ def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False
         raise SystemExit("Không có nguồn nào (tab SOURCES trống và config cũng trống).")
     sources_by_name: dict[str, Source] = {s.name: s for s in sources}
 
-    # PriorityGroups + TAXONOMY: đọc LIVE từ Sheet MỖI LẦN CHẠY (team đổi theo
-    # pha thị trường/phân loại không cần sửa code/deploy lại).
+    # PriorityGroups: đọc LIVE từ tab SETTINGS MỖI LẦN CHẠY (team đổi theo pha
+    # thị trường không cần sửa code/deploy lại).
     priority_groups = board.read_priority_groups(default=_DEFAULT_PRIORITY_GROUPS)
-    taxonomy = board.read_taxonomy(default=taxonomy_from_settings(settings))
     board.log("INFO", f"PriorityGroups (từ SETTINGS): {', '.join(priority_groups)}")
+
+    # --- LLM cho HOOK (tầng content_model = Sonnet, bọc LLMRouter đo token/chi phí)
+    # LÙI MƯỢT nhưng CÓ CẢNH BÁO RÕ: banner IN RA mỗi lần chạy, không im lặng.
+    # CHỈ Hook gọi LLM ở script này (Researcher không chạy ở đây).
+    llm = factory.llm_status(settings)
+    print(llm.banner)
+    use_llm = llm.use_llm
+    hook_llm = factory.build_hook_llm(settings, offline=not use_llm)   # Sonnet (content_model)
+    engine = factory.model_engine_label(llm.hook_model, use_llm=use_llm)
+    board.log("INFO", llm.banner, engine=engine)
 
     # Dựng SẴN cả 2 collector — tái dùng cho mọi nguồn theo fetch_type, tránh
     # dựng lại mỗi nguồn. html_collector CÒN dùng để full-fetch (tầng 3) item rss.
@@ -144,7 +152,6 @@ def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False
     groups = groups_from_settings(settings)
     weights = _score_weights(settings)
     store = factory.build_store(settings)
-    llm = MockLLM()   # $0 token — hook chạy fallback tất định
 
     # --- TẦNG 1: PHÁT HIỆN (rss nhẹ hoặc html full ngay) trên TỪNG nguồn -----
     raw_docs = []
@@ -159,14 +166,12 @@ def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False
 
     # --- TẦNG 2: chuẩn hóa (dedup content-hash + whitelist + relevance) MỘT
     # LƯỢT trên TOÀN BỘ ứng viên, rồi gộp SỰ KIỆN chéo nguồn — GIỮ báo Priority
-    # cao (cluster_by_event), url báo khác gộp vào cột Sources. --
+    # cao (cluster_by_event, item = dict), url báo khác gộp vào ô Source. --
     clean = normalize(raw_docs, curation)
     by_url = {c.url: c for c in clean}
     items = [
-        EventItem(
-            title=c.title, url=c.url, publisher=c.source,
-            priority=(sources_by_name[c.source].priority if c.source in sources_by_name else 0),
-        )
+        {"title": c.title, "url": c.url, "publisher": c.source,   # publisher/priority nội bộ
+         "priority": (sources_by_name[c.source].priority if c.source in sources_by_name else 0)}
         for c in clean
     ]
     clusters = cluster_by_event(items, threshold=0.6)
@@ -175,7 +180,7 @@ def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False
     final: list[dict] = []
     full_fetch_failed = 0
     for cl in clusters:
-        c = by_url[cl.item.url]
+        c = by_url[cl["rep"]["url"]]
         src = sources_by_name.get(c.source)
         if src is not None and src.fetch_type == "rss":
             full_raw = html_collector.fetch_one(src, c.url)
@@ -187,43 +192,59 @@ def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False
                 full_fetch_failed += 1
                 continue
             c = full_clean[0]
-        final.append({"source": src, "doc": c, "other_urls": cl.other_urls})
+        final.append({"doc": c, "other_urls": cl["sources"]})
 
-    # --- Persist + dựng hàng CONTEXT (tất định, $0), sắp Hot% giảm dần -------
+    # --- Persist + dựng hàng CONTEXT (Hook qua Haiku/fallback), sắp Hot% giảm dần
     stored = store.upsert([f["doc"] for f in final])
+    hook_agent = HookAgent(hook_llm)   # 1 instance dùng chung -> soi được last_prompt/last_raw
     scored_rows: list[tuple[int, list[str]]] = []
-    for f in final:
-        src, c, other_urls = f["source"], f["doc"], f["other_urls"]
+    for i, f in enumerate(final):
+        c, other_urls = f["doc"], f["other_urls"]
         full = f"{c.title}. {c.markdown}"
         macro_hits = curation.macro_hits(full)
-        labels = classify(full, c.tickers, tags=c.tags, groups=groups)[:2]  # Group tối đa 2 nhãn
-        # Field/Topic CHỈ theo TAXONOMY (keyword) — KHÔNG dùng <category> thô RSS.
-        field_hint = [src.field_hint] if src and src.field_hint else None
-        field_val, topic_val = classify_field_topic(full, hints=field_hint, taxonomy=taxonomy)
+        labels = classify(full, c.tickers, tags=c.tags, groups=groups)
+        group = ", ".join(labels[:2])              # Group tối đa 2 nhãn
+        topic = labels[0] if labels else ""        # Topic = nhãn chính (thay taxonomy)
         score = marketing_score(full, c.tickers, macro_hits=macro_hits, **weights["marketing"])
         hot = hotness_pct(full, c.tickers, labels, priority_groups=priority_groups,
                           macro_hits=macro_hits, **weights["hotness"])
-        hook = HookAgent(llm).run(ResearchBrief(   # $0 (MockLLM -> fallback)
-            topic=c.title, tickers=c.tickers, thesis=c.title, key_points=[c.title]))
+        hook = hook_agent.run(ResearchBrief(   # Sonnet (content_model) hoặc fallback $0
+            topic=c.title, tickers=c.tickers, thesis=c.title,
+            key_points=[c.title], evidence=[c.markdown[:400]]))
+        if debug and i == 0:
+            _print_hook_debug(hook_agent)
         scored_rows.append((hot, context_row(
             title=c.title, hook_line=hook.headlines[0], source_url=c.url, score=score,
-            hot_pct=hot, publisher=(src.name if src else c.source), field=field_val,
-            topic=topic_val, group=", ".join(labels), other_sources=other_urls,
+            hot_pct=hot, topic=topic, group=group, other_sources=other_urls,
             tickers=c.tickers)))
 
     scored_rows.sort(key=lambda x: x[0], reverse=True)   # Hot% giảm dần
     # UPSERT: xóa vùng dữ liệu CONTEXT (giữ header) rồi ghi lại -> hết trộn dòng cũ.
     written = board.replace_context([row for _, row in scored_rows])
 
+    usage = hook_llm.usage.as_dict()
     totals = {
         "crawled": len(raw_docs), "kept": len(clean), "clusters": len(clusters),
         "stored": stored, "written": written, "full_fetch_failed": full_fetch_failed,
+        "llm": usage, "use_llm": use_llm,
     }
     board.log("INFO", f"TỔNG: crawled {totals['crawled']} / kept {totals['kept']} / "
                       f"cụm(gộp sự kiện chéo nguồn) {totals['clusters']} / stored {totals['stored']} / "
-                      f"CONTEXT {totals['written']} (UPSERT) / full-fetch lỗi {totals['full_fetch_failed']}")
+                      f"CONTEXT {totals['written']} (UPSERT) / full-fetch lỗi {totals['full_fetch_failed']}",
+              engine=engine)
     _print_summary(per_source, totals)
     return {"per_source": per_source, "totals": totals}
+
+
+def _print_hook_debug(hook_agent: HookAgent) -> None:
+    """3 dòng debug (--debug --limit 1): soi vì sao Hook rơi về fallback hay
+    không — llm type (LLMRouter -> base thật), raw response, parse JSON được không."""
+    base = getattr(hook_agent.llm, "base", hook_agent.llm)
+    print("\n----- [DEBUG] HookAgent lần gọi đầu tiên -----")
+    print(f"[DEBUG] llm type: {type(hook_agent.llm).__name__}(base={type(base).__name__})")
+    print(f"[DEBUG] raw: {hook_agent.last_raw!r}")
+    print(f"[DEBUG] _try_json(raw) is None: {_try_json(hook_agent.last_raw) is None}")
+    print("-----------------------------------------------\n")
 
 
 def _print_summary(per_source: list[dict], totals: dict) -> None:
@@ -234,6 +255,18 @@ def _print_summary(per_source: list[dict], totals: dict) -> None:
     print(f"crawled {totals['crawled']} | kept(sau normalize) {totals['kept']} | "
           f"cụm duy nhất {totals['clusters']} | full-fetch lỗi {totals['full_fetch_failed']}")
     print(f"stored {totals['stored']} | CONTEXT {totals['written']} dòng (UPSERT — ghi đè mỗi lần chạy)")
+    u = totals.get("llm", {})
+    n = totals["written"] or 1
+    if totals.get("use_llm") and u.get("calls"):
+        per = u["cost_usd"] / n
+        print(f"LLM Hook (Sonnet thật): {u['calls']} lượt ({u.get('by_model', {})}) | "
+              f"in {u['in_tokens']} / out {u['out_tokens']} tok | "
+              f"~${u['cost_usd']:.4f} tổng (~${per:.4f}/bài) | cache_hits {u['cache_hits']}")
+    else:
+        # Fallback: KHÔNG gọi API ($0 thật). Router vẫn đếm để ước tính nếu bật LLM.
+        print(f"LLM Hook: FALLBACK tất định $0 (không gọi API). "
+              f"Ước tính nếu bật LLM: ~${u.get('cost_usd', 0):.4f} "
+              f"(~${u.get('cost_usd', 0) / n:.4f}/bài).")
     print("Mở tab CONTEXT trên Google Sheet để duyệt (cột Status; tick Use để chọn dùng);"
          " đã sắp theo Hot% giảm dần.")
 
@@ -247,9 +280,12 @@ def _parse_args(argv: list[str]):
                     help="Ghi đè tab SOURCES bằng nguồn trong settings.yaml (schema mới) rồi chạy.")
     ap.add_argument("--from-config", action="store_true",
                     help="Lấy nguồn thẳng từ settings.yaml, bỏ qua tab SOURCES (kiểm chứng nhanh).")
+    ap.add_argument("--debug", action="store_true",
+                    help="In 3 dòng debug Hook (llm type/raw/parsed) cho bài ĐẦU TIÊN.")
     return ap.parse_args(argv)
 
 
 if __name__ == "__main__":
     args = _parse_args(sys.argv[1:])
-    run(limit=args.limit, sync_sources=args.sync_sources, from_config=args.from_config)
+    run(limit=args.limit, sync_sources=args.sync_sources, from_config=args.from_config,
+        debug=args.debug)

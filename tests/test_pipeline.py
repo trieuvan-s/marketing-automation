@@ -261,6 +261,63 @@ def test_hook_fallback_uses_article_title_not_raw_topic():
     assert title in hook.angle
 
 
+def test_hook_fallback_has_no_generic_market_prefix():
+    """Fallback KHÔNG mở bằng 'thị trường:' (kiểu chung chung đã bỏ)."""
+    from twmkt.models import ResearchBrief
+    brief = ResearchBrief(topic="điểm tin", tickers=[], thesis="x",
+                          key_points=["Giá vàng lập kỷ lục mới"])
+    hook = HookAgent().run(brief)   # MockLLM -> fallback
+    for h in hook.headlines:
+        assert "thị trường:" not in h.lower()
+    assert "thị trường:" not in hook.angle.lower()
+
+
+def test_hook_parses_llm_json():
+    """LLM trả JSON hợp lệ (kể cả bọc ```json) -> dùng đúng angle/headlines/cta."""
+    from twmkt.models import ResearchBrief
+
+    class JsonLLM:
+        def complete(self, system, prompt):
+            return ('```json\n{"angle": "Góc sắc", "headlines": ["H1 dẫn số 20%", '
+                    '"H2 tò mò?", "H3 tương phản"], "audience": "NĐT cá nhân", '
+                    '"emotion": "bất ngờ", "cta": "CTA riêng"}\n```')
+
+    hook = HookAgent(JsonLLM()).run(ResearchBrief(
+        topic="t", tickers=["FPT"], thesis="x", key_points=["Tiêu đề bài"]))
+    assert hook.angle == "Góc sắc"
+    assert hook.headlines == ["H1 dẫn số 20%", "H2 tò mò?", "H3 tương phản"]
+    assert hook.cta == "CTA riêng" and hook.emotion == "bất ngờ"
+
+
+def test_try_json_hardening_fence_and_prose():
+    """_try_json HARDENING: bóc code fence ```json...```; và vẫn lấy được JSON dù
+    model lỡ kèm lời dẫn trước/sau (dặn rồi nhưng đề phòng không tuân thủ)."""
+    from twmkt.agents.hook import _try_json
+
+    assert _try_json('```json\n{"angle": "a", "headlines": ["h1"]}\n```') == {
+        "angle": "a", "headlines": ["h1"]}
+    assert _try_json('```\n{"angle": "b"}\n```') == {"angle": "b"}   # fence không ghi "json"
+    assert _try_json('Đây là kết quả:\n{"angle": "c"}\nHết.') == {"angle": "c"}
+    assert _try_json("") is None
+    assert _try_json("không phải JSON gì cả") is None
+
+
+def test_hook_agent_stores_last_prompt_and_raw_for_debug():
+    """HookAgent lưu last_prompt/last_raw của LẦN GỌI GẦN NHẤT (debug --debug),
+    và prompt PHẢI kèm dặn 'CHỈ trả JSON' để tăng tỉ lệ model tuân thủ."""
+    from twmkt.models import ResearchBrief
+
+    class RecordingLLM:
+        def complete(self, system, prompt): return "phản hồi không phải JSON"
+
+    agent = HookAgent(RecordingLLM())
+    agent.run(ResearchBrief(topic="t", tickers=["FPT"], thesis="x",
+                            key_points=["Tiêu đề bài test"]))
+    assert "CHỈ trả JSON" in agent.last_prompt
+    assert "Tiêu đề bài test" in agent.last_prompt
+    assert agent.last_raw == "phản hồi không phải JSON"
+
+
 def test_researcher_prompt_anchors_on_article_titles():
     """Researcher gửi tiêu đề bài giữ lại vào prompt + dặn KHÔNG lặp topic thô."""
     from twmkt.agents.researcher import ResearcherAgent
@@ -329,6 +386,44 @@ def test_build_research_llm_offline_and_provider():
     assert real.budget_usd == 1.0                            # hạn mức từ config
 
 
+def test_build_hook_llm_uses_content_model_sonnet():
+    """factory.build_hook_llm: HOOK = content_model (Sonnet), tier SMART; hook_model
+    riêng override; offline -> Mock. Đều bọc Router."""
+    from twmkt.agents.router import LLMRouter, Tier
+    from twmkt.agents.base import MockLLM as _Mock, AnthropicLLM
+
+    off = factory.build_hook_llm(Settings({"llm": {"provider": "anthropic"}}), offline=True)
+    assert isinstance(off, LLMRouter) and isinstance(off.base, _Mock)
+
+    real = factory.build_hook_llm(
+        Settings({"llm": {"provider": "anthropic", "content_model": "claude-sonnet-4-6",
+                          "budget_usd": 2.0}}), offline=False)
+    assert isinstance(real, LLMRouter) and isinstance(real.base, AnthropicLLM)
+    assert real.base.model == "claude-sonnet-4-6"   # Hook = content_model (Sonnet)
+    assert real.default_tier is Tier.SMART           # định giá Sonnet
+    assert real.budget_usd == 2.0
+    # hook_model riêng -> override content_model
+    r2 = factory.build_hook_llm(
+        Settings({"llm": {"provider": "anthropic", "hook_model": "claude-opus-4-8",
+                          "content_model": "claude-sonnet-4-6"}}), offline=False)
+    assert r2.base.model == "claude-opus-4-8"
+
+
+def test_anthropic_llm_degrades_gracefully_without_key():
+    """LÙI MƯỢT: thiếu SDK/khóa -> is_available False; complete() trả rỗng, KHÔNG raise."""
+    from twmkt.agents.base import AnthropicLLM
+
+    old = os.environ.pop("ANTHROPIC_API_KEY", None)
+    try:
+        ok, why = AnthropicLLM.is_available()
+        assert ok is False and why                       # thiếu SDK hoặc thiếu khóa
+        out = AnthropicLLM(model="claude-sonnet-4-6").complete("hệ thống", "prompt")
+        assert out == ""                                  # trả rỗng -> agent tự fallback ($0)
+    finally:
+        if old is not None:
+            os.environ["ANTHROPIC_API_KEY"] = old
+
+
 # --- Lưu trữ: FileDocumentStore persist + dedup across-run ------------------
 def test_file_store_dedup_across_runs():
     import shutil
@@ -355,9 +450,54 @@ def test_build_store_by_type():
     tmp = tempfile.mkdtemp()
     try:
         s = factory.build_store(
-            Settings({"storage": {"type": "file", "documents_dir": tmp}})
+            Settings({"storage": {"type": "file", "documents_dir": tmp, "retention_days": 5}})
         )
-        assert isinstance(s, FileDocumentStore)
+        assert isinstance(s, FileDocumentStore) and s.retention_days == 5
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _doc(i: int) -> "object":
+    from twmkt.models import CleanDocument
+    return CleanDocument(source="s", url=f"http://u/{i}", title=f"Tiêu đề {i}",
+                         markdown=f"Nội dung bài số {i}")
+
+
+def test_file_store_day_partition_and_intraday_dedup():
+    """Partition theo NGÀY + chạy nhiều lần TRONG NGÀY không tạo bản trùng (nội dung)."""
+    import shutil
+    import tempfile
+    from pathlib import Path
+    tmp = tempfile.mkdtemp()
+    try:
+        d1, d2 = _doc(1), _doc(2)
+        s1 = FileDocumentStore(tmp, today="2026-07-04")
+        assert s1.upsert([d1, d2]) == 2                 # lần 1 trong ngày: 2 mới
+        s2 = FileDocumentStore(tmp, today="2026-07-04")  # chạy lại CÙNG ngày
+        assert s2.upsert([d1, d2]) == 0                 # 0 mới (dedup nội dung across-run)
+        day = Path(tmp) / "2026-07-04"
+        assert day.is_dir() and len(list(day.glob("*.json"))) == 2   # đúng folder ngày, 2 file
+        assert len(s2.all()) == 2
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_file_store_cross_day_dedup_and_retention_10():
+    """Dedup CHÉO ngày còn giữ + chỉ giữ tối đa 10 folder ngày (folder cũ bị xoá)."""
+    import shutil
+    import tempfile
+    from pathlib import Path
+    tmp = tempfile.mkdtemp()
+    try:
+        for i in range(1, 13):                          # 12 ngày, mỗi ngày 1 bài mới
+            FileDocumentStore(tmp, today=f"2026-07-{i:02d}", retention_days=10).upsert([_doc(i)])
+        days = sorted(p.name for p in Path(tmp).iterdir() if p.is_dir())
+        assert len(days) == 10                          # chỉ giữ 10 ngày mới nhất
+        assert days[0] == "2026-07-03" and days[-1] == "2026-07-12"  # ngày 01,02 bị xoá
+
+        s = FileDocumentStore(tmp, today="2026-07-12", retention_days=10)
+        assert s.upsert([_doc(3)]) == 0                 # bài ngày 03 CÒN giữ -> dedup chéo ngày
+        assert s.upsert([_doc(1)]) == 1                 # bài ngày 01 đã bị xoá -> coi là MỚI
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -544,28 +684,28 @@ def test_sheets_sources_from_rows_filters_enable():
 
 
 def test_sheets_context_row_column_order():
-    """context_row đúng thứ tự CONTEXT_HEADER; Use=FALSE, Status=PENDING mặc định;
-    Publisher/Field/Topic/Sources (mô hình 3 lớp) xếp đúng cột."""
+    """context_row header MỚI (12 cột): bỏ Publisher/Field; Source gộp báo khác;
+    Use=FALSE, Status=PENDING mặc định."""
     from twmkt.sheets_board import context_row, CONTEXT_HEADER
 
+    assert CONTEXT_HEADER == ["Use", "Score", "Hot%", "Group", "Topic", "Context",
+                             "Hook", "Source", "Status", "timestamp", "tickers", "Notes"]
     row = context_row(title="Tiêu đề bài", hook_line="FPT: hook hấp dẫn",
-                      source_url="http://u", score=5, hot_pct=42.5,
-                      publisher="CafeF - RSS Chứng khoán", field="ChungKhoan", topic="ThiTruong",
-                      group="ChinhSach, ViMoVN", other_sources=["http://u2", "http://u3"],
+                      source_url="http://u", score=5, hot_pct=42.5, topic="CoPhieu",
+                      group="CoPhieu, ChinhSach", other_sources=["http://u2", "http://u3"],
                       tickers=["FPT", "HPG"], ts="2026-07-02T00:00:00+00:00")
     assert len(row) == len(CONTEXT_HEADER)
     d = dict(zip(CONTEXT_HEADER, row))
     assert d["Use"] == "FALSE"
     assert d["Score"] == "5"
     assert d["Hot%"] == "42.5"
-    assert d["Publisher"] == "CafeF - RSS Chứng khoán"
-    assert d["Field"] == "ChungKhoan"
-    assert d["Topic"] == "ThiTruong"
-    assert d["Group"] == "ChinhSach, ViMoVN"
+    assert d["Group"] == "CoPhieu, ChinhSach"
+    assert d["Topic"] == "CoPhieu"
     assert d["Context"] == "Tiêu đề bài"
     assert d["Hook"] == "FPT: hook hấp dẫn"
-    assert d["Source"] == "http://u"
-    assert d["Sources"] == "http://u2, http://u3"
+    # Source gộp: url chính + '(+N báo)' + url báo khác xuống dòng (bỏ cột Sources)
+    assert d["Source"] == "http://u\n(+2 báo)\nhttp://u2\nhttp://u3"
+    assert "Publisher" not in d and "Field" not in d and "Sources" not in d
     assert d["Status"] == "PENDING"
     assert d["timestamp"] == "2026-07-02T00:00:00+00:00"
     assert d["tickers"] == "FPT, HPG"
@@ -598,10 +738,10 @@ def test_build_format_requests_covers_features_and_is_deterministic():
     assert kinds.count("deleteConditionalFormatRule") == 3
     # APPROVE/PENDING/REJECT (Status) + score scale + Hot% scale
     assert kinds.count("addConditionalFormatRule") == 5
-    # checkbox cho SOURCES.Enable + CONTEXT.Use, dropdown cho CONTEXT.Status
+    # checkbox cho SOURCES.Enable + CONTEXT.Use + PROMPTS.Enable, dropdown CONTEXT.Status
     sd = [r["setDataValidation"] for r in reqs if "setDataValidation" in r]
     conds = [v["rule"]["condition"]["type"] for v in sd]
-    assert conds.count("BOOLEAN") == 2 and "ONE_OF_LIST" in conds
+    assert conds.count("BOOLEAN") == 3 and "ONE_OF_LIST" in conds
     # determinism = idempotent theo cấu trúc
     assert build_format_requests(tabs) == reqs
     assert SOURCES_HEADER[0].lower() == "enable"
@@ -685,6 +825,54 @@ def test_sheets_settings_from_rows_and_priority_groups():
     # thiếu khóa / rỗng -> default
     assert priority_groups_from_rows([SETTINGS_HEADER], default=["A", "B"]) == ["A", "B"]
     assert priority_groups_from_rows([]) == []
+
+
+def test_prompt_versions_from_rows_filters_enable():
+    from twmkt.sheets_board import prompt_versions_from_rows, PROMPTS_HEADER
+
+    rows = [
+        PROMPTS_HEADER,  # Name | Version | Enable
+        ["analysis", "v2", "TRUE"],
+        ["video", "v1", "FALSE"],
+        ["infographic", "v1", "yes"],
+    ]
+    assert prompt_versions_from_rows(rows) == {"analysis": "v2", "infographic": "v1"}
+    assert prompt_versions_from_rows([]) == {}
+    assert prompt_versions_from_rows([["Name", "X"]]) == {}   # thiếu cột Version
+
+
+def test_sheets_board_read_prompt_versions_via_fake_ws():
+    from twmkt.sheets_board import SheetsBoard, PROMPTS_HEADER
+
+    class _FakeWS:
+        def __init__(self, values): self._v = values
+        def get_all_values(self): return self._v
+
+    board = SheetsBoard(spreadsheet_id="SID", creds_path="creds")
+    board._ws["PROMPTS"] = _FakeWS([PROMPTS_HEADER, ["analysis", "v3", "TRUE"]])
+    assert board.read_prompt_versions() == {"analysis": "v3"}
+
+
+def test_prompts_read_file_and_resolve_overrides():
+    import shutil
+    import tempfile
+    from twmkt.agents.prompts import read_prompt_file, resolve_prompts
+
+    tmp = tempfile.mkdtemp()
+    try:
+        with open(f"{tmp}/analysis.v2.md", "w", encoding="utf-8") as f:
+            f.write("Prompt bản v2 tùy chỉnh.")
+        assert read_prompt_file("analysis", "v2", prompts_dir=tmp) == "Prompt bản v2 tùy chỉnh."
+        assert read_prompt_file("analysis", "v9-khong-ton-tai", prompts_dir=tmp) is None
+
+        defaults = {"analysis": "default analysis", "video": "default video"}
+        out = resolve_prompts({"analysis": "v2", "video": "v9-khong-ton-tai"},
+                              defaults, prompts_dir=tmp)
+        assert out["analysis"] == "Prompt bản v2 tùy chỉnh."   # có file -> dùng file
+        assert out["video"] == "default video"                 # thiếu file -> giữ default
+        assert resolve_prompts({}, defaults, prompts_dir=tmp) == defaults
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_sheets_context_titles_reads_context_column():
@@ -865,43 +1053,29 @@ def test_http_collector_fetch_and_extract_reuses_extract_article():
     assert doc.source == "CafeF - RSS X"
 
 
-def test_enrich_classify_field_topic_uses_taxonomy_and_hints():
-    """classify_field_topic: khớp từ khóa TAXONOMY; hint (category RSS/SOURCES.Field)
-    khớp field -> ưu tiên nhưng không override tuyệt đối khi có bằng chứng khác."""
-    from twmkt.curation.enrich import classify_field_topic, TaxonomyRow
-
-    taxonomy = [
-        TaxonomyRow("ChinhSach", "PhapLy", ["nghị định", "luật"]),
-        TaxonomyRow("ViMo", "TrongNuoc", ["gdp", "lạm phát"]),
-    ]
-    assert classify_field_topic("Chính phủ ban hành Nghị định mới", taxonomy=taxonomy) == (
-        "ChinhSach", "PhapLy")
-    assert classify_field_topic("Không khớp từ khóa nào", taxonomy=taxonomy) == ("Khac", "")
-    # hint khớp field (không phân biệt hoa/thường) -> chọn đúng field dù 0 từ khóa khớp
-    assert classify_field_topic("tin chung chung", hints=["vimo"], taxonomy=taxonomy) == (
-        "ViMo", "TrongNuoc")
-
-
 def test_enrich_cluster_by_event_keeps_highest_priority():
-    """cluster_by_event: gộp sự kiện CHÉO NGUỒN, GIỮ báo Priority cao làm đại diện
-    (dù không xuất hiện đầu), url báo khác gộp vào other_urls."""
-    from twmkt.curation.enrich import cluster_by_event, EventItem
+    """cluster_by_event (item = dict): gộp sự kiện CHÉO NGUỒN, GIỮ báo Priority cao
+    làm 'rep' (dù không xuất hiện đầu), url báo khác gộp vào 'sources'."""
+    from twmkt.curation.enrich import cluster_by_event
 
     items = [
         # cụm FPT: bản Priority thấp xuất hiện TRƯỚC, bản cao xuất hiện SAU
-        EventItem("FPT bao lai quy tang manh", "http://low/fpt", "CafeBiz", priority=3),
-        EventItem("FPT bao lai quy tang manh nhe", "http://high/fpt", "Vietstock", priority=9),
-        EventItem("FPT bao lai quy tang", "http://mid/fpt", "CafeF", priority=5),
-        # cụm HPG riêng
-        EventItem("HPG san luong thep phuc hoi", "http://cafef/hpg", "CafeF", priority=5),
+        {"title": "FPT bao lai quy tang manh", "url": "http://low/fpt",
+         "publisher": "CafeBiz", "priority": 3},
+        {"title": "FPT bao lai quy tang manh nhe", "url": "http://high/fpt",
+         "publisher": "Vietstock", "priority": 9},
+        {"title": "FPT bao lai quy tang", "url": "http://mid/fpt",
+         "publisher": "CafeF", "priority": 5},
+        {"title": "HPG san luong thep phuc hoi", "url": "http://cafef/hpg",
+         "publisher": "CafeF", "priority": 5},
     ]
     clusters = cluster_by_event(items, threshold=0.6)
     assert len(clusters) == 2
-    fpt = next(c for c in clusters if "fpt" in c.item.title.lower())
-    assert fpt.item.url == "http://high/fpt" and fpt.item.priority == 9   # GIỮ Priority cao
-    assert fpt.other_urls == ["http://low/fpt", "http://mid/fpt"]         # url báo khác, giữ thứ tự
-    hpg = next(c for c in clusters if "hpg" in c.item.title.lower())
-    assert hpg.other_urls == []
+    fpt = next(c for c in clusters if "fpt" in c["rep"]["title"].lower())
+    assert fpt["rep"]["url"] == "http://high/fpt" and fpt["rep"]["priority"] == 9  # GIỮ Priority cao
+    assert set(fpt["sources"]) == {"http://low/fpt", "http://mid/fpt"}             # url báo khác
+    hpg = next(c for c in clusters if "hpg" in c["rep"]["title"].lower())
+    assert hpg["sources"] == []
     assert cluster_by_event([]) == []
 
 
@@ -925,7 +1099,7 @@ def test_replace_context_clears_then_rewrites():
     row = context_row(title="Bài mới", hook_line="h", source_url="http://u", score=3, hot_pct=42.0)
     n = board.replace_context([row])
     assert n == 1
-    assert ws.cleared == ["A2:O3"]                 # xóa 2 dòng dữ liệu cũ, GIỮ header (15 cột -> O)
+    assert ws.cleared == ["A2:L3"]                 # xóa 2 dòng dữ liệu cũ, GIỮ header (12 cột -> L)
     assert ws.updated[0] == "A2" and ws.updated[1] == [row]   # ghi lại từ A2
 
 
@@ -1082,6 +1256,429 @@ def test_build_collector_dispatch_by_fetch_type():
     assert isinstance(factory.build_collector(s, offline=False, source=html_src), HttpFirstCollector)
     # offline luôn Mock (bất kể fetch_type)
     assert isinstance(factory.build_collector(s, offline=True, source=rss_src), MockCollector)
+
+
+# --- Giai đoạn Production (cổng 2): APPROVED -> sản phẩm -> CONTENT ----------
+def test_production_agents_produce_three_types_clean():
+    """3 agent sản xuất -> article/video/infographic; article+video có disclaimer
+    nên qua compliance ($0 với MockLLM)."""
+    from twmkt.agents.production import all_production_agents, ProductionBrief
+    from twmkt.agents.base import MockLLM
+    from twmkt.models import ContentFormat
+    from twmkt.guardrails import compliance
+
+    brief = ProductionBrief(title="FPT lãi quý 2 tăng 40%", hook="FPT: lãi kỷ lục",
+                            tickers=["FPT"], group="CoPhieu", topic="CoPhieu",
+                            url="http://u", evidence="Doanh thu và lợi nhuận tăng.")
+    drafts = [compliance.apply(a.run(brief)) for a in all_production_agents(MockLLM())]
+    assert {d.fmt for d in drafts} == {
+        ContentFormat.ARTICLE, ContentFormat.VIDEO_SCRIPT, ContentFormat.INFOGRAPHIC}
+    assert all(d.is_clean for d in drafts)   # disclaimer/footer đầy đủ
+
+
+def test_production_agent_graceful_empty_llm():
+    """LÙI MƯỢT: LLM trả rỗng (thiếu khóa) -> khung tất định, vẫn có disclaimer."""
+    from twmkt.agents.production import AnalysisWriterAgent, ProductionBrief
+    from twmkt.guardrails import compliance
+
+    class EmptyLLM:
+        def complete(self, system, prompt): return ""
+
+    d = compliance.apply(AnalysisWriterAgent(EmptyLLM()).run(
+        ProductionBrief(title="Tiêu đề bài", hook="Hook X", tickers=["HPG"],
+                        evidence="Dữ kiện quan trọng.")))
+    assert d.is_clean and "Tiêu đề bài" in d.body
+    assert "tự chịu trách nhiệm" in d.body.lower()
+
+
+def test_domain_of_extracts_netloc():
+    from twmkt.agents.production import domain_of
+    assert domain_of("https://cafef.vn/abc-123.chn") == "cafef.vn"
+    assert domain_of("https://www.vietstock.vn/x.htm") == "vietstock.vn"
+    assert domain_of("") == "" and domain_of("khong-phai-url") == ""
+
+
+def test_unsupported_numbers_flags_hallucinated_figures():
+    from twmkt.agents.production import unsupported_numbers
+    evidence = "Doanh thu tăng 40% trong quý 2, đạt 1.200 tỷ đồng."
+    assert unsupported_numbers("Lãi tăng 40% so với cùng kỳ.", evidence) == []
+    bad = unsupported_numbers("Lợi nhuận tăng 999% - kỷ lục chưa từng có.", evidence)
+    assert bad and "999%" in bad[0]
+
+
+def test_apply_guardrails_flags_error_on_hallucination():
+    from twmkt.agents.production import apply_guardrails
+    from twmkt.models import ContentDraft, ContentFormat
+
+    evidence = "Doanh thu tăng 40% trong quý 2."
+    clean = ContentDraft(fmt=ContentFormat.ARTICLE, title="t",
+                         body="Doanh thu tăng 40%.\n\n_Nội dung chỉ mang tính thông tin, "
+                              "không phải khuyến nghị đầu tư. Nhà đầu tư tự chịu trách nhiệm._")
+    apply_guardrails(clean, evidence)
+    assert clean.is_clean
+
+    bad = ContentDraft(fmt=ContentFormat.ARTICLE, title="t",
+                       body="Doanh thu tăng 500%.\n\n_Nội dung chỉ mang tính thông tin, "
+                            "không phải khuyến nghị đầu tư. Nhà đầu tư tự chịu trách nhiệm._")
+    apply_guardrails(bad, evidence)
+    assert not bad.is_clean
+    assert any("500%" in issue for issue in bad.compliance_issues)
+
+
+def test_apply_guardrails_checks_background_too():
+    """apply_guardrails: số liệu có trong `background` (bối cảnh Claude Code tự
+    research) cũng được coi là hợp lệ, không chỉ evidence gốc."""
+    from twmkt.agents.production import apply_guardrails
+    from twmkt.models import ContentDraft, ContentFormat
+
+    evidence = "Doanh thu tăng 40% trong quý 2."
+    background = "Cổ phiếu giảm sàn 6,97% xuống 58.700 đồng/cổ phiếu."
+    d = ContentDraft(fmt=ContentFormat.ARTICLE, title="t",
+                     body="Doanh thu tăng 40%. Cổ phiếu giảm sàn 6,97%.\n\n"
+                          "_Nội dung chỉ mang tính thông tin, không phải khuyến nghị đầu tư. "
+                          "Nhà đầu tư tự chịu trách nhiệm._")
+    apply_guardrails(d, evidence, background)
+    assert d.is_clean   # 6,97% chỉ có trong background, không phải evidence -> vẫn PASS
+
+    d2 = ContentDraft(fmt=ContentFormat.ARTICLE, title="t", body="Lãi tăng 999%.")
+    apply_guardrails(d2, evidence, background)
+    assert not d2.is_clean   # 999% không có ở cả 2 nguồn -> vẫn bị chặn
+
+
+def test_build_content_llm_model_override_sonnet_opus():
+    from twmkt import factory
+    from twmkt.config import Settings
+    from twmkt.agents.base import AnthropicLLM
+
+    base_settings = Settings({"llm": {"provider": "anthropic", "content_model": "claude-sonnet-4-6"}})
+    r_opus = factory.build_content_llm(base_settings, model="opus")
+    assert isinstance(r_opus.base, AnthropicLLM) and r_opus.base.model == "claude-opus-4-8"
+    r_sonnet = factory.build_content_llm(base_settings, model="sonnet")
+    assert r_sonnet.base.model == "claude-sonnet-4-6"
+    r_default = factory.build_content_llm(base_settings)
+    assert r_default.base.model == "claude-sonnet-4-6"   # không truyền model -> giữ settings.yaml
+
+
+def test_prompt_md_requires_research_before_writing():
+    """_prompt_md: PHẢI yêu cầu research bối cảnh mở rộng (WebSearch) trước khi
+    viết, và hướng dẫn ghi vào <slug>.background.txt (theo yêu cầu 'signature')."""
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+    import produce_from_sheet as pfs
+
+    md = pfs._prompt_md("slug-x", "article", "USER PROMPT")
+    assert "research" in md.lower() or "Research" in md
+    assert "slug-x.background.txt" in md
+    assert "WebSearch" in md or "WebFetch" in md
+
+
+def test_analysis_agent_parses_llm_json_schema():
+    """AnalysisWriterAgent: LLM trả JSON đúng schema -> body dựng từ sections thật,
+    kèm 'Nguồn: <domain>' TẤT ĐỊNH (không phụ thuộc LLM có nhớ ghi)."""
+    from twmkt.agents.production import AnalysisWriterAgent, ProductionBrief
+    import json as _json
+
+    class JsonLLM:
+        def complete(self, system, prompt):
+            return _json.dumps({
+                "title": "FPT lãi kỷ lục", "sapo": "Tóm tắt ngắn.",
+                "sections": [{"heading": "Bối cảnh", "content": "Doanh thu tăng 40%."}],
+                "disclaimer": "Nội dung chỉ mang tính thông tin, không phải khuyến nghị "
+                              "đầu tư. Nhà đầu tư tự chịu trách nhiệm với quyết định của mình.",
+                "sources": ["http://other"],
+            }, ensure_ascii=False)
+
+    brief = ProductionBrief(title="FPT báo lãi", hook="FPT: lãi kỷ lục", tickers=["FPT"],
+                            url="https://cafef.vn/fpt.chn", evidence="Doanh thu tăng 40%.")
+    d = AnalysisWriterAgent(JsonLLM()).run(brief)
+    assert d.title == "FPT lãi kỷ lục"
+    assert "Bối cảnh" in d.body and "Doanh thu tăng 40%." in d.body
+    assert "Nguồn: cafef.vn" in d.body
+    assert "Xem thêm: http://other" in d.body
+
+
+def test_video_agent_parses_llm_json_schema():
+    from twmkt.agents.production import VideoScriptAgent, ProductionBrief
+    import json as _json
+
+    class JsonLLM:
+        def complete(self, system, prompt):
+            return _json.dumps({
+                "title": "HPG hook", "duration_sec": 45,
+                "scenes": [{"t": "0-3s", "voiceover": "HPG lãi tăng mạnh",
+                           "on_screen_text": "HPG +40%", "visual_hint": "biểu đồ"}],
+                "cta": "CTA riêng", "disclaimer": "Nội dung chỉ mang tính thông tin.",
+            }, ensure_ascii=False)
+
+    brief = ProductionBrief(title="HPG báo lãi", tickers=["HPG"], evidence="x")
+    d = VideoScriptAgent(JsonLLM()).run(brief)
+    assert "HPG lãi tăng mạnh" in d.body and "HPG +40%" in d.body and "biểu đồ" in d.body
+    assert "CTA riêng" in d.body
+
+
+def test_infographic_agent_extracts_stats_from_evidence_deterministic():
+    from twmkt.agents.production import InfographicSpecAgent, ProductionBrief
+    import json as _json
+
+    agent = InfographicSpecAgent(None)   # KHÔNG cần llm -> tất định
+    assert agent.uses_llm is False
+    brief = ProductionBrief(title="t", hook="h", tickers=["FPT"],
+                            url="https://cafef.vn/x.chn",
+                            evidence="Doanh thu tăng 40%, đạt 1.200 tỷ đồng, kỷ lục.")
+    d = agent.run(brief)
+    spec = _json.loads(d.body)
+    assert spec["footer"]["source"] == "cafef.vn"
+    assert len(spec["stats"]) >= 2
+    assert all(s["value"].lower() in brief.evidence.lower() for s in spec["stats"])
+
+
+def test_all_production_agents_applies_prompt_overrides_by_name():
+    from twmkt.agents.production import all_production_agents
+
+    agents = all_production_agents(None, prompt_overrides={
+        "analysis": "PROMPT ANALYSIS TÙY CHỈNH", "video": "", "khong-ton-tai": "x"})
+    by_role = {a.role: a for a in agents}
+    assert by_role["AnalysisWriter"].system == "PROMPT ANALYSIS TÙY CHỈNH"
+    # video rỗng -> KHÔNG override (giữ default); infographic không có key -> giữ default
+    assert by_role["VideoScripter"].system != ""
+    assert "TẤT ĐỊNH" in by_role["InfographicDesigner"].system
+
+
+def test_prompts_v1_files_match_code_defaults_no_drift():
+    """prompts/{analysis,video}.v1.md PHẢI khớp y hệt default nội bộ trong code —
+    seed PROMPTS (Enable=TRUE, v1) không được đổi hành vi ngay từ đầu."""
+    from twmkt.agents.production import AnalysisWriterAgent, VideoScriptAgent
+    from twmkt.agents.prompts import read_prompt_file
+
+    assert read_prompt_file("analysis", "v1", prompts_dir="prompts") == AnalysisWriterAgent.system
+    assert read_prompt_file("video", "v1", prompts_dir="prompts") == VideoScriptAgent.system
+
+
+def test_match_source_by_domain_and_fetch_full_evidence_fallback():
+    """match_source_by_domain khớp theo TÊN MIỀN (không cần đúng path); fetch lỗi/
+    rỗng -> fallback (KHÔNG crash, KHÔNG gọi mạng thật trong test)."""
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+    import produce_from_sheet as pfs
+    from twmkt.models import Source, RawDocument
+
+    sources = [Source("CafeF - DN", "https://cafef.vn/doanh-nghiep.chn"),
+              Source("Vietstock", "https://vietstock.vn/co-phieu.htm")]
+    m = pfs.match_source_by_domain("https://cafef.vn/abc-123.chn", sources)
+    assert m is not None and m.name == "CafeF - DN"
+    assert pfs.match_source_by_domain("https://khong-co-trong-list.vn/x", sources) is None
+    assert pfs.match_source_by_domain("", sources) is None
+
+    class _FakeCollectorOk:
+        def fetch_one(self, source, url):
+            return RawDocument(source="s", url=url, title="t", markdown="Thân bài thật.")
+
+    class _FakeCollectorNone:
+        def fetch_one(self, source, url):
+            return None
+
+    class _FakeCollectorRaises:
+        def fetch_one(self, source, url):
+            raise RuntimeError("mạng lỗi")
+
+    ev = pfs.fetch_full_evidence(_FakeCollectorOk(), sources, "https://cafef.vn/abc.chn", "fallback")
+    assert ev == "Thân bài thật."
+    assert pfs.fetch_full_evidence(_FakeCollectorNone(), sources, "https://cafef.vn/x.chn", "fallback") == "fallback"
+    assert pfs.fetch_full_evidence(_FakeCollectorRaises(), sources, "https://cafef.vn/x.chn", "fallback") == "fallback"
+    assert pfs.fetch_full_evidence(_FakeCollectorOk(), sources, "", "fallback") == "fallback"
+
+
+def test_prompt_md_includes_system_user_and_ingest_instruction():
+    """_prompt_md: gói đủ system + user prompt + schema + hướng dẫn --ingest, để
+    Claude Code (không gọi API) đọc và viết đúng JSON schema."""
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+    import produce_from_sheet as pfs
+    from twmkt.agents.production import AnalysisWriterAgent
+
+    md = pfs._prompt_md("slug-x", "article", "USER PROMPT NỘI DUNG")
+    assert AnalysisWriterAgent.system in md
+    assert "USER PROMPT NỘI DUNG" in md
+    assert "slug-x.article.json" in md
+    assert "--ingest" in md
+    assert "sections" in md   # schema hint
+
+
+def test_draft_to_content_draft_matches_llm_path():
+    """draft_to_content_draft (JSON Claude Code tự viết) phải cho kết quả GIỐNG
+    HỆT đường gọi qua AnthropicLLM thật (cùng schema/render/guardrail — chỉ khác
+    'ai điền JSON'), và vẫn lùi mượt tất định khi data rỗng."""
+    from twmkt.agents.production import ProductionBrief
+    import produce_from_sheet as pfs
+
+    brief = ProductionBrief(title="FPT báo lãi", hook="FPT: lãi kỷ lục", tickers=["FPT"],
+                            url="https://cafef.vn/fpt.chn", evidence="Doanh thu tăng 40%.")
+    data = {"title": "FPT lãi kỷ lục", "sapo": "Tóm tắt.",
+            "sections": [{"heading": "Bối cảnh", "content": "Doanh thu tăng 40%."}],
+            "disclaimer": "Nội dung chỉ mang tính thông tin, không phải khuyến nghị đầu tư. "
+                         "Nhà đầu tư tự chịu trách nhiệm với quyết định của mình.",
+            "sources": []}
+    d = pfs.draft_to_content_draft("article", data, brief)
+    assert d.title == "FPT lãi kỷ lục" and "Nguồn: cafef.vn" in d.body and d.is_clean
+
+    # data rỗng (Claude Code chưa viết được / lỗi parse) -> lùi mượt tất định.
+    d2 = pfs.draft_to_content_draft("video", {}, brief)
+    assert d2.is_clean and brief.title in d2.body
+
+
+def test_approved_context_from_rows_filters_and_maps():
+    """approved_context_from_rows: chỉ giữ Status=APPROVE (khớp dropdown thật:
+    PENDING|APPROVE|REJECT), lấy url chính từ ô Source gộp."""
+    from twmkt.sheets_board import approved_context_from_rows, CONTEXT_HEADER, context_row
+
+    r1 = context_row(title="Bài A", hook_line="Hook A", source_url="http://a", score=5,
+                     hot_pct=50.0, topic="CoPhieu", group="CoPhieu, ChinhSach",
+                     other_sources=["http://a2"], tickers=["FPT", "HPG"], status="APPROVE")
+    r2 = context_row(title="Bài B", hook_line="Hook B", source_url="http://b", score=1,
+                     hot_pct=10.0, status="PENDING")
+    got = approved_context_from_rows([CONTEXT_HEADER, r1, r2])
+    assert len(got) == 1
+    a = got[0]
+    assert a["context"] == "Bài A" and a["hook"] == "Hook A"
+    assert a["source"] == "http://a"                     # url chính (dòng đầu ô Source gộp)
+    assert a["tickers"] == ["FPT", "HPG"] and a["topic"] == "CoPhieu"
+    assert approved_context_from_rows([CONTEXT_HEADER]) == []   # 0 approved
+
+
+def test_content_row_shape():
+    from twmkt.sheets_board import content_row, CONTENT_HEADER
+    assert CONTENT_HEADER == ["Context", "Type", "Status", "Output", "timestamp", "Notes"]
+    row = content_row(context="Bài A", type_="article", status="DONE",
+                      output="nội dung", notes="ok", ts="ts")
+    d = dict(zip(CONTENT_HEADER, row))
+    assert d == {"Context": "Bài A", "Type": "article", "Status": "DONE",
+                 "Output": "nội dung", "timestamp": "ts", "Notes": "ok"}
+
+
+def test_build_content_llm_sonnet_router():
+    from twmkt.agents.router import LLMRouter, Tier
+    from twmkt.agents.base import MockLLM as _Mock, AnthropicLLM
+
+    off = factory.build_content_llm(Settings({"llm": {"provider": "anthropic"}}), offline=True)
+    assert isinstance(off, LLMRouter) and isinstance(off.base, _Mock)
+    real = factory.build_content_llm(
+        Settings({"llm": {"provider": "anthropic", "content_model": "claude-sonnet-4-6"}}),
+        offline=False)
+    assert isinstance(real.base, AnthropicLLM) and real.base.model == "claude-sonnet-4-6"
+    assert real.default_tier is Tier.SMART
+
+
+# --- Banner "LLM active" (lùi mượt CÓ CẢNH BÁO — không im lặng) -------------
+def test_llm_status_banner_mock_when_provider_not_anthropic():
+    st = factory.llm_status(Settings({"llm": {"provider": "mock"}}))
+    assert st.use_llm is False
+    assert "provider" in st.reason.lower() or "mock" in st.reason.lower()
+    assert st.banner == "LLM active: MOCK ($0 fallback) — lý do: llm.provider='mock' (không phải anthropic)"
+
+
+def test_llm_status_banner_mock_when_anthropic_unavailable():
+    """provider=anthropic nhưng thiếu SDK/khóa -> banner MOCK kèm LÝ DO rõ (không im lặng)."""
+    old = os.environ.pop("ANTHROPIC_API_KEY", None)
+    try:
+        st = factory.llm_status(Settings({"llm": {"provider": "anthropic"}}))
+        assert st.use_llm is False and st.reason
+        assert st.banner.startswith("LLM active: MOCK ($0 fallback) — lý do:")
+    finally:
+        if old is not None:
+            os.environ["ANTHROPIC_API_KEY"] = old
+
+
+def test_llm_status_banner_active_when_key_present():
+    """Có SDK (đã cài trong môi trường test) + ANTHROPIC_API_KEY -> banner 'anthropic'
+    với đúng hook_model/researcher_model từ config (không gọi mạng)."""
+    old = os.environ.get("ANTHROPIC_API_KEY")
+    os.environ["ANTHROPIC_API_KEY"] = "sk-test-fake"
+    try:
+        st = factory.llm_status(Settings({"llm": {
+            "provider": "anthropic", "triage_model": "claude-haiku-4-5-20251001",
+            "hook_model": "claude-sonnet-4-6",
+        }}))
+        assert st.use_llm is True
+        assert st.banner == ("LLM active: anthropic (hook=claude-sonnet-4-6, "
+                             "researcher=claude-haiku-4-5-20251001)")
+    finally:
+        if old is None:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+        else:
+            os.environ["ANTHROPIC_API_KEY"] = old
+
+
+def test_model_engine_label_maps_haiku_sonnet_mock():
+    assert factory.model_engine_label("claude-haiku-4-5-20251001", use_llm=True) == "haiku"
+    assert factory.model_engine_label("claude-sonnet-4-6", use_llm=True) == "sonnet"
+    assert factory.model_engine_label("claude-opus-4-8", use_llm=True) == "opus"
+    assert factory.model_engine_label("claude-sonnet-4-6", use_llm=False) == "mock"
+
+
+def test_sheets_log_header_has_engine_column():
+    from twmkt.sheets_board import LOG_HEADER
+    assert LOG_HEADER == ["timestamp", "level", "message", "engine"]
+
+
+def test_sheets_board_log_writes_engine_column():
+    from twmkt.sheets_board import SheetsBoard
+
+    class _FakeWS:
+        def __init__(self): self.appended = []
+        def append_row(self, row, value_input_option=None): self.appended.append(row)
+
+    board = SheetsBoard(spreadsheet_id="X", creds_path="Y")
+    ws = _FakeWS()
+    board._ws["LOG"] = ws
+    board.log("INFO", "test message", engine="haiku")
+    assert ws.appended[0][1:] == ["INFO", "test message", "haiku"]
+    board.log("WARN", "no engine")
+    assert ws.appended[1][1:] == ["WARN", "no engine", ""]
+
+
+# --- secrets/.env bền qua python-dotenv (config-first, override=False) ------
+def test_load_dotenv_sets_env_without_overriding_shell():
+    import shutil
+    import tempfile
+    from twmkt.config import _load_dotenv
+
+    tmp = tempfile.mkdtemp()
+    env_path = os.path.join(tmp, ".env")
+    with open(env_path, "w", encoding="utf-8") as f:
+        f.write("ANTHROPIC_API_KEY=from-dotenv\nOTHER_TWMKT_VAR=xyz\n")
+
+    saved = {k: os.environ.get(k) for k in ("TWMKT_DOTENV", "ANTHROPIC_API_KEY", "OTHER_TWMKT_VAR")}
+    try:
+        os.environ["TWMKT_DOTENV"] = env_path
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+        os.environ.pop("OTHER_TWMKT_VAR", None)
+        _load_dotenv()
+        assert os.environ.get("ANTHROPIC_API_KEY") == "from-dotenv"
+        assert os.environ.get("OTHER_TWMKT_VAR") == "xyz"
+
+        # override=False: biến đã có sẵn trong shell PHẢI thắng file .env
+        os.environ["ANTHROPIC_API_KEY"] = "from-shell"
+        _load_dotenv()
+        assert os.environ.get("ANTHROPIC_API_KEY") == "from-shell"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def test_load_dotenv_missing_file_is_noop():
+    import tempfile
+    from twmkt.config import _load_dotenv
+
+    old = os.environ.get("TWMKT_DOTENV")
+    try:
+        os.environ["TWMKT_DOTENV"] = os.path.join(tempfile.mkdtemp(), "khong-ton-tai.env")
+        _load_dotenv()   # không raise dù file không tồn tại
+    finally:
+        if old is None:
+            os.environ.pop("TWMKT_DOTENV", None)
+        else:
+            os.environ["TWMKT_DOTENV"] = old
 
 
 def _run_all():

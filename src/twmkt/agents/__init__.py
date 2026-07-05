@@ -6,6 +6,10 @@ from .producers import (
     ArticleWriter, InfographicDesigner, VideoScripter, NewsletterBuilder,
     all_producers,
 )
+from .production import (
+    ProductionBrief, AnalysisWriterAgent, VideoScriptAgent, InfographicSpecAgent,
+    all_production_agents,
+)
 
 __all__ = [
     "Agent", "LLMClient", "MockLLM", "AnthropicLLM",
@@ -14,4 +18,6 @@ __all__ = [
     "HookAgent", "MarketingHook",
     "ArticleWriter", "InfographicDesigner", "VideoScripter", "NewsletterBuilder",
     "all_producers",
+    "ProductionBrief", "AnalysisWriterAgent", "VideoScriptAgent",
+    "InfographicSpecAgent", "all_production_agents",
 ]

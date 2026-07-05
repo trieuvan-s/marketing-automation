@@ -9,6 +9,8 @@ Không gọi mạng / không gọi LLM khi chỉ *dựng* pipeline: các client 
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from .agents.base import AnthropicLLM, LLMClient, MockLLM
 from .agents.router import LLMRouter, Tier
 from .approval import sheets_gate
@@ -34,12 +36,6 @@ def build_llm(settings: Settings) -> LLMClient:
                       default_model="claude-sonnet-4-6")
 
 
-def build_hook_llm(settings: Settings) -> LLMClient:
-    """LLM cho HookAgent — dùng tầng rẻ (llm.triage_model)."""
-    return _build_llm(settings, model_key="llm.triage_model",
-                      default_model="claude-haiku-4-5-20251001")
-
-
 def _build_llm(settings: Settings, *, model_key: str, default_model: str) -> LLMClient:
     provider = (settings.get("llm.provider", "mock") or "mock").lower()
     if provider == "mock":
@@ -52,20 +48,103 @@ def _build_llm(settings: Settings, *, model_key: str, default_model: str) -> LLM
     raise ValueError(f"llm.provider không hỗ trợ: {provider} (mock|anthropic)")
 
 
-def build_research_llm(settings: Settings, *, offline: bool = False) -> LLMRouter:
-    """LLM cho Researcher + Hook, BỌC LLMRouter để đo token + ước tính chi phí.
+def _hook_model(settings: Settings) -> str:
+    """Model cho Hook: llm.hook_model nếu khai, ngược lại theo llm.content_model
+    (Sonnet). Hook ngắn nên tầng cao vẫn rẻ mà chất lượng cao."""
+    return (settings.get("llm.hook_model")
+            or settings.get("llm.content_model", "claude-sonnet-4-6"))
 
-    - offline=True hoặc provider=mock -> MockLLM ($0 token, không mạng/không khóa).
-    - provider=anthropic -> tầng RẺ (triage_model = Haiku) để nếm chất lượng + đo
-      token trước khi bật tầng đắt. Không gọi mạng khi *dựng* (SDK/khóa lazy).
-    Router dùng tier CHEAP để định giá và áp `llm.budget_usd` (hạn mức mềm)."""
-    base: LLMClient = MockLLM() if offline else build_hook_llm(settings)
-    budget = settings.get("llm.budget_usd")
-    return LLMRouter(
-        base,
-        default_tier=Tier.CHEAP,
-        budget_usd=float(budget) if budget else None,
-    )
+
+def _budget(settings: Settings) -> float | None:
+    b = settings.get("llm.budget_usd")
+    return float(b) if b else None
+
+
+def build_research_llm(settings: Settings, *, offline: bool = False) -> LLMRouter:
+    """LLM cho RESEARCHER — tầng RẺ (llm.triage_model = Haiku), bọc LLMRouter đo
+    token/chi phí (tier CHEAP để định giá). offline/mock -> MockLLM ($0)."""
+    base: LLMClient = MockLLM() if offline else _build_llm(
+        settings, model_key="llm.triage_model", default_model="claude-haiku-4-5-20251001")
+    return LLMRouter(base, default_tier=Tier.CHEAP, budget_usd=_budget(settings))
+
+
+def build_hook_llm(settings: Settings, *, offline: bool = False) -> LLMRouter:
+    """LLM cho HOOK — tầng content_model/Sonnet (hoặc llm.hook_model riêng), bọc
+    LLMRouter (tier SMART để định giá Sonnet). offline/mock -> MockLLM ($0).
+    Hook chạy SAU crawl, đầu ra ngắn -> Sonnet rẻ mà chất lượng cao."""
+    base: LLMClient = MockLLM() if offline else _build_llm(
+        settings, model_key="llm.hook_model", default_model=_hook_model(settings))
+    return LLMRouter(base, default_tier=Tier.SMART, budget_usd=_budget(settings))
+
+
+@dataclass
+class LLMStatus:
+    """Trạng thái LLM đã QUYẾT cho lần chạy này — in ra console để KHÔNG lùi mượt
+    trong im lặng (người vận hành luôn biết đang chạy anthropic thật hay mock)."""
+    use_llm: bool
+    provider: str
+    reason: str = ""                 # lý do fallback (rỗng nếu use_llm=True)
+    hook_model: str = ""
+    researcher_model: str = ""
+    content_model: str = ""
+
+    @property
+    def banner(self) -> str:
+        if self.use_llm:
+            return (f"LLM active: anthropic (hook={self.hook_model}, "
+                    f"researcher={self.researcher_model})")
+        return f"LLM active: MOCK ($0 fallback) — lý do: {self.reason}"
+
+
+def llm_status(settings: Settings) -> LLMStatus:
+    """QUYẾT 1 LẦN xem lần chạy này dùng anthropic thật hay mock, kèm banner IN RÕ.
+    Gọi hàm này ở đầu mỗi script rồi `print(status.banner)` — không được lùi mượt
+    trong im lặng. provider != anthropic hoặc thiếu SDK/ANTHROPIC_API_KEY -> mock."""
+    provider = (settings.get("llm.provider", "mock") or "mock").lower()
+    researcher_model = settings.get("llm.triage_model", "claude-haiku-4-5-20251001")
+    content_model = settings.get("llm.content_model", "claude-sonnet-4-6")
+    hook_model = _hook_model(settings)
+    if provider != "anthropic":
+        return LLMStatus(False, provider, reason=f"llm.provider={provider!r} (không phải anthropic)",
+                         hook_model=hook_model, researcher_model=researcher_model,
+                         content_model=content_model)
+    ok, why = AnthropicLLM.is_available()
+    return LLMStatus(ok, provider, reason=why, hook_model=hook_model,
+                     researcher_model=researcher_model, content_model=content_model)
+
+
+def model_engine_label(model: str, *, use_llm: bool) -> str:
+    """Nhãn NGẮN cho cột Engine ở tab LOG (haiku|sonnet|opus|mock) — đối chiếu
+    nhanh model nào thực sự chạy mà không cần mở cả tên model đầy đủ."""
+    if not use_llm:
+        return "mock"
+    low = (model or "").lower()
+    for tag in ("haiku", "sonnet", "opus"):
+        if tag in low:
+            return tag
+    return low or "mock"
+
+
+_MODEL_ALIASES = {
+    "sonnet": "claude-sonnet-4-6",
+    "opus": "claude-opus-4-8",
+}
+
+
+def build_content_llm(settings: Settings, *, offline: bool = False,
+                      model: str | None = None) -> LLMRouter:
+    """LLM cho PRODUCERS (giai đoạn sản xuất SAU cổng 1) — tầng ĐẮT content_model
+    (Sonnet mặc định), bọc LLMRouter (tier SMART định giá + áp budget). offline/
+    mock -> $0. `model` = 'sonnet'|'opus' (hoặc tên model đầy đủ) ghi đè
+    llm.content_model — Opus chất lượng cao hơn nhưng đắt hơn, dùng khi cần."""
+    if offline:
+        return LLMRouter(MockLLM(), default_tier=Tier.SMART, budget_usd=_budget(settings))
+    model_name = _MODEL_ALIASES.get((model or "").lower(), model) or None
+    base: LLMClient = _build_llm(
+        settings, model_key="llm.content_model", default_model=model_name or "claude-sonnet-4-6")
+    if model_name and isinstance(base, AnthropicLLM):
+        base.model = model_name   # ghi đè settings.yaml khi --model chỉ định rõ
+    return LLMRouter(base, default_tier=Tier.SMART, budget_usd=_budget(settings))
 
 
 # --- Cổng duyệt: console | auto | sheets -----------------------------------
@@ -157,7 +236,11 @@ def build_store(settings: Settings) -> DocumentStore:
     if kind == "memory":
         return InMemoryStore()
     if kind == "file":
-        return FileDocumentStore(settings.get("storage.documents_dir", "storage/documents"))
+        return FileDocumentStore(
+            settings.get("storage.documents_dir", "storage/documents"),
+            retention_days=int(settings.get("storage.retention_days", 10)),
+            tz=settings.get("storage.timezone", "Asia/Ho_Chi_Minh"),
+        )
     raise ValueError(f"storage.type không hỗ trợ: {kind} (file|memory)")
 
 
@@ -176,8 +259,8 @@ def build_pipeline(settings: Settings, *,
     """Dựng pipeline hoàn chỉnh từ settings. Mặc định offline (MockCollector)."""
     return MarketingPipeline(
         collector or build_collector(settings, offline=offline),
-        llm=build_llm(settings),
-        hook_llm=build_hook_llm(settings),
+        llm=build_research_llm(settings, offline=offline),   # Researcher = Haiku (rẻ)
+        hook_llm=build_hook_llm(settings, offline=offline),   # Hook = Sonnet (content_model)
         store=build_store(settings),
         retriever=build_retriever(settings),
         research_gate=build_gate(settings, gate="research"),

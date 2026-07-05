@@ -8,6 +8,9 @@ google-auth>=2.0
 # LLM thật cho Researcher + Hook (llm.provider = anthropic). Cần ANTHROPIC_API_KEY.
 anthropic>=0.40
 
+# Nạp ANTHROPIC_API_KEY bền từ secrets/.env (gitignored) — khỏi set env mỗi phiên.
+python-dotenv>=1.0
+
 # Tùy chọn khi lên production (xem pyproject optional-dependencies):
 #   crawl4ai>=0.4      # Crawl4aiCollector (fallback nguồn cần JS)
 #   langgraph>=0.2     # orchestrator production

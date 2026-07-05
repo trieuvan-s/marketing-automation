@@ -38,7 +38,7 @@ from twmkt.config import load_settings  # noqa: E402
 from twmkt.curation import normalize  # noqa: E402
 from twmkt.curation.config import CurationConfig  # noqa: E402
 from twmkt.factory import (  # noqa: E402
-    build_collector, build_research_llm, build_sources, build_store,
+    build_collector, build_hook_llm, build_research_llm, build_sources, build_store,
 )
 from twmkt.knowledge.rag import Retriever  # noqa: E402
 
@@ -123,16 +123,24 @@ def run(topic: str | None = None, *, offline: bool = False, limit: int | None = 
     all_tickers = sorted({t for d in clean for t in d.tickers})
 
     # --- Index RAG + brief + hook -------------------------------------------
-    # CHỈ Researcher + Hook gọi LLM (tầng rẻ Haiku qua LLMRouter để đo token).
-    # Mọi bước khác tất định $0. Dùng CHUNG 1 router để usage cộng dồn.
+    # CHỈ Researcher + Hook gọi LLM (theo tầng): Researcher = Haiku (triage), Hook =
+    # Sonnet (content_model). Mỗi cái 1 LLMRouter -> cộng dồn token/chi phí cả hai.
     retriever = Retriever.from_settings(settings)
     retriever.index(clean)
-    llm = build_research_llm(settings, offline=use_mock_llm)   # LLMRouter(Haiku|Mock)
-    brief = ResearcherAgent(llm).run(topic, retriever)
-    hook = HookAgent(llm).run(brief)
-    usage = llm.usage.as_dict()
+    research_llm = build_research_llm(settings, offline=use_mock_llm)   # Haiku|Mock
+    hook_llm = build_hook_llm(settings, offline=use_mock_llm)           # Sonnet|Mock
+    brief = ResearcherAgent(research_llm).run(topic, retriever)
+    hook = HookAgent(hook_llm).run(brief)
     kept = len(clean)
-    usage["provider"] = "mock" if use_mock_llm else provider
+    ru, hu = research_llm.usage, hook_llm.usage
+    usage = {
+        "calls": ru.calls + hu.calls,
+        "in_tokens": ru.in_tokens + hu.in_tokens,
+        "out_tokens": ru.out_tokens + hu.out_tokens,
+        "cost_usd": round(ru.cost_usd + hu.cost_usd, 6),
+        "by_model": {**ru.by_model, **hu.by_model},
+        "provider": "mock" if use_mock_llm else provider,
+    }
     usage["cost_per_article_usd"] = round(usage["cost_usd"] / kept, 6) if kept else 0.0
 
     # --- Lưu output (JSON + Markdown, UTF-8) ---------------------------------
