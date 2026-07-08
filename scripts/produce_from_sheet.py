@@ -56,11 +56,19 @@ from twmkt.agents.production import (  # noqa: E402
     video_fields_from_data,
 )
 from twmkt.agents.prompts import resolve_prompts  # noqa: E402
+from twmkt.agents.voice import load_voice_lock  # noqa: E402
 from twmkt.config import load_settings  # noqa: E402
 from twmkt.models import ContentDraft, ContentFormat, Source  # noqa: E402
 from twmkt.sheets_board import SheetsBoard, content_row  # noqa: E402
 
 _OUTPUT_PREVIEW = 1500   # số ký tự Output đưa lên Sheet (đủ xem; full lưu ra file)
+_ALL_TYPES = ("infographic", "article", "video_script")   # 3 loại all_production_agents() sinh
+
+
+def _is_fully_produced(context: str, seen: set[tuple[str, str]]) -> bool:
+    """True nếu CẢ 3 loại (infographic/article/video_script) của `context` đã
+    có trong CONTENT (`seen`) — tín hiệu để đặt Execute=DONE (idempotent)."""
+    return all((context, t) in seen for t in _ALL_TYPES)
 
 
 def _slug(text: str, n: int = 40) -> str:
@@ -104,19 +112,35 @@ def fetch_full_evidence(html_collector, sources: list[Source], url: str, fallbac
     return raw.markdown.strip()
 
 
-def _open_board(settings) -> SheetsBoard:
+def _open_board(settings, *, setup: bool = False) -> SheetsBoard:
     sheet_id = (os.environ.get("TWMKT_SHEET_ID") or settings.get("sheets.spreadsheet_id") or "").strip()
     creds = (os.environ.get("TWMKT_SHEETS_CREDS") or settings.get("sheets.creds_path") or "").strip()
     if not sheet_id or not creds:
         raise SystemExit("Thiếu sheets.spreadsheet_id/creds_path (settings.yaml hoặc ENV).")
     board = SheetsBoard(spreadsheet_id=sheet_id, creds_path=creds)
-    board.ensure_tabs()   # tạo tab CONTENT nếu chưa có
+    # ensure_tabs() mặc định RẺ (chỉ tạo/format khi phát hiện tab thiếu/header sai);
+    # setup=True (cờ --setup ở CLI) ép chạy đầy đủ (tạo tab/seed/format lại).
+    board.ensure_tabs(force=setup)
     return board
 
 
-def run(*, limit: int = 5, offline: bool = False, model: str | None = None) -> dict:
+def run_sync_only() -> dict:
+    """Đồng bộ Execute NGAY, không đợi lịch (schedule/schedule_draft): Sheet
+    KHÔNG có trigger đẩy sang Python -> đổi Status=APPROVE trên Sheet chỉ được
+    Python NHÌN THẤY khi 1 script đọc lại (pull-based, xem sync_approve_execute_
+    flags docstring). Dùng khi vừa duyệt tay và muốn Execute=RUN NGAY, không
+    chờ lịch crawl (4h) hay --draft (30') tới lượt. KHÔNG full-fetch/gọi LLM."""
     settings = load_settings()
     board = _open_board(settings)
+    n = board.sync_approve_execute_flags()
+    print(f"[sync-only] Đồng bộ Execute=RUN cho {n} dòng Status=APPROVE (Execute vừa rỗng).")
+    return {"synced": n}
+
+
+def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
+        setup: bool = False) -> dict:
+    settings = load_settings()
+    board = _open_board(settings, setup=setup)
 
     # --- LLM ĐẮT cho Producers (Sonnet mặc định, --model opus nếu cần chất
     # lượng cao hơn). LÙI MƯỢT CÓ CẢNH BÁO: banner IN RÕ, không im lặng.
@@ -130,9 +154,14 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None) -> d
     engine = factory.model_engine_label(llm.content_model, use_llm=use_llm)
     board.log("INFO", banner, engine=engine)
 
-    approved = board.read_approved_context()
+    # Execute: dòng vừa APPROVE (Execute rỗng) -> tự đặt RUN; rồi CHỈ xử lý dòng
+    # Status=APPROVE VÀ Execute=RUN (Execute=DONE -> đã sinh xong, bỏ qua —
+    # idempotent, produce chạy lại KHÔNG sinh Content trùng).
+    board.sync_approve_execute_flags()
+    approved = [a for a in board.read_approved_context() if a["execute"] == "RUN"]
     if not approved:
-        print("Không có dòng CONTEXT nào Status=APPROVE. Duyệt ở tab CONTEXT trước.")
+        print("Không có dòng CONTEXT nào Status=APPROVE và Execute=RUN (chưa sản xuất). "
+              "Duyệt ở tab CONTEXT trước.")
         return {"approved": 0, "produced": 0, "skipped": 0}
     approved = approved[:limit]
 
@@ -153,6 +182,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None) -> d
     out_dir.mkdir(parents=True, exist_ok=True)
 
     rows: list[list[str]] = []
+    done_rows: list[int] = []   # số dòng CONTEXT (1-based) VỪA sản xuất xong -> Execute=DONE
     produced = skipped = flagged = 0
     for item in approved:
         evidence = fetch_full_evidence(html_collector, sources, item["source"], item["hook"])
@@ -181,11 +211,16 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None) -> d
             seen.add((item["context"], type_))
             produced += 1
             flagged += 0 if draft.is_clean else 1
+        done_rows.append(item["row"])   # xong CẢ 3 loại cho dòng này -> đánh dấu DONE
 
     written = board.append_content_rows(rows)
+    board.mark_execute_done(done_rows)   # idempotent: chạy lại bỏ qua (execute=='RUN' lọc ở trên)
+    if written:
+        board.regroup_and_merge_content()   # merge dọc Timestamp+Context khi đủ 3 loại
     u = content_llm.usage.as_dict()
     board.log("INFO", f"TỔNG Production: approved {len(approved)} / sinh mới {produced} / "
-                      f"bỏ qua {skipped} / dính compliance {flagged} / ghi CONTENT {written}",
+                      f"bỏ qua {skipped} / dính compliance {flagged} / ghi CONTENT {written} / "
+                      f"Execute=DONE {len(done_rows)} dòng",
               engine=engine)
     _summary(len(approved), produced, skipped, flagged, use_llm, u, out_dir)
     return {"approved": len(approved), "produced": produced, "skipped": skipped,
@@ -214,6 +249,13 @@ _SCHEMA_HINT = {
 
 def _prompt_md(slug: str, type_: str, user_prompt: str) -> str:
     system = AnalysisWriterAgent.system if type_ == "article" else VideoScriptAgent.system
+    # Voice-lock: đường --draft KHÔNG đi qua Agent._ask() (không có LLMClient thật ở
+    # đây — Claude Code tự đọc file .prompt.md này) nên phải nối riêng tại đây, chỉ
+    # cho "article" theo đúng phạm vi hiện tại (xem agents/voice.py).
+    if type_ == "article":
+        voice = load_voice_lock("analysis")
+        if voice:
+            system += f"\n\n---\n\nVOICE-LOCK (giọng văn bắt buộc):\n{voice}"
     return (
         f"# YÊU CẦU VIẾT — {slug} ({type_})\n\n"
         f"## System (vai trò)\n{system}\n\n"
@@ -250,16 +292,20 @@ def draft_to_content_draft(type_: str, data: dict, brief: ProductionBrief) -> Co
     return apply_guardrails(draft, brief.evidence, brief.background)
 
 
-def run_draft(*, limit: int = 5) -> dict:
+def run_draft(*, limit: int = 5, setup: bool = False) -> dict:
     """Full-fetch evidence + sinh infographic NGAY (tất định, $0); với article/
     video -> ghi *.brief.json + *.<type>.prompt.md vào storage.drafts_dir để
     Claude Code đọc và viết *.<type>.json cạnh đó (không gọi API riêng)."""
     settings = load_settings()
-    board = _open_board(settings)
+    board = _open_board(settings, setup=setup)
 
-    approved = board.read_approved_context()
+    # Execute: dòng vừa APPROVE (Execute rỗng) -> tự đặt RUN; CHỈ xử lý dòng
+    # Status=APPROVE VÀ Execute=RUN (DONE -> đã sinh xong, bỏ qua — idempotent).
+    board.sync_approve_execute_flags()
+    approved = [a for a in board.read_approved_context() if a["execute"] == "RUN"]
     if not approved:
-        print("Không có dòng CONTEXT nào Status=APPROVE. Duyệt ở tab CONTEXT trước.")
+        print("Không có dòng CONTEXT nào Status=APPROVE và Execute=RUN (chưa sản xuất). "
+              "Duyệt ở tab CONTEXT trước.")
         return {"approved": 0, "prepared": 0, "infographic_done": 0}
     approved = approved[:limit]
 
@@ -272,6 +318,7 @@ def run_draft(*, limit: int = 5) -> dict:
     drafts_dir.mkdir(parents=True, exist_ok=True)
 
     rows: list[list[str]] = []
+    done_rows: list[int] = []   # dòng CONTEXT (1-based) đã đủ CẢ 3 loại -> Execute=DONE
     prepared = infographic_done = 0
     for item in approved:
         context = item["context"]
@@ -313,13 +360,26 @@ def run_draft(*, limit: int = 5) -> dict:
             prepared += 1
         brief_path = drafts_dir / f"{slug}.brief.json"
         if need_brief and not brief_path.exists():
+            # execute_row: số dòng CONTEXT (1-based) — run_ingest() đọc lại để
+            # biết ghi Execute=DONE cho ĐÚNG dòng nào khi article/video xong.
             brief_path.write_text(
-                json.dumps({"context": context, **asdict(brief)}, ensure_ascii=False, indent=2),
+                json.dumps({"context": context, "execute_row": item["row"], **asdict(brief)},
+                          ensure_ascii=False, indent=2),
                 encoding="utf-8")
 
+        # Article/video có thể ĐÃ xong từ trước (seen) -> cùng infographic vừa
+        # sinh, có thể đủ CẢ 3 loại ngay trong lượt --draft này -> đánh dấu DONE
+        # luôn (không cần đợi --ingest).
+        if _is_fully_produced(context, seen):
+            done_rows.append(item["row"])
+
     written = board.append_content_rows(rows)
+    board.mark_execute_done(done_rows)
+    if written:
+        board.regroup_and_merge_content()   # merge dọc Timestamp+Context khi đủ 3 loại
     print(f"[draft] infographic sinh ngay: {infographic_done} | "
-          f"yêu cầu article/video chuẩn bị: {prepared} (xem {drafts_dir})")
+          f"yêu cầu article/video chuẩn bị: {prepared} (xem {drafts_dir}) | "
+          f"Execute=DONE {len(done_rows)} dòng")
     if prepared:
         print("Nhờ Claude Code đọc các file *.prompt.md ở trên, viết JSON đúng schema "
               "vào *.article.json/*.video.json cạnh đó, rồi chạy:\n"
@@ -328,12 +388,12 @@ def run_draft(*, limit: int = 5) -> dict:
             "infographic_done": infographic_done, "written": written}
 
 
-def run_ingest() -> dict:
+def run_ingest(*, setup: bool = False) -> dict:
     """Nạp *.article.json/*.video.json (Claude Code đã viết) qua ĐÚNG schema
     fields/render/guardrail như chế độ gọi API -> ghi CONTENT + storage/output.
     Dọn file đã tiêu thụ; giữ lại *.prompt.md nào còn thiếu câu trả lời."""
     settings = load_settings()
-    board = _open_board(settings)
+    board = _open_board(settings, setup=setup)
     drafts_dir = Path(settings.get("storage.drafts_dir", "storage/production_drafts"))
     if not drafts_dir.exists() or not list(drafts_dir.glob("*.brief.json")):
         print(f"Không có bản nháp nào chờ ({drafts_dir}). Chạy --draft trước.")
@@ -344,11 +404,15 @@ def run_ingest() -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     rows: list[list[str]] = []
+    done_rows: list[int] = []   # dòng CONTEXT (1-based) đã đủ CẢ 3 loại -> Execute=DONE
     ingested = skipped = flagged = pending = 0
     for brief_path in sorted(drafts_dir.glob("*.brief.json")):
         slug = brief_path.name[: -len(".brief.json")]
         raw = json.loads(brief_path.read_text(encoding="utf-8"))
         context = raw.pop("context")
+        # execute_row: bản nháp cũ (trước khi có Execute) không có khóa này ->
+        # None -> KHÔNG đánh dấu DONE được (bản ghi cũ), vẫn ingest bình thường.
+        execute_row = raw.pop("execute_row", None)
         brief = ProductionBrief(**raw)
 
         # Bối cảnh mở rộng (research) Claude Code viết ở BƯỚC 1 của _prompt_md —
@@ -391,10 +455,16 @@ def run_ingest() -> dict:
         else:
             brief_path.unlink(missing_ok=True)
             background_path.unlink(missing_ok=True)
+            if execute_row is not None and _is_fully_produced(context, seen):
+                done_rows.append(execute_row)
 
     written = board.append_content_rows(rows)
+    board.mark_execute_done(done_rows)
+    if written:
+        board.regroup_and_merge_content()   # merge dọc Timestamp+Context khi đủ 3 loại
     print(f"[ingest] sản phẩm mới: {ingested} | bỏ qua (đã có): {skipped} | "
-          f"dính compliance: {flagged} | còn chờ Claude viết: {pending} | ghi CONTENT {written}")
+          f"dính compliance: {flagged} | còn chờ Claude viết: {pending} | ghi CONTENT {written} | "
+          f"Execute=DONE {len(done_rows)} dòng")
     return {"ingested": ingested, "skipped": skipped, "flagged": flagged,
             "pending": pending, "written": written}
 
@@ -426,14 +496,23 @@ def _parse_args(argv: list[str]):
     ap.add_argument("--model", choices=["sonnet", "opus"], default=None,
                     help="Chỉ áp dụng cho chế độ gọi API (không --draft/--ingest): "
                         "ghi đè llm.content_model — opus chất lượng cao hơn, đắt hơn.")
+    ap.add_argument("--setup", action="store_true",
+                    help="Ép chạy đầy đủ ensure_tabs (tạo/seed/format tab) dù header đã đúng "
+                        "— mặc định BỎ QUA để giảm lượt gọi Sheets API (né quota 429).")
+    ap.add_argument("--sync-only", action="store_true",
+                    help="Chỉ đồng bộ Execute=RUN cho các dòng Status=APPROVE ($0, không "
+                        "full-fetch/gọi LLM) — dùng khi vừa duyệt tay trên Sheet và muốn "
+                        "Execute=RUN ngay, không chờ lịch crawl/--draft tới lượt.")
     return ap.parse_args(argv)
 
 
 if __name__ == "__main__":
     args = _parse_args(sys.argv[1:])
-    if args.draft:
-        run_draft(limit=args.limit)
+    if args.sync_only:
+        run_sync_only()
+    elif args.draft:
+        run_draft(limit=args.limit, setup=args.setup)
     elif args.ingest:
-        run_ingest()
+        run_ingest(setup=args.setup)
     else:
-        run(limit=args.limit, offline=args.offline, model=args.model)
+        run(limit=args.limit, offline=args.offline, model=args.model, setup=args.setup)

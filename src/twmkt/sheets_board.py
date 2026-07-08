@@ -17,13 +17,110 @@ Nguyên tắc adapter: mọi thứ chạm gspread nằm ở lớp SheetsBoard (i
 môi trường offline/test KHÔNG cần thư viện/khoá). Logic thuần (dựng Source từ
 hàng, dựng hàng CONTEXT, đọc SETTINGS/TAXONOMY) tách thành hàm module — test
 được, không mạng.
+
+RETRY QUOTA (429): mọi Spreadsheet/Worksheet trả về từ _spreadsheet()/_tab()
+đều được bọc bởi _RetryingProxy — MỌI method gọi qua đó (append_row, update,
+get_all_values, batch_update, v.v.) tự động retry khi Google Sheets API trả
+429 (quota), không cần sửa từng điểm gọi riêng lẻ. Xem call_with_retry().
 """
 from __future__ import annotations
 
+import random
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from .models import Source, SourceType
+
+# =====================================================================
+# Retry quota 429 — bọc MỌI lệnh gọi gspread (không riêng ApprovalGate).
+# =====================================================================
+_RETRY_MAX_ATTEMPTS = 5
+_RETRY_BACKOFF_BASE_S = 2.0   # lần 1->2s, 2->4s, 3->8s, 4->16s (+ jitter)
+
+
+def _is_quota_429(exc: Exception) -> bool:
+    """True nếu lỗi là quota Google Sheets API (HTTP 429 / RESOURCE_EXHAUSTED)."""
+    code = getattr(exc, "code", None)
+    if code == 429:
+        return True
+    resp = getattr(exc, "response", None)
+    if resp is not None and getattr(resp, "status_code", None) == 429:
+        return True
+    error = getattr(exc, "error", None) or {}
+    return str(error.get("status", "")) == "RESOURCE_EXHAUSTED"
+
+
+def _retry_after_s(exc: Exception) -> float | None:
+    """Đọc header Retry-After (giây) từ response lỗi; None nếu không có/không hợp lệ."""
+    resp = getattr(exc, "response", None)
+    headers = getattr(resp, "headers", None) if resp is not None else None
+    if not headers:
+        return None
+    val = headers.get("Retry-After")
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _backoff_delay_s(attempt: int, retry_after: float | None) -> float:
+    """Retry-After (nếu có) ưu tiên; không có -> backoff mũ 2,4,8,16s + jitter
+    (thêm tới 25% ngẫu nhiên, tránh nhiều tiến trình cùng thử lại đúng 1 mốc)."""
+    if retry_after is not None and retry_after > 0:
+        return retry_after
+    base = _RETRY_BACKOFF_BASE_S * (2 ** (attempt - 1))
+    return base + random.uniform(0, base * 0.25)
+
+
+def call_with_retry(func, *args, max_attempts: int = _RETRY_MAX_ATTEMPTS,
+                    sleep=time.sleep, **kwargs):
+    """Gọi func(*args, **kwargs); lỗi quota 429 (gspread APIError) -> chờ theo
+    Retry-After hoặc backoff mũ + jitter, tối đa `max_attempts` lần rồi mới
+    RAISE lỗi thật. Lỗi KHÁC 429 -> raise ngay (không nuốt/không retry).
+    `sleep` cho phép tiêm hàm giả lập trong test (không chờ thật, $0 thời gian)."""
+    import gspread
+
+    last_exc: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return func(*args, **kwargs)
+        except gspread.exceptions.APIError as e:
+            if not _is_quota_429(e):
+                raise
+            last_exc = e
+            if attempt == max_attempts:
+                break
+            delay = _backoff_delay_s(attempt, _retry_after_s(e))
+            print(f"[CẢNH BÁO] Google Sheets quota (429) — chờ {delay:.1f}s rồi thử lại "
+                  f"(lần {attempt}/{max_attempts})...")
+            sleep(delay)
+    raise last_exc
+
+
+class _RetryingProxy:
+    """Bọc 1 object gspread (Spreadsheet/Worksheet) — MỌI method gọi qua đây tự
+    động retry khi gặp lỗi quota 429 (call_with_retry). Trong suốt với code gọi
+    (ws.append_row(...) y hệt, không cần sửa từng điểm gọi) — đáp ứng "retry cho
+    MỌI lệnh gọi gspread" mà không phải sửa từng dòng gọi API riêng lẻ."""
+
+    def __init__(self, target, *, max_attempts: int = _RETRY_MAX_ATTEMPTS, sleep=time.sleep):
+        object.__setattr__(self, "_rp_target", target)
+        object.__setattr__(self, "_rp_max_attempts", max_attempts)
+        object.__setattr__(self, "_rp_sleep", sleep)   # tiêm được trong test -> $0 thời gian
+
+    def __getattr__(self, name):
+        attr = getattr(object.__getattribute__(self, "_rp_target"), name)
+        if not callable(attr):
+            return attr
+        max_attempts = object.__getattribute__(self, "_rp_max_attempts")
+        sleep = object.__getattribute__(self, "_rp_sleep")
+
+        def _wrapped(*args, **kwargs):
+            return call_with_retry(attr, *args, max_attempts=max_attempts, sleep=sleep, **kwargs)
+        return _wrapped
 
 
 @dataclass
@@ -45,27 +142,29 @@ TAXONOMY_HEADER = ["Field", "Topic", "Keywords"]
 # đọc dòng Enable=TRUE của Name mình -> nạp prompts/<Name>.<Version>.md (repo,
 # version-controlled). Thiếu dòng/file -> agent dùng default nội bộ trong code.
 PROMPTS_HEADER = ["Name", "Version", "Enable"]
-# Use = checkbox người duyệt tự tick (chọn dùng cho sản xuất nội dung), ĐỘC LẬP
-# với Status (PENDING/APPROVE/REJECT — quy trình duyệt). Publisher/Field/Topic
-# đặt trước Group (bổ sung phân loại chi tiết hơn). Source = url bài đại diện
-# (dùng để bỏ trùng across-run theo url); Sources = url các báo KHÁC đưa cùng
-# tin (gộp bởi dedup chéo nguồn near-duplicate). timestamp/tickers/Notes giữ ở
-# cuối để audit/truy vết.
-# CONTEXT gọn: bỏ Publisher & Field (tính nội bộ cho cluster/tiebreak, không ghi
-# ra sheet); gộp Source + Sources -> 1 cột Source (url chính + "(+N báo)" các báo
-# khác đưa cùng tin, xuống dòng cùng ô). Use=checkbox chọn dùng, độc lập Status.
-CONTEXT_HEADER = ["Use", "Score", "Hot%", "Group", "Topic", "Context", "Hook",
-                  "Source", "Status", "timestamp", "tickers", "Notes"]
+# CONTEXT — Timestamp ĐẦU TIÊN (dễ nhìn khi lướt dọc). KHÔNG còn cột Use (trùng
+# chức năng Status, đã xoá). Source = url bài đại diện (dùng để UPSERT theo url
+# — url đã có thì BỎ QUA, giữ nguyên dòng cũ; xem SheetsBoard.upsert_context);
+# "(+N báo)" các báo khác đưa cùng tin xuống dòng cùng ô Source. Execute NGAY
+# SAU Status = cờ thực thi sản xuất: rỗng (mới) -> RUN (tự đặt khi Status=APPROVE,
+# xem sync_approve_execute_flags) -> DONE (đã sinh xong CONTENT, idempotent —
+# produce_from_sheet bỏ qua dòng đã DONE). tickers/Notes giữ cuối để audit.
+CONTEXT_HEADER = ["Timestamp", "Hot%", "Score", "Group", "Topic", "Context", "Hook",
+                  "Source", "Status", "Execute", "tickers", "Notes"]
 # "engine" TẠM (haiku|sonnet|mock) — đối chiếu model NÀO thực sự chạy cho mỗi
 # dòng log, xem factory.model_engine_label(). Rỗng nếu dòng log không gắn LLM.
 LOG_HEADER = ["timestamp", "level", "message", "engine"]
-REVIEW_HEADER = ["timestamp", "gate", "label", "payload", "Decision", "Notes"]
 README_HEADER = ["Turtle Wealth — Bảng duyệt nội dung (Sheets là UI, thay được)"]
 # CONTENT — SẢN PHẨM sinh SAU cổng 1 (giai đoạn Production): 1 dòng/(bài × định
-# dạng). Status = PENDING|RUNNING|DONE|ERROR (dropdown do format_board đặt).
-CONTENT_HEADER = ["Context", "Type", "Status", "Output", "timestamp", "Notes"]
+# dạng). Timestamp ĐẦU TIÊN. Status = PENDING|RUNNING|DONE|ERROR (tất định, kết
+# quả sản xuất — dropdown do format_board đặt). "Approve(gate 2)" = CỔNG DUYỆT
+# NỘI DUNG (PENDING|APPROVE|REJECT, dropdown) — THAY cho tab ContentReview cũ
+# (đã xoá); người duyệt chọn ngay trên dòng sản phẩm, không cần tab riêng.
+CONTENT_HEADER = ["Timestamp", "Context", "Type", "Status", "Output", "Notes", "Approve(gate 2)"]
 
-# 10 tab dựng lần đầu (tên : header). Thứ tự = thứ tự tab hiển thị.
+# 8 tab dựng lần đầu (tên : header). Thứ tự = thứ tự tab hiển thị. ResearchReview/
+# ContentReview đã GỘP vào CONTEXT.Status / CONTENT."Approve(gate 2)" -> xoá khỏi
+# danh sách (ensure_tabs tự dọn tab cũ còn sót trên Sheet, xem _LEGACY_TABS).
 TABS: dict[str, list[str]] = {
     "README": README_HEADER,
     "SOURCES": SOURCES_HEADER,
@@ -75,8 +174,18 @@ TABS: dict[str, list[str]] = {
     "CONTEXT": CONTEXT_HEADER,
     "CONTENT": CONTENT_HEADER,
     "LOG": LOG_HEADER,
-    "ResearchReview": REVIEW_HEADER,
-    "ContentReview": REVIEW_HEADER,
+}
+
+# Tab KHÔNG còn dùng (chức năng đã gộp) — ensure_tabs() TỰ XOÁ nếu còn sót trên
+# Sheet (cùng cơ chế dọn "Sheet1" đã có sẵn). Chỉ xoá ĐÚNG tên này, không đụng
+# tab lạ khác của người dùng.
+_LEGACY_TABS = {"Sheet1", "ResearchReview", "ContentReview"}
+
+# Giá trị mặc định cho cột MỚI khi migrate_rows() gặp header cũ chưa có cột đó
+# (vd Execute mới thêm vào CONTEXT). Tab không liệt kê ở đây -> cột mới rỗng "".
+_MIGRATE_DEFAULTS: dict[str, dict[str, str]] = {
+    "CONTEXT": {"Execute": ""},
+    "CONTENT": {"Approve(gate 2)": "PENDING"},
 }
 
 _README_ROWS = [
@@ -84,10 +193,14 @@ _README_ROWS = [
     ["2) Chỉnh nhóm ưu tiên ở tab SETTINGS (Key=PriorityGroups) — đọc LIVE mỗi lần chạy."],
     ["3) Chỉnh Field/Topic/từ khóa phân loại ở tab TAXONOMY (đọc LIVE mỗi lần chạy)."],
     ["4) Chạy scripts/review_to_sheet.py — bot phát hiện (RSS)/crawl (HTML) thật, "
-     "gộp bài trùng giữa các nguồn, ghi vào CONTEXT (sắp theo Hot% giảm dần)."],
-    ["5) Duyệt ở cột Status của CONTEXT: APPROVE / REJECT (mặc định PENDING); tick Use để chọn dùng."],
-    ["6) Chạy scripts/produce_from_sheet.py — sinh sản phẩm cho dòng APPROVE, ghi tab CONTENT."],
-    ["7) Đổi văn phong agent sản xuất: sửa prompts/<Name>.<Version>.md rồi trỏ Version ở tab PROMPTS."],
+     "gộp bài trùng giữa các nguồn, UPSERT vào CONTEXT theo url (bài đã có GIỮ NGUYÊN)."],
+    ["5) Duyệt ở cột Status của CONTEXT: APPROVE / REJECT (mặc định PENDING). "
+     "APPROVE -> tự đặt Execute=RUN (chờ sản xuất)."],
+    ["6) scripts/produce_from_sheet.py --draft/--ingest chạy lịch 30'/lần (power_on.py): "
+     "CHỈ xử lý dòng Status=APPROVE và Execute=RUN, xong đặt Execute=DONE (idempotent), "
+     "ghi tab CONTENT."],
+    ["7) Duyệt nội dung (cổng 2) ở cột \"Approve(gate 2)\" của tab CONTENT: APPROVE / REJECT."],
+    ["8) Đổi văn phong agent sản xuất: sửa prompts/<Name>.<Version>.md rồi trỏ Version ở tab PROMPTS."],
     ["Cột SOURCES: " + " | ".join(SOURCES_HEADER)],
     ["Cột CONTEXT: " + " | ".join(CONTEXT_HEADER)],
     ["Cột CONTENT: " + " | ".join(CONTENT_HEADER)],
@@ -133,6 +246,32 @@ def _col_a1(n: int) -> str:
         n, r = divmod(n - 1, 26)
         s = chr(65 + r) + s
     return s
+
+
+def migrate_rows(old_header: list[str], new_header: list[str], rows: list[list[str]],
+                 *, defaults: dict[str, str] | None = None) -> list[list[str]]:
+    """Map DỮ LIỆU (không phải header) từ `old_header` -> `new_header` THEO TÊN
+    cột (không phân biệt hoa/thường), KHÔNG mất/lệch dữ liệu khi cột bị đổi thứ
+    tự/thêm/bớt. Cột MẤT trong new_header (vd "Use" bị xoá) -> bỏ giá trị đó.
+    Cột MỚI (vd "Execute") -> lấy từ `defaults` (theo TÊN cột new_header, không
+    phân biệt hoa/thường), thiếu -> "". Hàm THUẦN — test được, dùng khi
+    ensure_tabs() phát hiện header đổi (thay cho ws.clear() từng xoá sạch dữ liệu).
+    """
+    defaults = defaults or {}
+    defaults_low = {k.strip().lower(): v for k, v in defaults.items()}
+    old_low = [h.strip().lower() for h in old_header]
+    out: list[list[str]] = []
+    for row in rows:
+        new_row: list[str] = []
+        for col in new_header:
+            col_low = col.strip().lower()
+            if col_low in old_low:
+                i = old_low.index(col_low)
+                new_row.append(row[i] if i < len(row) else "")
+            else:
+                new_row.append(defaults_low.get(col_low, ""))
+        out.append(new_row)
+    return out
 
 
 # =====================================================================
@@ -250,40 +389,118 @@ def _source_cell(source_url: str, other_sources: list[str] | None) -> str:
 def context_row(*, title: str, hook_line: str, source_url: str, score: int, hot_pct: float,
                 topic: str = "", group: str = "", other_sources: list[str] | None = None,
                 tickers: list[str] | None = None, status: str = "PENDING",
-                ts: str | None = None) -> list[str]:
-    """Một hàng CONTEXT ĐÚNG thứ tự CONTEXT_HEADER (12 cột).
+                execute: str = "", ts: str | None = None) -> list[str]:
+    """Một hàng CONTEXT ĐÚNG thứ tự CONTEXT_HEADER (Timestamp đầu tiên).
 
-    Use mặc định FALSE (người duyệt tự tick), Status mặc định PENDING. score/hot_pct
-    do curation.enrich tính; Group/Topic từ classify (nhóm marketing). Source gộp
+    Status mặc định PENDING, Execute mặc định rỗng (tự chuyển RUN khi Status=
+    APPROVE — xem SheetsBoard.sync_approve_execute_flags). score/hot_pct do
+    curation.enrich tính; Group/Topic từ classify (nhóm marketing). Source gộp
     url bài chính + các báo khác đưa cùng tin (dedup chéo nguồn, xem review_to_sheet).
     Publisher/Field KHÔNG ghi ra sheet (chỉ dùng nội bộ cho cluster/tiebreak).
     """
     return [
-        "FALSE",                                  # Use
-        str(score),                                # Score
-        f"{hot_pct:.1f}",                          # Hot%
-        group,                                      # Group
-        topic,                                       # Topic
-        title,                                        # Context
-        hook_line,                                     # Hook
-        _source_cell(source_url, other_sources),        # Source (gộp báo khác)
-        status,                                          # Status
-        ts or _now_iso(),                                 # timestamp
-        ", ".join(tickers or []),                          # tickers
-        "",                                                 # Notes
+        ts or _now_iso(),                                 # Timestamp
+        f"{hot_pct:.1f}",                                   # Hot%
+        str(score),                                          # Score
+        group,                                                # Group
+        topic,                                                 # Topic
+        title,                                                  # Context
+        hook_line,                                               # Hook
+        _source_cell(source_url, other_sources),                  # Source (gộp báo khác)
+        status,                                                    # Status
+        execute,                                                    # Execute
+        ", ".join(tickers or []),                                   # tickers
+        "",                                                          # Notes
     ]
 
 
 def content_row(*, context: str, type_: str, status: str, output: str,
-                notes: str = "", ts: str | None = None) -> list[str]:
-    """1 hàng CONTENT ĐÚNG thứ tự CONTENT_HEADER (Context|Type|Status|Output|
-    timestamp|Notes). Status: DONE (sạch) | ERROR (lỗi/compliance) — dropdown."""
-    return [context, type_, status, output, ts or _now_iso(), notes]
+                notes: str = "", approve: str = "PENDING", ts: str | None = None) -> list[str]:
+    """1 hàng CONTENT ĐÚNG thứ tự CONTENT_HEADER (Timestamp|Context|Type|Status|
+    Output|Notes|Approve(gate 2)). Status: DONE (sạch)|ERROR (lỗi/compliance) —
+    kết quả sản xuất, tất định. Approve(gate 2): cổng NGƯỜI duyệt nội dung
+    (PENDING mặc định, thay tab ContentReview cũ)."""
+    return [ts or _now_iso(), context, type_, status, output, notes, approve]
+
+
+_FULL_TYPES = frozenset({"article", "video_script", "infographic"})
+
+
+def group_content_rows(header: list[str], rows: list[list[str]]) -> dict[str, list[list[str]]]:
+    """Nhóm các hàng CONTENT (KHÔNG gồm header) theo Context, GIỮ nguyên thứ tự
+    xuất hiện bên trong mỗi nhóm. Hàng Context rỗng bị bỏ qua. Hàm THUẦN — dùng
+    bởi regroup_content_rows/content_merge_ranges (test được, không mạng)."""
+    low = [h.strip().lower() for h in header]
+    if "context" not in low:
+        return {}
+    ic = low.index("context")
+    groups: dict[str, list[list[str]]] = {}
+    for r in rows:
+        ctx = r[ic].strip() if ic < len(r) else ""
+        if not ctx:
+            continue
+        groups.setdefault(ctx, []).append(r)
+    return groups
+
+
+def regroup_content_rows(header: list[str], rows: list[list[str]]) -> list[list[str]]:
+    """Sắp lại `rows` (KHÔNG gồm header) sao cho các hàng CÙNG Context LUÔN liền
+    kề nhau — điều kiện bắt buộc để merge dọc (Sheets chỉ merge được 1 dải liên
+    tục). Thứ tự xuất hiện ĐẦU TIÊN giữa các Context và thứ tự BÊN TRONG mỗi
+    Context được giữ nguyên (ổn định) — chỉ đổi VỊ TRÍ nhóm, không đổi dữ liệu.
+    Hàng Context rỗng giữ nguyên thứ tự tương đối, đẩy xuống cuối. Hàm THUẦN."""
+    low = [h.strip().lower() for h in header]
+    if "context" not in low:
+        return list(rows)
+    ic = low.index("context")
+    groups = group_content_rows(header, rows)
+    empty = [r for r in rows if not (r[ic].strip() if ic < len(r) else "")]
+    out: list[list[str]] = []
+    seen_ctx: set[str] = set()
+    for r in rows:
+        ctx = r[ic].strip() if ic < len(r) else ""
+        if not ctx or ctx in seen_ctx:
+            continue
+        seen_ctx.add(ctx)
+        out.extend(groups[ctx])
+    out.extend(empty)
+    return out
+
+
+def content_merge_ranges(header: list[str], rows: list[list[str]]) -> list[tuple[int, int]]:
+    """`rows` PHẢI đã regroup (regroup_content_rows) trước — hàm này chỉ tìm dải,
+    KHÔNG tự sắp lại. Trả list (start, end) 0-based/end-exclusive TÍNH THEO SHEET
+    (offset +1 vì hàng 1 là header) — mỗi dải là 1 Context có ĐỦ CẢ 3 loại
+    (_FULL_TYPES: article/video_script/infographic) nằm ở các hàng LIÊN TIẾP.
+    Context thiếu loại hoặc hàng không liền kề (chưa regroup) -> KHÔNG merge."""
+    low = [h.strip().lower() for h in header]
+    if "context" not in low or "type" not in low:
+        return []
+    ic, it = low.index("context"), low.index("type")
+    ranges: list[tuple[int, int]] = []
+    n = len(rows)
+    i = 0
+    while i < n:
+        ctx = rows[i][ic].strip() if ic < len(rows[i]) else ""
+        if not ctx:
+            i += 1
+            continue
+        j = i
+        types_seen: set[str] = set()
+        while j < n and (rows[j][ic].strip() if ic < len(rows[j]) else "") == ctx:
+            types_seen.add(rows[j][it].strip().lower() if it < len(rows[j]) else "")
+            j += 1
+        if _FULL_TYPES <= types_seen:
+            ranges.append((i + 1, j + 1))
+        i = j
+    return ranges
 
 
 def approved_context_from_rows(rows: list[list[str]]) -> list[dict]:
     """Các dòng CONTEXT có Status=APPROVE -> list dict (ánh xạ theo TÊN cột):
-    context (tiêu đề), hook, source (url chính), tickers, group, topic."""
+    context (tiêu đề), hook, source (url chính), tickers, group, topic, execute
+    (RUN/DONE/rỗng), row (số dòng 1-based TRÊN SHEET — dùng để ghi lại
+    Execute=DONE sau khi sản xuất xong, xem SheetsBoard.mark_execute_done)."""
     if not rows:
         return []
     header = [c.strip().lower() for c in rows[0]]
@@ -293,6 +510,7 @@ def approved_context_from_rows(rows: list[list[str]]) -> list[dict]:
 
     i_ctx, i_hook, i_src = idx("context"), idx("hook"), idx("source")
     i_tk, i_grp, i_tp, i_st = idx("tickers"), idx("group"), idx("topic"), idx("status")
+    i_ex = idx("execute")
     if i_ctx is None or i_st is None:
         return []
 
@@ -300,7 +518,7 @@ def approved_context_from_rows(rows: list[list[str]]) -> list[dict]:
         return row[i].strip() if i is not None and i < len(row) else ""
 
     out: list[dict] = []
-    for row in rows[1:]:
+    for row_i, row in enumerate(rows[1:], start=2):   # dòng 1 = header trên Sheet
         if cell(row, i_st).upper() != "APPROVE":
             continue
         ctx = cell(row, i_ctx)
@@ -310,7 +528,8 @@ def approved_context_from_rows(rows: list[list[str]]) -> list[dict]:
         src = raw_src.splitlines()[0] if raw_src else ""   # ô Source gộp -> lấy url chính
         tickers = [t.strip() for t in cell(row, i_tk).split(",") if t.strip()]
         out.append({"context": ctx, "hook": cell(row, i_hook), "source": src,
-                    "tickers": tickers, "group": cell(row, i_grp), "topic": cell(row, i_tp)})
+                    "tickers": tickers, "group": cell(row, i_grp), "topic": cell(row, i_tp),
+                    "execute": cell(row, i_ex).upper(), "row": row_i})
     return out
 
 
@@ -375,13 +594,14 @@ _C_BORDER = "#D9D9D9"      # xám khung
 _C_APPROVE = "#D9EAD3"     # xanh lá nhạt
 _C_PENDING = "#FFF2CC"     # vàng nhạt
 _C_REJECT = "#F4CCCC"      # đỏ nhạt
+_C_RUN = "#CFE2F3"         # xanh dương nhạt — Execute=RUN (đang chờ sản xuất)
 _C_SCORE_MIN = "#FFFFFF"
 _C_SCORE_MID = "#B6D7A8"
 _C_SCORE_MAX = "#38761D"
 
-# Freeze cột đầu cho tiện cuộn ngang (CONTEXT: cột đầu = Use, dễ tick/thấy khi
-# cuộn sang các cột nội dung dài hơn).
-_FREEZE_FIRST_COL = {"CONTEXT", "LOG", "ResearchReview", "ContentReview"}
+# Freeze cột đầu cho tiện cuộn ngang (CONTEXT/CONTENT: cột đầu = Timestamp, dễ
+# thấy khi cuộn sang các cột nội dung dài hơn).
+_FREEZE_FIRST_COL = {"CONTEXT", "CONTENT", "LOG"}
 
 # Bề rộng cột (px) theo TÊN header (chữ thường). Cột dài rộng, score/status hẹp.
 _COL_WIDTH = {
@@ -390,9 +610,10 @@ _COL_WIDTH = {
     "gate": 110, "label": 170, "payload": 380, "enable": 80, "key": 120,
     "name": 210, "type": 90, "status": 110, "context": 380, "output": 380,
     "prompt": 380, "template": 380,
-    "use": 60, "hot%": 80, "group": 140, "source": 260, "value": 260,
+    "hot%": 80, "group": 140, "source": 260, "value": 260,
     "publisher": 170, "field": 110, "topic": 130, "sources": 260, "feedurl": 260,
-    "interval": 80, "priority": 80, "keywords": 380,
+    "interval": 80, "priority": 80, "keywords": 380, "execute": 90,
+    "approve(gate 2)": 130,
 }
 _COL_WIDTH_DEFAULT = 140
 # Cột nội dung dài -> wrap text.
@@ -536,34 +757,47 @@ def _tab_requests(t: TabMeta) -> list[dict]:
         c = low.index("enable")
         out.append(_set_validation(sid, 1, fmt_rows, c,
                                    {"condition": {"type": "BOOLEAN"}, "showCustomUi": True}))
-    if "use" in low:  # CONTEXT.Use -> checkbox (người duyệt tự tick, độc lập Status)
-        c = low.index("use")
-        out.append(_set_validation(sid, 1, fmt_rows, c,
-                                   {"condition": {"type": "BOOLEAN"}, "showCustomUi": True}))
-    if t.name == "CONTEXT" and "status" in low:  # -> dropdown quy trình duyệt
+    if t.name == "CONTEXT" and "status" in low:  # -> dropdown quy trình duyệt (cổng 1)
         c = low.index("status")
         out.append(_set_validation(sid, 1, fmt_rows, c,
                                    _one_of_list(["PENDING", "APPROVE", "REJECT"])))
-    if t.name == "CONTENT" and "status" in low:  # -> dropdown (khi có tab CONTENT)
+    if t.name == "CONTEXT" and "execute" in low:  # -> dropdown cờ thực thi sản xuất
+        c = low.index("execute")
+        out.append(_set_validation(sid, 1, fmt_rows, c, _one_of_list(["RUN", "DONE"])))
+    if t.name == "CONTENT" and "status" in low:  # -> dropdown (kết quả sản xuất, tất định)
         c = low.index("status")
         out.append(_set_validation(sid, 1, fmt_rows, c,
                                    _one_of_list(["PENDING", "RUNNING", "DONE", "ERROR"])))
+    if t.name == "CONTENT" and "approve(gate 2)" in low:  # -> dropdown quy trình duyệt (cổng 2)
+        c = low.index("approve(gate 2)")
+        out.append(_set_validation(sid, 1, fmt_rows, c,
+                                   _one_of_list(["PENDING", "APPROVE", "REJECT"])))
 
-    # 8) Conditional formatting cho CONTEXT (xóa rule cũ trước -> idempotent).
-    if t.name == "CONTEXT":
+    # 8) Conditional formatting cho CONTEXT/CONTENT (xóa rule cũ trước -> idempotent).
+    if t.name in ("CONTEXT", "CONTENT"):
         for i in range(t.cond_format_count - 1, -1, -1):
             out.append({"deleteConditionalFormatRule": {"sheetId": sid, "index": i}})
+    if t.name == "CONTEXT":
         if "status" in low:
             c = low.index("status")
             out.append(_text_eq_rule(sid, c, 1, fmt_rows, "APPROVE", _C_APPROVE))
             out.append(_text_eq_rule(sid, c, 1, fmt_rows, "PENDING", _C_PENDING))
             out.append(_text_eq_rule(sid, c, 1, fmt_rows, "REJECT", _C_REJECT))
+        if "execute" in low:
+            c = low.index("execute")
+            out.append(_text_eq_rule(sid, c, 1, fmt_rows, "RUN", _C_RUN))
+            out.append(_text_eq_rule(sid, c, 1, fmt_rows, "DONE", _C_APPROVE))
         if "score" in low:
             c = low.index("score")
             out.append(_score_scale_rule(sid, c, 1, fmt_rows))
         if "hot%" in low:  # thang màu độ hot, cùng kiểu gradient với score
             c = low.index("hot%")
             out.append(_score_scale_rule(sid, c, 1, fmt_rows))
+    if t.name == "CONTENT" and "approve(gate 2)" in low:
+        c = low.index("approve(gate 2)")
+        out.append(_text_eq_rule(sid, c, 1, fmt_rows, "APPROVE", _C_APPROVE))
+        out.append(_text_eq_rule(sid, c, 1, fmt_rows, "PENDING", _C_PENDING))
+        out.append(_text_eq_rule(sid, c, 1, fmt_rows, "REJECT", _C_REJECT))
 
     return out
 
@@ -594,11 +828,47 @@ class SheetsBoard:
             raise RuntimeError("Cần: pip install gspread google-auth") from e
         scopes = ["https://www.googleapis.com/auth/spreadsheets"]
         creds = Credentials.from_service_account_file(self.creds_path, scopes=scopes)
-        self._sh = gspread.authorize(creds).open_by_key(self.spreadsheet_id)
+        sh = gspread.authorize(creds).open_by_key(self.spreadsheet_id)
+        self._sh = _RetryingProxy(sh)   # mọi method (worksheets/batch_update/...) tự retry 429
         return self._sh
 
-    def ensure_tabs(self) -> list[str]:
-        """Tạo đủ 8 tab + hàng header nếu chưa có. Trả về tên các tab vừa tạo."""
+    def ensure_tabs(self, *, force: bool = False) -> list[str]:
+        """Đảm bảo đủ 8 tab + header ĐÚNG + định dạng (format_board).
+
+        GIẢM LƯỢT GỌI SHEETS API: mặc định (force=False) chỉ chạy phần tạo/seed/
+        format NẶNG khi phát hiện tab thiếu hoặc header SAI — dò bằng
+        `_headers_need_setup()` (2 lệnh gọi rẻ: worksheets() + values_batch_get,
+        so với >20 lệnh của luồng setup đầy đủ). Dùng `force=True` (cờ --setup
+        ở CLI) để LUÔN chạy setup đầy đủ (vd sau khi đổi schema cột thủ công).
+        Trả về tên các tab vừa TẠO MỚI (rỗng nếu bỏ qua vì đã đúng header).
+        """
+        if not force and not self._headers_need_setup():
+            return []
+        return self._full_ensure_tabs()
+
+    def _headers_need_setup(self) -> bool:
+        """Kiểm tra RẺ (2 lệnh gọi): có tab nào THIẾU, hoặc header hàng 1 của tab
+        nào SAI so với TABS. Lỗi mạng/API bất kỳ -> coi như CẦN setup (an toàn)."""
+        try:
+            sh = self._spreadsheet()
+            existing = {w.title for w in sh.worksheets()}
+            if any(name not in existing for name in TABS):
+                return True
+            ranges = [f"'{name}'!A1:{_col_a1(len(header))}1" for name, header in TABS.items()]
+            resp = sh.values_batch_get(ranges)
+        except Exception:  # pragma: no cover - lỗi mạng/API -> an toàn, cần setup
+            return True
+        value_ranges = resp.get("valueRanges", [])
+        for (name, header), vr in zip(TABS.items(), value_ranges):
+            values = vr.get("values") or [[]]
+            row = values[0] if values else []
+            if row != header:
+                return True
+        return False
+
+    def _full_ensure_tabs(self) -> list[str]:
+        """Tạo đủ 8 tab + hàng header nếu chưa có, seed dữ liệu mẫu, rồi format_board.
+        Luồng NẶNG — chỉ gọi qua ensure_tabs() khi thật cần (xem đó)."""
         import gspread
 
         sh = self._spreadsheet()
@@ -606,17 +876,21 @@ class SheetsBoard:
         created: list[str] = []
         for name, header in TABS.items():
             if name in existing:
-                ws = sh.worksheet(name)
+                ws = _RetryingProxy(sh.worksheet(name))
             else:
-                ws = sh.add_worksheet(title=name, rows=1000, cols=max(len(header), 8))
+                ws = _RetryingProxy(sh.add_worksheet(title=name, rows=1000, cols=max(len(header), 8)))
                 created.append(name)
-            cur = ws.row_values(1)
+            all_values = ws.get_all_values()
+            cur = all_values[0] if all_values else []
             if cur != header:
-                # MIGRATE CONTEXT: header đổi (bỏ Publisher/Field, gộp Sources) ->
-                # xoá sạch dòng cũ + cột thừa để không lệch cột, rồi ghi header mới.
-                if name == "CONTEXT" and cur:
-                    ws.clear()
-                ws.update("A1", [header])
+                # MIGRATE: header đổi -> map DỮ LIỆU cũ sang cột MỚI theo TÊN cột
+                # (migrate_rows, KHÔNG mất/lệch dữ liệu — thay cho ws.clear() cũ
+                # từng xoá sạch dòng đã duyệt). Cột mới (vd Execute) lấy default
+                # ở _MIGRATE_DEFAULTS; cột bị xoá (vd Use) rớt tự nhiên.
+                old_rows = all_values[1:] if cur else []
+                new_rows = migrate_rows(cur, header, old_rows,
+                                        defaults=_MIGRATE_DEFAULTS.get(name, {}))
+                ws.update("A1", [header, *new_rows], value_input_option="USER_ENTERED")
             if name == "README" and len(ws.get_all_values()) <= 1:
                 ws.append_rows(_README_ROWS, value_input_option="RAW")
             if name == "SETTINGS" and len(ws.get_all_values()) <= 1:
@@ -626,12 +900,16 @@ class SheetsBoard:
             if name == "PROMPTS" and len(ws.get_all_values()) <= 1:
                 ws.append_rows(_PROMPTS_SEED_ROWS, value_input_option="USER_ENTERED")
             self._ws[name] = ws
-        # gspread tạo sẵn "Sheet1" khi tạo spreadsheet — dọn cho gọn (nếu có).
-        if "Sheet1" in existing and len(sh.worksheets()) > len(TABS):
-            try:
-                sh.del_worksheet(sh.worksheet("Sheet1"))
-            except gspread.GSpreadException:  # pragma: no cover
-                pass
+        # Dọn tab CŨ không còn dùng: "Sheet1" (gspread tự tạo lúc dựng spreadsheet)
+        # + ResearchReview/ContentReview (chức năng đã gộp vào CONTEXT.Status/
+        # CONTENT."Approve(gate 2)"). CHỈ xoá ĐÚNG tên trong _LEGACY_TABS, không
+        # đụng tab lạ khác của người dùng.
+        for legacy in _LEGACY_TABS:
+            if legacy in existing:
+                try:
+                    sh.del_worksheet(sh.worksheet(legacy))
+                except gspread.GSpreadException:  # pragma: no cover
+                    pass
         # UI: định dạng bảng (idempotent, chỉ đổi format). Lỗi cosmetic KHÔNG
         # được chặn luồng dữ liệu -> bắt và cảnh báo.
         try:
@@ -669,13 +947,39 @@ class SheetsBoard:
                                 banding_ids=banding_ids, cond_format_count=cond_count))
 
         requests = build_format_requests(tabs)
+        requests = self._drop_stale_delete_banding(sh, requests)
         if requests:
             sh.batch_update({"requests": requests})
         return len(requests)
 
+    def _drop_stale_delete_banding(self, sh, requests: list[dict]) -> list[dict]:
+        """GET lại danh sách bandedRangeId CÒN TỒN TẠI ngay TRƯỚC khi gửi
+        batchUpdate, chỉ giữ deleteBanding cho ID còn tồn tại — tránh lỗi 400
+        "no banding with id X" khi ID đã bị xoá bởi 1 lượt chạy KHÁC giữa lúc
+        format_board() đọc metadata (đầu hàm) và lúc gửi batchUpdate (đóng khe
+        hở race, vd 2 lịch power_on.py chạy song song). No-op nếu không có
+        deleteBanding nào trong `requests` (đỡ tốn 1 lượt gọi khi không cần)."""
+        if not any("deleteBanding" in r for r in requests):
+            return requests
+        try:
+            fresh = sh.fetch_sheet_metadata(
+                params={"fields": "sheets(bandedRanges(bandedRangeId))"})
+        except Exception:  # pragma: no cover - lỗi mạng -> giữ nguyên, để batch_update tự báo
+            return requests
+        live_ids = {
+            b["bandedRangeId"]
+            for s in fresh.get("sheets", [])
+            for b in s.get("bandedRanges", [])
+            if b.get("bandedRangeId") is not None
+        }
+        return [
+            r for r in requests
+            if "deleteBanding" not in r or r["deleteBanding"]["bandedRangeId"] in live_ids
+        ]
+
     def _tab(self, name: str):
         if name not in self._ws:
-            self._ws[name] = self._spreadsheet().worksheet(name)
+            self._ws[name] = _RetryingProxy(self._spreadsheet().worksheet(name))
         return self._ws[name]
 
     # --- API dùng bởi review_to_sheet.py ---------------------------
@@ -740,6 +1044,46 @@ class SheetsBoard:
         self._tab("CONTENT").append_rows(rows, value_input_option="RAW")
         return len(rows)
 
+    _CONTENT_MERGE_COLS = ("timestamp", "context")
+
+    def regroup_and_merge_content(self) -> int:
+        """Sắp lại tab CONTENT để các hàng CÙNG chủ đề (Context) liền kề nhau
+        (regroup_content_rows — CHỈ đổi vị trí, không đổi dữ liệu), rồi merge dọc
+        cột Timestamp+Context cho các chủ đề đã ĐỦ 3 loại article/video_script/
+        infographic (content_merge_ranges). Idempotent: unmerge TOÀN vùng dữ
+        liệu trước khi merge lại nên gọi nhiều lần không lỗi/không merge chồng.
+        Trả số dải đã merge (0 -> không đổi gì, kể cả khi tab rỗng/thiếu cột)."""
+        ws = self._tab("CONTENT")
+        values = ws.get_all_values()
+        if len(values) < 2:
+            return 0
+        header, rows = values[0], values[1:]
+        low = [h.strip().lower() for h in header]
+
+        new_rows = regroup_content_rows(header, rows)
+        if new_rows != rows:
+            ws.update("A2", new_rows, value_input_option="RAW")
+        ranges = content_merge_ranges(header, new_rows)
+
+        sid = ws.id
+        ncols = len(header)
+        n_rows = len(new_rows) + 1   # +1 header
+        reqs: list[dict] = [{"unmergeCells": {"range": _grid_range(sid, 1, n_rows, 0, ncols)}}]
+        for col_name in self._CONTENT_MERGE_COLS:
+            if col_name not in low or not ranges:
+                continue
+            c = low.index(col_name)
+            for r0, r1 in ranges:
+                reqs.append({"mergeCells": {"range": _grid_range(sid, r0, r1, c, c + 1),
+                                            "mergeType": "MERGE_COLUMNS"}})
+                reqs.append({"repeatCell": {
+                    "range": _grid_range(sid, r0, r1, c, c + 1),
+                    "cell": {"userEnteredFormat": {"verticalAlignment": "MIDDLE"}},
+                    "fields": "userEnteredFormat.verticalAlignment",
+                }})
+        self._spreadsheet().batch_update({"requests": reqs})
+        return len(ranges)
+
     def read_prompt_versions(self) -> dict[str, str]:
         """Đọc LIVE tab PROMPTS (Name|Version|Enable) -> {name: version} (chỉ hàng
         Enable bật). Rỗng/thiếu tab -> {} (agent dùng default nội bộ)."""
@@ -762,13 +1106,12 @@ class SheetsBoard:
                       hot_pct: float = 0.0, topic: str = "", group: str = "",
                       other_sources: list[str] | None = None,
                       tickers: list[str] | None = None) -> bool:
-        """Ghi 1 dòng chờ duyệt (PENDING, Use=FALSE) vào tab CONTEXT.
+        """Ghi 1 dòng chờ duyệt (PENDING, Execute rỗng) vào tab CONTEXT.
 
         BỎ TRÙNG theo url (cột Source): nếu url đã có ở tab CONTEXT thì KHÔNG ghi
-        lại (idempotent across-run). Trả True nếu đã ghi, False nếu bỏ qua vì trùng.
-        (review_to_sheet.py dùng replace_context để UPSERT toàn bảng; hàm này giữ
-        cho ghi lẻ + test dedup.)
-        """
+        lại — GIỮ NGUYÊN dòng cũ (Status/Execute/Hook/Notes...), idempotent
+        across-run. Trả True nếu đã ghi, False nếu bỏ qua vì trùng. Ghi NHIỀU
+        dòng 1 lượt -> dùng upsert_context_rows (rẻ hơn, 2 lệnh gọi thay vì N)."""
         ws = self._tab("CONTEXT")
         if url and url.strip() in self._context_urls(ws):
             return False
@@ -780,22 +1123,69 @@ class SheetsBoard:
         )
         return True
 
-    def replace_context(self, rows: list[list[str]]) -> int:
-        """UPSERT tab CONTEXT: XÓA vùng dữ liệu (giữ header hàng 1) rồi ghi lại
-        `rows`. Mỗi lần chạy CONTEXT phản ánh ĐÚNG kết quả lần đó — hết cảnh trộn
-        dòng cũ (thiếu Publisher/Field/Topic) với dòng mới do append. `rows` phải
-        ĐÚNG thứ tự CONTEXT_HEADER (dùng context_row). Trả số dòng đã ghi."""
+    def upsert_context_rows(self, rows: list[list[str]]) -> int:
+        """UPSERT NHIỀU dòng vào CONTEXT theo url (cột Source), 1 lượt (2 lệnh
+        gọi API): url ĐÃ CÓ -> BỎ QUA HOÀN TOÀN (giữ nguyên dòng cũ — Status/
+        Execute/Hook/Notes... không đổi); url CHƯA CÓ -> append. KHÔNG xoá/ghi
+        đè dòng đã có (khác replace_context cũ đã bỏ). `rows` phải ĐÚNG thứ tự
+        CONTEXT_HEADER (dùng context_row). Trả số dòng MỚI đã ghi."""
         ws = self._tab("CONTEXT")
-        n_existing = len(ws.get_all_values())
-        if n_existing > 1:                     # có dữ liệu cũ dưới header -> xóa
-            end = f"{_col_a1(len(CONTEXT_HEADER))}{n_existing}"
-            ws.batch_clear([f"A2:{end}"])
-        if rows:
-            ws.update("A2", rows, value_input_option="USER_ENTERED")
-        return len(rows)
+        existing_urls = self._context_urls(ws)
+        i_src = [h.strip().lower() for h in CONTEXT_HEADER].index("source")
+
+        def primary_url(row: list[str]) -> str:
+            # ô Source có thể gộp "<url>\n(+N báo)\n<url2>..." -> url ĐẦU là chính.
+            return row[i_src].splitlines()[0].strip() if i_src < len(row) else ""
+
+        new_rows = [r for r in rows if primary_url(r) and primary_url(r) not in existing_urls]
+        if new_rows:
+            ws.append_rows(new_rows, value_input_option="USER_ENTERED")
+        return len(new_rows)
+
+    def sync_approve_execute_flags(self) -> int:
+        """MỌI dòng CONTEXT có Status=APPROVE và Execute RỖNG -> tự đặt Execute=
+        RUN (chuẩn bị cho produce_from_sheet.py xử lý). Dòng đã RUN/DONE giữ
+        nguyên (idempotent, không đụng lại). Trả số dòng vừa đổi."""
+        ws = self._tab("CONTEXT")
+        rows = ws.get_all_values()
+        if not rows:
+            return 0
+        header = [h.strip().lower() for h in rows[0]]
+        if "status" not in header or "execute" not in header:
+            return 0
+        i_st, i_ex = header.index("status"), header.index("execute")
+
+        to_set: list[int] = []   # số dòng 1-based (2..N) cần đặt RUN
+        for row_i, r in enumerate(rows[1:], start=2):
+            st = r[i_st].strip().upper() if i_st < len(r) else ""
+            ex = r[i_ex].strip().upper() if i_ex < len(r) else ""
+            if st == "APPROVE" and not ex:
+                to_set.append(row_i)
+        if not to_set:
+            return 0
+        col_letter = _col_a1(i_ex + 1)
+        ws.batch_update([{"range": f"{col_letter}{r}", "values": [["RUN"]]} for r in to_set],
+                        value_input_option="RAW")
+        return len(to_set)
+
+    def mark_execute_done(self, rows: list[int]) -> None:
+        """Đặt Execute=DONE cho các dòng CONTEXT (số dòng 1-based trên Sheet, xem
+        approved_context_from_rows()["row"]) VỪA sản xuất XONG (đủ nội dung, đã
+        ghi CONTENT) — idempotent: lần chạy sau approved_context_from_rows lọc
+        theo execute=='RUN' sẽ tự bỏ qua dòng đã DONE. No-op nếu `rows` rỗng."""
+        if not rows:
+            return
+        ws = self._tab("CONTEXT")
+        header = [h.strip().lower() for h in ws.row_values(1)]
+        if "execute" not in header:
+            return
+        col_letter = _col_a1(header.index("execute") + 1)
+        ws.batch_update([{"range": f"{col_letter}{r}", "values": [["DONE"]]} for r in rows],
+                        value_input_option="RAW")
 
     def _context_urls(self, ws) -> set[str]:
-        """Tập url đã có ở tab CONTEXT (ánh xạ theo tên cột 'source')."""
+        """Tập url đã có ở tab CONTEXT (ánh xạ theo tên cột 'source'; ô Source
+        có thể gộp "<url>\\n(+N báo)\\n..." -> chỉ tính url ĐẦU/chính)."""
         rows = ws.get_all_values()
         if not rows:
             return set()
@@ -803,7 +1193,7 @@ class SheetsBoard:
         if "source" not in header:
             return set()
         i = header.index("source")
-        return {r[i].strip() for r in rows[1:] if i < len(r) and r[i].strip()}
+        return {r[i].splitlines()[0].strip() for r in rows[1:] if i < len(r) and r[i].strip()}
 
     def context_titles(self) -> list[str]:
         """Danh sách tiêu đề (cột Context) đã có trong CONTEXT — dùng để lọc

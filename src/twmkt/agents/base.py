@@ -79,6 +79,6 @@ class Agent:
     def __init__(self, llm: LLMClient | None = None):
         self.llm = llm or MockLLM()
 
-    def _ask(self, prompt: str) -> str:
-        sys = f"{self.role}\n{self.system}"
+    def _ask(self, prompt: str, *, extra_system: str = "") -> str:
+        sys = f"{self.role}\n{self.system}{extra_system}"
         return self.llm.complete(sys, prompt)

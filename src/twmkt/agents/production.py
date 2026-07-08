@@ -49,6 +49,7 @@ from ._jsonparse import try_json_object
 from ..guardrails import compliance
 from ..models import ContentDraft, ContentFormat
 from .base import Agent, LLMClient
+from .voice import load_voice_lock
 
 _DISCLAIMER = (
     "Nội dung chỉ mang tính thông tin, không phải khuyến nghị đầu tư. "
@@ -143,7 +144,9 @@ class AnalysisWriterAgent(Agent):
     )
 
     def run(self, brief: ProductionBrief) -> ContentDraft:
-        data = try_json_object(self._ask(build_analysis_prompt(brief)))
+        voice = load_voice_lock("analysis")
+        extra = f"\n\n---\n\nVOICE-LOCK (giọng văn bắt buộc):\n{voice}" if voice else ""
+        data = try_json_object(self._ask(build_analysis_prompt(brief), extra_system=extra))
         title, sapo, sections, disclaimer, sources = analysis_fields_from_data(data, brief)
         body = render_analysis(title, sapo, sections, disclaimer, sources, brief)
         return ContentDraft(fmt=ContentFormat.ARTICLE, title=title, body=body,

@@ -65,6 +65,7 @@ sources:
     fetch_type: "html"
     field: "DoanhNghiep"
     priority: 5
+    interval_minutes: 240   # 4h - bao lâu crawl lại nguồn này (0 = dùng schedule.interval_minutes)
     enabled: true
     article_url_pattern: "-\\d{6,}\\.chn$"        # link bài: /<slug>-<id>.chn
     title_selector: "h1"
@@ -76,6 +77,7 @@ sources:
     fetch_type: "html"
     field: "ViMo"
     priority: 5
+    interval_minutes: 240   # 4h - bao lâu crawl lại nguồn này (0 = dùng schedule.interval_minutes)
     enabled: true
     article_url_pattern: "-\\d{6,}\\.chn$"
     title_selector: "h1"
@@ -87,6 +89,7 @@ sources:
     fetch_type: "html"
     field: "TheGioi"
     priority: 5
+    interval_minutes: 240   # 4h - bao lâu crawl lại nguồn này (0 = dùng schedule.interval_minutes)
     enabled: true
     article_url_pattern: "-\\d{6,}\\.chn$"
     title_selector: "h1"
@@ -100,6 +103,7 @@ sources:
     fetch_type: "rss"
     field: "ChungKhoan"
     priority: 4
+    interval_minutes: 240   # 4h - bao lâu crawl lại nguồn này (0 = dùng schedule.interval_minutes)
     enabled: true
     article_url_pattern: "-\\d{6,}\\.chn$"       # dùng khi fetch_one() full-fetch bài giữ
     title_selector: "h1"
@@ -111,6 +115,7 @@ sources:
     fetch_type: "rss"
     field: "BatDongSan"
     priority: 4
+    interval_minutes: 240   # 4h - bao lâu crawl lại nguồn này (0 = dùng schedule.interval_minutes)
     enabled: true
     article_url_pattern: "-\\d{6,}\\.chn$"
     title_selector: "h1"
@@ -124,6 +129,7 @@ sources:
     fetch_type: "rss"
     field: "ViMo"
     priority: 4
+    interval_minutes: 240   # 4h - bao lâu crawl lại nguồn này (0 = dùng schedule.interval_minutes)
     enabled: true
     article_url_pattern: "-\\d{6,}\\.chn$"
     title_selector: "h1"
@@ -135,6 +141,7 @@ sources:
     fetch_type: "rss"
     field: "ChinhSach"
     priority: 4
+    interval_minutes: 240   # 4h - bao lâu crawl lại nguồn này (0 = dùng schedule.interval_minutes)
     enabled: true
     article_url_pattern: "-\\d{6,}\\.chn$"
     title_selector: "h1"
@@ -146,6 +153,7 @@ sources:
     fetch_type: "rss"
     field: "ViMo"
     priority: 4
+    interval_minutes: 240   # 4h - bao lâu crawl lại nguồn này (0 = dùng schedule.interval_minutes)
     enabled: true
     article_url_pattern: "-\\d{6,}\\.chn$"
     title_selector: "h1"
@@ -159,6 +167,7 @@ sources:
     fetch_type: "rss"
     field: "ChungKhoan"
     priority: 3
+    interval_minutes: 240   # 4h - bao lâu crawl lại nguồn này (0 = dùng schedule.interval_minutes)
     enabled: true
     article_url_pattern: "-\\d+\\.htm$"          # link bài Vietstock: .../<slug>-<id>.htm
     title_selector: "h1"
@@ -320,6 +329,14 @@ producers:
   video_script: true
   newsletter: true                # tất định, $0
 
+# --- Voice-lock: khoá giọng văn (xem docs/voice_examples.md) --------
+# $0 (chỉ đọc file cục bộ, không thêm lệnh gọi API) — nối §1+§2+§3 (luật giọng)
+# + đúng 1 ví dụ (format_example) vào system prompt agent sản xuất tương ứng.
+voice:
+  enabled: true
+  examples_path: docs/voice_examples.md
+  format_example: { analysis: D, facebook: C, infographic: C, video: C }
+
 # --- Cổng duyệt người-trong-vòng-lặp --------------------------------
 gates:
   research:
@@ -352,7 +369,7 @@ publishers:
 schedule:
   enabled: true                   # true = bật vòng lặp nội bộ
   mode: "interval"                # interval | daily
-  interval_minutes: 60            # dùng khi mode=interval
+  interval_minutes: 240           # dùng khi mode=interval (mặc định 4h — khớp SOURCES.Interval)
   at_times: ["08:30", "16:00"]    # dùng khi mode=daily (giờ địa phương theo timezone)
   timezone: "Asia/Ho_Chi_Minh"
   jitter_s: 30                    # nhiễu +[0..jitter_s]s tránh dồn tải đúng mốc

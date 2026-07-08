@@ -684,19 +684,19 @@ def test_sheets_sources_from_rows_filters_enable():
 
 
 def test_sheets_context_row_column_order():
-    """context_row header MỚI (12 cột): bỏ Publisher/Field; Source gộp báo khác;
-    Use=FALSE, Status=PENDING mặc định."""
+    """context_row header MỚI: Timestamp ĐẦU TIÊN, KHÔNG còn cột Use, Execute
+    NGAY SAU Status. Source gộp báo khác; Status=PENDING, Execute rỗng mặc định."""
     from twmkt.sheets_board import context_row, CONTEXT_HEADER
 
-    assert CONTEXT_HEADER == ["Use", "Score", "Hot%", "Group", "Topic", "Context",
-                             "Hook", "Source", "Status", "timestamp", "tickers", "Notes"]
+    assert CONTEXT_HEADER == ["Timestamp", "Hot%", "Score", "Group", "Topic", "Context",
+                             "Hook", "Source", "Status", "Execute", "tickers", "Notes"]
     row = context_row(title="Tiêu đề bài", hook_line="FPT: hook hấp dẫn",
                       source_url="http://u", score=5, hot_pct=42.5, topic="CoPhieu",
                       group="CoPhieu, ChinhSach", other_sources=["http://u2", "http://u3"],
                       tickers=["FPT", "HPG"], ts="2026-07-02T00:00:00+00:00")
     assert len(row) == len(CONTEXT_HEADER)
     d = dict(zip(CONTEXT_HEADER, row))
-    assert d["Use"] == "FALSE"
+    assert d["Timestamp"] == "2026-07-02T00:00:00+00:00"
     assert d["Score"] == "5"
     assert d["Hot%"] == "42.5"
     assert d["Group"] == "CoPhieu, ChinhSach"
@@ -705,11 +705,16 @@ def test_sheets_context_row_column_order():
     assert d["Hook"] == "FPT: hook hấp dẫn"
     # Source gộp: url chính + '(+N báo)' + url báo khác xuống dòng (bỏ cột Sources)
     assert d["Source"] == "http://u\n(+2 báo)\nhttp://u2\nhttp://u3"
-    assert "Publisher" not in d and "Field" not in d and "Sources" not in d
+    assert "Publisher" not in d and "Field" not in d and "Sources" not in d and "Use" not in d
     assert d["Status"] == "PENDING"
-    assert d["timestamp"] == "2026-07-02T00:00:00+00:00"
+    assert d["Execute"] == ""             # rỗng mặc định (tự chuyển RUN khi APPROVE)
     assert d["tickers"] == "FPT, HPG"
     assert d["Notes"] == ""
+
+    row2 = context_row(title="T2", hook_line="H2", source_url="http://v", score=1,
+                       hot_pct=1.0, status="APPROVE", execute="RUN")
+    d2 = dict(zip(CONTEXT_HEADER, row2))
+    assert d2["Status"] == "APPROVE" and d2["Execute"] == "RUN"
 
 
 def test_build_format_requests_covers_features_and_is_deterministic():
@@ -734,19 +739,23 @@ def test_build_format_requests_covers_features_and_is_deterministic():
               "addConditionalFormatRule"):
         assert k in kinds, f"thiếu request {k}"
     # idempotent: banding cũ + rule cũ của CONTEXT bị xóa trước khi thêm lại
+    # (CONTENT.cond_format_count=0 trong test này -> không sinh xóa cho CONTENT).
     assert kinds.count("deleteBanding") == 1
     assert kinds.count("deleteConditionalFormatRule") == 3
-    # APPROVE/PENDING/REJECT (Status) + score scale + Hot% scale
-    assert kinds.count("addConditionalFormatRule") == 5
-    # checkbox cho SOURCES.Enable + CONTEXT.Use + PROMPTS.Enable, dropdown CONTEXT.Status
+    # CONTEXT: Status(APPROVE/PENDING/REJECT=3) + Execute(RUN/DONE=2) + score + hot%
+    # CONTENT: "Approve(gate 2)"(APPROVE/PENDING/REJECT=3) => 4+3+3 = 10
+    assert kinds.count("addConditionalFormatRule") == 10
+    # checkbox: SOURCES.Enable + PROMPTS.Enable (Use đã xoá, KHÔNG còn checkbox CONTEXT)
+    # dropdown: CONTEXT.Status + CONTEXT.Execute + CONTENT.Status + CONTENT."Approve(gate 2)"
     sd = [r["setDataValidation"] for r in reqs if "setDataValidation" in r]
     conds = [v["rule"]["condition"]["type"] for v in sd]
-    assert conds.count("BOOLEAN") == 3 and "ONE_OF_LIST" in conds
+    assert conds.count("BOOLEAN") == 2 and conds.count("ONE_OF_LIST") == 4
     # determinism = idempotent theo cấu trúc
     assert build_format_requests(tabs) == reqs
     assert SOURCES_HEADER[0].lower() == "enable"
     low = [c.lower() for c in CONTEXT_HEADER]
-    assert {"use", "score", "hot%", "group", "context", "hook", "source", "status"} <= set(low)
+    assert {"score", "hot%", "group", "context", "hook", "source", "status", "execute"} <= set(low)
+    assert "use" not in low and low[0] == "timestamp"
 
 
 def test_format_board_smoke_no_network():
@@ -907,6 +916,208 @@ def test_sheets_sort_context_by_hot_noop_without_hot_column():
     board._ws["CONTEXT"] = ws
     board.sort_context_by_hot()
     assert ws.sorted_with is None                          # không gọi sort
+
+
+# --- Retry quota 429 (call_with_retry/_RetryingProxy) + gate ensure_tabs -----
+class _FakeQuotaResp:
+    """Giả lập requests.Response cho gspread.exceptions.APIError (429)."""
+    def __init__(self, status_code=429, retry_after=None):
+        self.status_code = status_code
+        self.headers = {"Retry-After": str(retry_after)} if retry_after else {}
+        self.text = "quota"
+
+    def json(self):
+        return {"error": {"code": self.status_code, "message": "Quota exceeded",
+                          "status": "RESOURCE_EXHAUSTED" if self.status_code == 429 else "ERR"}}
+
+
+def test_call_with_retry_recovers_after_429_then_succeeds():
+    """call_with_retry: 429 hai lần đầu -> retry (backoff giả lập, $0 thời gian
+    thật) -> thành công lần 3, không raise."""
+    import gspread
+    from twmkt.sheets_board import call_with_retry
+
+    calls = {"n": 0}
+    sleeps: list[float] = []
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise gspread.exceptions.APIError(_FakeQuotaResp())
+        return "ok"
+
+    result = call_with_retry(flaky, max_attempts=5, sleep=sleeps.append)
+    assert result == "ok" and calls["n"] == 3
+    assert len(sleeps) == 2 and all(s > 0 for s in sleeps)   # 2 lần chờ trước khi thành công
+
+
+def test_call_with_retry_raises_real_error_after_max_attempts():
+    """Hết `max_attempts` lần mà vẫn 429 -> raise lỗi THẬT (không nuốt)."""
+    import gspread
+    from twmkt.sheets_board import call_with_retry
+
+    calls = {"n": 0}
+
+    def always_429():
+        calls["n"] += 1
+        raise gspread.exceptions.APIError(_FakeQuotaResp())
+
+    try:
+        call_with_retry(always_429, max_attempts=3, sleep=lambda s: None)
+    except gspread.exceptions.APIError as e:
+        assert e.code == 429
+    else:
+        raise AssertionError("phải raise lỗi thật sau khi hết lượt thử")
+    assert calls["n"] == 3   # thử đúng max_attempts lần, không hơn
+
+
+def test_call_with_retry_does_not_retry_non_429_errors():
+    """Lỗi APIError KHÁC 429 (vd 404) -> raise NGAY, không retry (tránh chờ vô ích)."""
+    import gspread
+    from twmkt.sheets_board import call_with_retry
+
+    calls = {"n": 0}
+
+    def not_found():
+        calls["n"] += 1
+        raise gspread.exceptions.APIError(_FakeQuotaResp(status_code=404))
+
+    try:
+        call_with_retry(not_found, max_attempts=5, sleep=lambda s: None)
+    except gspread.exceptions.APIError:
+        pass
+    else:
+        raise AssertionError("phải raise")
+    assert calls["n"] == 1   # không retry
+
+
+def test_call_with_retry_prefers_retry_after_header():
+    """Có header Retry-After -> chờ ĐÚNG giá trị đó (không dùng backoff mũ)."""
+    import gspread
+    from twmkt.sheets_board import call_with_retry
+
+    def once_429_with_retry_after():
+        if not once_429_with_retry_after.called:
+            once_429_with_retry_after.called = True
+            raise gspread.exceptions.APIError(_FakeQuotaResp(retry_after=7))
+        return "ok"
+    once_429_with_retry_after.called = False
+
+    sleeps: list[float] = []
+    assert call_with_retry(once_429_with_retry_after, max_attempts=3, sleep=sleeps.append) == "ok"
+    assert sleeps == [7.0]
+
+
+def test_backoff_delay_exponential_with_jitter_when_no_retry_after():
+    """Không có Retry-After -> backoff mũ 2,4,8,16s + jitter tới 25%."""
+    from twmkt.sheets_board import _backoff_delay_s
+
+    assert _backoff_delay_s(1, None) - 2.0 == 0 or 2.0 <= _backoff_delay_s(1, None) <= 2.5
+    d3 = _backoff_delay_s(3, None)
+    assert 8.0 <= d3 <= 10.0        # base 8s (lần 3) + jitter tới 25%
+    assert _backoff_delay_s(1, retry_after=5.0) == 5.0   # Retry-After thắng backoff
+
+
+def test_retrying_proxy_forwards_and_retries_transparently():
+    """_RetryingProxy: method gọi qua proxy y hệt object gốc, TỰ retry 429 —
+    không cần sửa từng điểm gọi API. sleep tiêm được -> test $0 thời gian thật."""
+    import gspread
+    from twmkt.sheets_board import _RetryingProxy
+
+    class _Target:
+        title = "CONTEXT"   # thuộc tính thường -> trả nguyên, không bọc retry
+
+        def __init__(self): self.calls = 0
+        def append_row(self, row):
+            self.calls += 1
+            if self.calls < 2:
+                raise gspread.exceptions.APIError(_FakeQuotaResp())
+            return f"appended:{row}"
+
+    target = _Target()
+    proxy = _RetryingProxy(target, max_attempts=3, sleep=lambda s: None)
+    assert proxy.title == "CONTEXT"                     # thuộc tính xuyên qua, không bọc
+    assert proxy.append_row("x") == "appended:x"
+    assert target.calls == 2                              # đã retry 1 lần rồi mới thành công
+
+
+def test_ensure_tabs_skips_full_setup_when_headers_already_correct():
+    """ensure_tabs(): header ĐÃ ĐÚNG hết -> KHÔNG gọi ensure/format nặng (chỉ 2
+    lượt gọi rẻ: worksheets() + values_batch_get), trả về [] (không tạo tab mới)."""
+    from twmkt.sheets_board import SheetsBoard, TABS
+
+    class _FakeWSMeta:
+        def __init__(self, title): self.title = title
+
+    class _FakeSheet:
+        def __init__(self):
+            self.calls: list[str] = []
+        def worksheets(self):
+            self.calls.append("worksheets")
+            return [_FakeWSMeta(name) for name in TABS]
+        def values_batch_get(self, ranges):
+            self.calls.append("values_batch_get")
+            return {"valueRanges": [{"values": [header]} for header in TABS.values()]}
+        def batch_update(self, body):   # KHÔNG được gọi (mới là điều cần chứng minh)
+            self.calls.append("batch_update")
+            return {}
+        def fetch_sheet_metadata(self, params=None):
+            self.calls.append("fetch_sheet_metadata")
+            return {"sheets": []}
+
+    board = SheetsBoard(spreadsheet_id="SID", creds_path="creds")
+    fake = _FakeSheet()
+    board._sh = fake   # tránh _spreadsheet() -> mạng (test trực tiếp _headers_need_setup)
+
+    created = board.ensure_tabs()
+    assert created == []
+    assert fake.calls == ["worksheets", "values_batch_get"]   # đúng 2 lượt, KHÔNG format_board
+
+
+def test_ensure_tabs_runs_full_setup_when_header_wrong():
+    """Header SAI (hoặc thiếu tab) -> ensure_tabs() CHẠY đầy đủ (format_board
+    được gọi, tức batch_update xuất hiện trong log lệnh gọi)."""
+    from twmkt.sheets_board import SheetsBoard, TABS
+
+    class _FakeWSMeta:
+        def __init__(self, title): self.title = title
+
+    class _FakeWS:
+        def __init__(self, header): self._header = header; self.updated = None
+        def row_values(self, n): return self._header
+        def get_all_values(self): return [self._header]
+        def update(self, rng, values, value_input_option=None): self.updated = values
+        def append_rows(self, rows, value_input_option=None): pass
+        def clear(self): pass
+
+    class _FakeSheet:
+        def __init__(self):
+            self.calls: list[str] = []
+            self._ws_by_name = {name: _FakeWS(["SAI"]) for name in TABS}
+        def worksheets(self):
+            self.calls.append("worksheets")
+            return [_FakeWSMeta(name) for name in TABS]
+        def values_batch_get(self, ranges):
+            self.calls.append("values_batch_get")
+            return {"valueRanges": [{"values": [["SAI"]]} for _ in TABS]}
+        def worksheet(self, name):
+            self.calls.append(f"worksheet:{name}")
+            return self._ws_by_name[name]
+        def fetch_sheet_metadata(self, params=None):
+            self.calls.append("fetch_sheet_metadata")
+            return {"sheets": [{"properties": {"sheetId": i, "title": name,
+                                               "gridProperties": {"rowCount": 1000}}}
+                               for i, name in enumerate(TABS)]}
+        def batch_update(self, body):
+            self.calls.append("batch_update")
+            return {}
+
+    board = SheetsBoard(spreadsheet_id="SID", creds_path="creds")
+    fake = _FakeSheet()
+    board._sh = fake
+
+    board.ensure_tabs()
+    assert "batch_update" in fake.calls   # header sai -> chạy full setup (format_board)
 
 
 # --- curation/enrich.py: phân nhóm, điểm, near-duplicate ($0, không mạng) ---
@@ -1079,28 +1290,289 @@ def test_enrich_cluster_by_event_keeps_highest_priority():
     assert cluster_by_event([]) == []
 
 
-def test_replace_context_clears_then_rewrites():
-    """replace_context: XÓA vùng dữ liệu (A2:..) rồi ghi lại từ A2 (UPSERT), giữ header."""
+class _FakeContextWS:
+    """Fake worksheet CONTEXT dùng chung cho các test upsert/execute bên dưới."""
+    def __init__(self, values):
+        self._v = values
+        self.appended: list[list[str]] = []
+        self.batch_updates: list[list[dict]] = []
+
+    def get_all_values(self): return self._v
+    def row_values(self, n): return self._v[n - 1] if n - 1 < len(self._v) else []
+
+    def append_rows(self, rows, value_input_option=None):
+        self.appended.extend(rows)
+        self._v.extend(rows)
+
+    def batch_update(self, data, value_input_option=None):
+        import re
+        self.batch_updates.append(list(data))
+        for item in data:
+            m = re.match(r"([A-Z]+)(\d+)", item["range"])
+            col_i = 0
+            for ch in m.group(1):
+                col_i = col_i * 26 + (ord(ch) - 64)
+            col_i -= 1
+            row_n = int(m.group(2))
+            while len(self._v[row_n - 1]) <= col_i:
+                self._v[row_n - 1].append("")
+            self._v[row_n - 1][col_i] = item["values"][0][0]
+
+
+def test_upsert_context_rows_skips_existing_url_appends_new():
+    """upsert_context_rows: url ĐÃ CÓ -> bỏ qua HOÀN TOÀN (dòng cũ y nguyên,
+    không tạo dòng trùng); url CHƯA CÓ -> append. Trả số dòng MỚI (không tính
+    dòng bị bỏ qua)."""
     from twmkt.sheets_board import SheetsBoard, CONTEXT_HEADER, context_row
 
-    class _FakeWS:
-        def __init__(self, values):
-            self._v = values; self.cleared = None; self.updated = None
-        def get_all_values(self): return self._v
-        def batch_clear(self, ranges): self.cleared = ranges
-        def update(self, rng, values, value_input_option=None):
-            self.updated = (rng, values, value_input_option)
-
     board = SheetsBoard(spreadsheet_id="X", creds_path="Y")
-    old = ["FALSE"] * len(CONTEXT_HEADER)
-    ws = _FakeWS([CONTEXT_HEADER, old, old])       # header + 2 dòng cũ
+    existing = context_row(title="Đã duyệt", hook_line="h", source_url="http://u/1",
+                           score=5, hot_pct=10.0, status="APPROVE", execute="RUN")
+    ws = _FakeContextWS([CONTEXT_HEADER, list(existing)])
     board._ws["CONTEXT"] = ws
 
-    row = context_row(title="Bài mới", hook_line="h", source_url="http://u", score=3, hot_pct=42.0)
-    n = board.replace_context([row])
-    assert n == 1
-    assert ws.cleared == ["A2:L3"]                 # xóa 2 dòng dữ liệu cũ, GIỮ header (12 cột -> L)
-    assert ws.updated[0] == "A2" and ws.updated[1] == [row]   # ghi lại từ A2
+    dup = context_row(title="Crawl lại — url trùng", hook_line="h2", source_url="http://u/1",
+                      score=99, hot_pct=99.0)   # điểm/nội dung KHÁC nhưng CÙNG url
+    new = context_row(title="Bài mới", hook_line="h3", source_url="http://u/2",
+                      score=2, hot_pct=2.0)
+    n = board.upsert_context_rows([dup, new])
+
+    assert n == 1                               # chỉ 1 dòng MỚI được ghi
+    assert len(ws._v) == 3                       # header + 1 cũ + 1 mới (KHÔNG trùng)
+    assert ws._v[1] == list(existing)             # dòng cũ (APPROVE/RUN) Y NGUYÊN, không bị đè
+    assert ws.appended == [new]                    # CHỈ dòng thật sự mới được append
+
+
+def test_upsert_context_rows_called_twice_no_duplicate():
+    """Gọi upsert_context_rows 2 LẦN với CÙNG 1 dòng (mô phỏng crawl lại) ->
+    lần 2 KHÔNG tạo thêm dòng nào."""
+    from twmkt.sheets_board import SheetsBoard, CONTEXT_HEADER, context_row
+
+    board = SheetsBoard(spreadsheet_id="X", creds_path="Y")
+    ws = _FakeContextWS([list(CONTEXT_HEADER)])
+    board._ws["CONTEXT"] = ws
+
+    row = context_row(title="Bài A", hook_line="h", source_url="http://u/1", score=1, hot_pct=1.0)
+    n1 = board.upsert_context_rows([row])
+    n2 = board.upsert_context_rows([row])          # "crawl lại" cùng url
+    assert n1 == 1 and n2 == 0
+    assert len(ws._v) == 2                          # header + đúng 1 dòng, KHÔNG trùng
+
+
+def test_sync_approve_execute_flags_sets_run_only_for_empty_execute():
+    """sync_approve_execute_flags: Status=APPROVE + Execute rỗng -> RUN. Dòng đã
+    RUN/DONE hoặc Status khác APPROVE -> giữ nguyên (idempotent)."""
+    from twmkt.sheets_board import SheetsBoard, CONTEXT_HEADER, context_row
+
+    board = SheetsBoard(spreadsheet_id="X", creds_path="Y")
+    fresh = context_row(title="Vừa duyệt", hook_line="h", source_url="http://u/1",
+                        score=1, hot_pct=1.0, status="APPROVE", execute="")
+    already_run = context_row(title="Đang chờ", hook_line="h", source_url="http://u/2",
+                              score=1, hot_pct=1.0, status="APPROVE", execute="RUN")
+    already_done = context_row(title="Đã xong", hook_line="h", source_url="http://u/3",
+                               score=1, hot_pct=1.0, status="APPROVE", execute="DONE")
+    pending = context_row(title="Chưa duyệt", hook_line="h", source_url="http://u/4",
+                          score=1, hot_pct=1.0, status="PENDING", execute="")
+    ws = _FakeContextWS([list(CONTEXT_HEADER), list(fresh), list(already_run),
+                         list(already_done), list(pending)])
+    board._ws["CONTEXT"] = ws
+
+    changed = board.sync_approve_execute_flags()
+    assert changed == 1                             # CHỈ dòng "fresh" đổi
+    i_ex = [h.lower() for h in CONTEXT_HEADER].index("execute")
+    assert ws._v[1][i_ex] == "RUN"                   # fresh -> RUN
+    assert ws._v[2][i_ex] == "RUN"                   # already_run -> giữ nguyên
+    assert ws._v[3][i_ex] == "DONE"                  # already_done -> giữ nguyên
+    assert ws._v[4][i_ex] == ""                      # pending (chưa duyệt) -> vẫn rỗng
+
+    assert board.sync_approve_execute_flags() == 0   # gọi lại -> idempotent, 0 thay đổi
+
+
+def test_mark_execute_done_sets_done_for_given_rows_only():
+    """mark_execute_done: CHỈ đặt DONE cho đúng số dòng truyền vào; rỗng -> no-op."""
+    from twmkt.sheets_board import SheetsBoard, CONTEXT_HEADER, context_row
+
+    board = SheetsBoard(spreadsheet_id="X", creds_path="Y")
+    r1 = context_row(title="A", hook_line="h", source_url="http://u/1", score=1,
+                     hot_pct=1.0, status="APPROVE", execute="RUN")
+    r2 = context_row(title="B", hook_line="h", source_url="http://u/2", score=1,
+                     hot_pct=1.0, status="APPROVE", execute="RUN")
+    ws = _FakeContextWS([list(CONTEXT_HEADER), list(r1), list(r2)])
+    board._ws["CONTEXT"] = ws
+
+    board.mark_execute_done([2])   # chỉ dòng 2 (r1)
+    i_ex = [h.lower() for h in CONTEXT_HEADER].index("execute")
+    assert ws._v[1][i_ex] == "DONE"
+    assert ws._v[2][i_ex] == "RUN"                   # dòng 3 (r2) KHÔNG bị đụng
+
+    board.mark_execute_done([])    # rỗng -> no-op, không lỗi
+    assert ws.batch_updates and len(ws.batch_updates) == 1   # không gọi thêm batch_update
+
+
+def test_approved_context_from_rows_captures_execute_and_row_number():
+    """approved_context_from_rows: CHỈ lấy Status=APPROVE, kèm execute + số dòng
+    1-based (dùng để mark_execute_done đúng dòng)."""
+    from twmkt.sheets_board import approved_context_from_rows, CONTEXT_HEADER, context_row
+
+    rows = [
+        CONTEXT_HEADER,
+        context_row(title="Không duyệt", hook_line="h", source_url="http://u/1",
+                   score=1, hot_pct=1.0, status="PENDING"),
+        context_row(title="Duyệt rồi", hook_line="h", source_url="http://u/2",
+                   score=1, hot_pct=1.0, status="APPROVE", execute="RUN"),
+    ]
+    out = approved_context_from_rows(rows)
+    assert len(out) == 1
+    assert out[0]["context"] == "Duyệt rồi"
+    assert out[0]["execute"] == "RUN"
+    assert out[0]["row"] == 3                        # dòng 3 trên Sheet (1=header, 2=PENDING, 3=APPROVE)
+
+
+def test_migrate_rows_preserves_data_across_header_change():
+    """migrate_rows: header đổi (Use xoá, Timestamp lên đầu, Execute thêm mới) ->
+    dữ liệu THEO TÊN cột được giữ nguyên, cột mới lấy default, cột mất rớt tự nhiên."""
+    from twmkt.sheets_board import migrate_rows
+
+    old_header = ["Use", "Score", "Hot%", "Group", "Topic", "Context", "Hook",
+                 "Source", "Status", "timestamp", "tickers", "Notes"]
+    new_header = ["Timestamp", "Hot%", "Score", "Group", "Topic", "Context", "Hook",
+                 "Source", "Status", "Execute", "tickers", "Notes"]
+    old_row = ["FALSE", "5", "42.0", "ChinhSach", "TienTe", "Bài cũ", "hook cũ",
+              "http://u", "APPROVE", "2026-01-01T00:00:00+00:00", "FPT", "ghi chú"]
+    [new_row] = migrate_rows(old_header, new_header, [old_row], defaults={"Execute": ""})
+
+    d = dict(zip(new_header, new_row))
+    assert d["Timestamp"] == "2026-01-01T00:00:00+00:00"   # map đúng theo tên (đổi vị trí)
+    assert d["Score"] == "5" and d["Hot%"] == "42.0"
+    assert d["Context"] == "Bài cũ" and d["Hook"] == "hook cũ"
+    assert d["Source"] == "http://u" and d["Status"] == "APPROVE"   # GIỮ NGUYÊN — không mất
+    assert d["Execute"] == ""              # cột MỚI -> default
+    assert d["tickers"] == "FPT" and d["Notes"] == "ghi chú"
+    assert "Use" not in d                   # cột bị xoá -> rớt tự nhiên, không lỗi
+
+    # Không truyền defaults -> cột mới rỗng "" (an toàn, không KeyError).
+    [new_row2] = migrate_rows(old_header, new_header, [old_row])
+    assert dict(zip(new_header, new_row2))["Execute"] == ""
+
+
+def test_group_content_rows_groups_by_context_preserves_order():
+    """group_content_rows: nhóm theo Context, GIỮ thứ tự xuất hiện trong nhóm;
+    hàng Context rỗng bị bỏ qua."""
+    from twmkt.sheets_board import group_content_rows, CONTENT_HEADER, content_row
+
+    a1 = content_row(context="A", type_="article", status="DONE", output="x")
+    a2 = content_row(context="A", type_="video_script", status="DONE", output="x")
+    b1 = content_row(context="B", type_="infographic", status="DONE", output="x")
+    empty = content_row(context="", type_="article", status="DONE", output="x")
+    groups = group_content_rows(CONTENT_HEADER, [a1, b1, a2, empty])
+    assert list(groups.keys()) == ["A", "B"]
+    assert groups["A"] == [a1, a2]
+    assert groups["B"] == [b1]
+
+
+def test_regroup_content_rows_makes_same_context_contiguous():
+    """regroup_content_rows: hàng CÙNG Context bị xen kẽ -> sắp lại LIỀN KỀ, giữ
+    thứ tự xuất hiện đầu tiên giữa các Context và thứ tự bên trong mỗi Context."""
+    from twmkt.sheets_board import regroup_content_rows, CONTENT_HEADER, content_row
+
+    a1 = content_row(context="A", type_="infographic", status="DONE", output="x")
+    b1 = content_row(context="B", type_="infographic", status="DONE", output="x")
+    a2 = content_row(context="A", type_="article", status="DONE", output="x")
+    a3 = content_row(context="A", type_="video_script", status="DONE", output="x")
+    out = regroup_content_rows(CONTENT_HEADER, [a1, b1, a2, a3])
+    assert out == [a1, a2, a3, b1]   # A liền kề (giữ thứ tự trong-nhóm), B sau
+
+
+def test_content_merge_ranges_only_full_3_types_contiguous():
+    """content_merge_ranges: CHỈ trả dải cho Context có ĐỦ 3 loại VÀ liền kề; chủ
+    đề thiếu loại (chỉ 2/3) -> KHÔNG merge."""
+    from twmkt.sheets_board import content_merge_ranges, CONTENT_HEADER, content_row
+
+    a_info = content_row(context="A", type_="infographic", status="DONE", output="x")
+    a_art = content_row(context="A", type_="article", status="DONE", output="x")
+    a_vid = content_row(context="A", type_="video_script", status="DONE", output="x")
+    b_info = content_row(context="B", type_="infographic", status="DONE", output="x")
+    b_art = content_row(context="B", type_="article", status="DONE", output="x")   # thiếu video_script
+    rows = [a_info, a_art, a_vid, b_info, b_art]
+    ranges = content_merge_ranges(CONTENT_HEADER, rows)
+    assert ranges == [(1, 4)]   # dòng Sheet 2..4 (A đủ 3 loại); B (thiếu) không có dải
+
+
+def test_regroup_and_merge_content_reorders_and_sends_merge_requests():
+    """regroup_and_merge_content: sắp lại CONTENT (Context liền kề) + gửi
+    unmerge-toàn-vùng rồi mergeCells cho các chủ đề đủ 3 loại (2 cột: Timestamp,
+    Context -> 2 dải merge + 2 repeatCell căn giữa, kèm 1 unmergeCells)."""
+    from twmkt.sheets_board import SheetsBoard, CONTENT_HEADER, content_row
+
+    a_info = content_row(context="A", type_="infographic", status="DONE", output="x")
+    b_info = content_row(context="B", type_="infographic", status="DONE", output="x")
+    a_art = content_row(context="A", type_="article", status="DONE", output="x")
+    a_vid = content_row(context="A", type_="video_script", status="DONE", output="x")
+
+    class _FakeContentWS:
+        id = 7
+        def __init__(self, values):
+            self._v = values
+            self.updated: list[tuple[str, list]] = []
+        def get_all_values(self): return self._v
+        def update(self, rng, values, value_input_option=None):
+            self.updated.append((rng, values))
+            self._v = [self._v[0]] + [list(r) for r in values]
+
+    class _FakeSheet:
+        def __init__(self): self.last_body = None
+        def batch_update(self, body): self.last_body = body; return {}
+
+    ws = _FakeContentWS([list(CONTENT_HEADER), list(a_info), list(b_info),
+                         list(a_art), list(a_vid)])
+    board = SheetsBoard(spreadsheet_id="X", creds_path="Y")
+    board._ws["CONTENT"] = ws
+    board._sh = _FakeSheet()
+
+    n = board.regroup_and_merge_content()
+    assert n == 1                                    # 1 chủ đề (A) đủ 3 loại
+    assert ws._v[1:] == [a_info, a_art, a_vid, b_info]   # A liền kề (thứ tự trong-nhóm giữ), B sau
+
+    reqs = board._sh.last_body["requests"]
+    assert reqs[0] == {"unmergeCells": {"range": {
+        "sheetId": 7, "startRowIndex": 1, "endRowIndex": 5,
+        "startColumnIndex": 0, "endColumnIndex": len(CONTENT_HEADER)}}}
+    merges = [r["mergeCells"] for r in reqs if "mergeCells" in r]
+    assert len(merges) == 2                          # Timestamp + Context, 1 dải mỗi cột
+    for m in merges:
+        assert m["mergeType"] == "MERGE_COLUMNS"
+        assert m["range"]["startRowIndex"] == 1 and m["range"]["endRowIndex"] == 4
+    cols = {m["range"]["startColumnIndex"] for m in merges}
+    i_ts = [h.lower() for h in CONTENT_HEADER].index("timestamp")
+    i_ctx = [h.lower() for h in CONTENT_HEADER].index("context")
+    assert cols == {i_ts, i_ctx}
+
+
+def test_regroup_and_merge_content_noop_when_no_full_group():
+    """Không chủ đề nào đủ 3 loại -> 0 dải merge, vẫn unmerge (idempotent, an
+    toàn gọi lại nhiều lần) nhưng KHÔNG có request mergeCells nào."""
+    from twmkt.sheets_board import SheetsBoard, CONTENT_HEADER, content_row
+
+    a_info = content_row(context="A", type_="infographic", status="DONE", output="x")
+
+    class _FakeContentWS:
+        id = 1
+        def get_all_values(self): return [list(CONTENT_HEADER), list(a_info)]
+        def update(self, rng, values, value_input_option=None):
+            raise AssertionError("không cần ghi lại khi thứ tự đã đúng")
+
+    class _FakeSheet:
+        def __init__(self): self.last_body = None
+        def batch_update(self, body): self.last_body = body; return {}
+
+    board = SheetsBoard(spreadsheet_id="X", creds_path="Y")
+    board._ws["CONTENT"] = _FakeContentWS()
+    board._sh = _FakeSheet()
+
+    n = board.regroup_and_merge_content()
+    assert n == 0
+    reqs = board._sh.last_body["requests"]
+    assert len(reqs) == 1 and "unmergeCells" in reqs[0]
 
 
 # --- Lập lịch tự động ------------------------------------------------------
@@ -1377,6 +1849,38 @@ def test_build_content_llm_model_override_sonnet_opus():
     assert r_default.base.model == "claude-sonnet-4-6"   # không truyền model -> giữ settings.yaml
 
 
+def test_is_fully_produced_requires_all_three_types():
+    """_is_fully_produced: CHỈ True khi CẢ 3 loại (infographic/article/video_script)
+    đã có trong CONTENT (`seen`) — tín hiệu đặt Execute=DONE."""
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+    import produce_from_sheet as pfs
+
+    seen = {("Bài A", "infographic"), ("Bài A", "article")}
+    assert pfs._is_fully_produced("Bài A", seen) is False   # thiếu video_script
+    seen.add(("Bài A", "video_script"))
+    assert pfs._is_fully_produced("Bài A", seen) is True
+    assert pfs._is_fully_produced("Bài B", seen) is False   # chưa có gì
+
+
+def test_produce_execute_filter_excludes_done_prevents_duplicate_content():
+    """Mô phỏng ĐÚNG bộ lọc run()/run_draft() dùng: chỉ giữ execute=='RUN' —
+    dòng đã DONE (chạy production lần trước) bị loại -> chạy lại KHÔNG xử lý lại,
+    không sinh CONTENT trùng."""
+    from twmkt.sheets_board import approved_context_from_rows, CONTEXT_HEADER, context_row
+
+    rows = [
+        CONTEXT_HEADER,
+        context_row(title="Đã sản xuất xong", hook_line="h", source_url="http://u/1",
+                   score=1, hot_pct=1.0, status="APPROVE", execute="DONE"),
+        context_row(title="Chờ sản xuất", hook_line="h", source_url="http://u/2",
+                   score=1, hot_pct=1.0, status="APPROVE", execute="RUN"),
+        context_row(title="Vừa duyệt chưa sync", hook_line="h", source_url="http://u/3",
+                   score=1, hot_pct=1.0, status="APPROVE", execute=""),
+    ]
+    approved = [a for a in approved_context_from_rows(rows) if a["execute"] == "RUN"]
+    assert [a["context"] for a in approved] == ["Chờ sản xuất"]   # DONE + rỗng đều bị loại
+
+
 def test_prompt_md_requires_research_before_writing():
     """_prompt_md: PHẢI yêu cầu research bối cảnh mở rộng (WebSearch) trước khi
     viết, và hướng dẫn ghi vào <slug>.background.txt (theo yêu cầu 'signature')."""
@@ -1505,6 +2009,94 @@ def test_all_production_agents_applies_prompt_overrides_by_name():
     assert "TẤT ĐỊNH" in by_role["InfographicDesigner"].system
 
 
+def _voice_settings(**overrides):
+    from twmkt.config import Settings
+
+    data = {
+        "voice": {
+            "enabled": True,
+            "examples_path": os.path.join(REPO_ROOT, "docs", "voice_examples.md"),
+            "format_example": {"analysis": "A", "facebook": "C", "infographic": "C", "video": "C"},
+        }
+    }
+    data["voice"].update(overrides)
+    return Settings(data)
+
+
+def test_load_voice_lock_always_includes_3_rule_sections():
+    """load_voice_lock: LUÔN có mặt §1 (Luật giọng) + §2 (Chiêu chữ ký) +
+    §3 (Nên/Tránh), bất kể format nào."""
+    from twmkt.agents.voice import load_voice_lock
+
+    out = load_voice_lock("analysis", settings=_voice_settings())
+    assert "## 1. Luật giọng" in out
+    assert "## 2. Sáu chiêu chữ ký" in out
+    assert "## 3. Nên / Tránh" in out
+
+
+def test_load_voice_lock_picks_exactly_one_example_per_format():
+    """load_voice_lock: CHỌN đúng 1 ví dụ theo voice.format_example[fmt] — không
+    nhồi cả 3 ví dụ (tiết kiệm context)."""
+    from twmkt.agents.voice import load_voice_lock
+
+    analysis_out = load_voice_lock("analysis", settings=_voice_settings())
+    assert "### Ví dụ A" in analysis_out
+    assert "### Ví dụ B" not in analysis_out
+    assert "### Ví dụ C" not in analysis_out
+
+    video_out = load_voice_lock("video", settings=_voice_settings())
+    assert "### Ví dụ C" in video_out
+    assert "### Ví dụ A" not in video_out
+    assert "### Ví dụ B" not in video_out
+
+
+def test_load_voice_lock_disabled_returns_empty():
+    """voice.enabled=false -> "" (rỗng), không đọc file."""
+    from twmkt.agents.voice import load_voice_lock
+
+    out = load_voice_lock("analysis", settings=_voice_settings(enabled=False))
+    assert out == ""
+
+    # thiếu hẳn key voice -> mặc định enabled=false -> vẫn "" (không crash).
+    from twmkt.config import Settings
+    out2 = load_voice_lock("analysis", settings=Settings({}))
+    assert out2 == ""
+
+
+def test_load_voice_lock_missing_file_degrades_to_empty_no_crash():
+    """File examples_path KHÔNG tồn tại -> cảnh báo + "" (LÙI MƯỢT, không raise)."""
+    from twmkt.agents.voice import load_voice_lock
+
+    out = load_voice_lock("analysis", settings=_voice_settings(
+        examples_path="khong/ton/tai.md"))
+    assert out == ""
+
+
+def test_load_voice_lock_unknown_format_falls_back_to_whole_file():
+    """format không có trong voice.format_example -> không tìm được ví dụ khớp ->
+    parse coi như hỏng -> inject NGUYÊN file (degrade an toàn, không rỗng/không crash)."""
+    from twmkt.agents.voice import load_voice_lock
+
+    out = load_voice_lock("khong-ton-tai-format", settings=_voice_settings())
+    assert out != ""
+    assert "## 1. Luật giọng" in out and "### Ví dụ A" in out and "### Ví dụ C" in out
+
+
+def test_load_voice_lock_v2_includes_2b_and_example_d():
+    """v2 (docs/voice_examples.md): loader PHẢI nhận đúng header "## 2b." (không
+    phải số thuần) như 1 mục riêng, và chọn đúng Ví dụ D khi format_example
+    trỏ tới D — không lẫn A/B/C."""
+    from twmkt.agents.voice import load_voice_lock
+
+    out = load_voice_lock("analysis", settings=_voice_settings(
+        format_example={"analysis": "D", "facebook": "C", "infographic": "C", "video": "C"}))
+    assert "## 2b. Menu hook" in out
+    assert "### Ví dụ D" in out
+    assert "### Ví dụ A" not in out
+    assert "### Ví dụ B" not in out
+    assert "### Ví dụ C" not in out
+
+
 def test_prompts_v1_files_match_code_defaults_no_drift():
     """prompts/{analysis,video}.v1.md PHẢI khớp y hệt default nội bộ trong code —
     seed PROMPTS (Enable=TRUE, v1) không được đổi hành vi ngay từ đầu."""
@@ -1606,12 +2198,17 @@ def test_approved_context_from_rows_filters_and_maps():
 
 def test_content_row_shape():
     from twmkt.sheets_board import content_row, CONTENT_HEADER
-    assert CONTENT_HEADER == ["Context", "Type", "Status", "Output", "timestamp", "Notes"]
+    assert CONTENT_HEADER == ["Timestamp", "Context", "Type", "Status", "Output",
+                             "Notes", "Approve(gate 2)"]
     row = content_row(context="Bài A", type_="article", status="DONE",
                       output="nội dung", notes="ok", ts="ts")
     d = dict(zip(CONTENT_HEADER, row))
-    assert d == {"Context": "Bài A", "Type": "article", "Status": "DONE",
-                 "Output": "nội dung", "timestamp": "ts", "Notes": "ok"}
+    assert d == {"Timestamp": "ts", "Context": "Bài A", "Type": "article", "Status": "DONE",
+                 "Output": "nội dung", "Notes": "ok", "Approve(gate 2)": "PENDING"}
+    row2 = content_row(context="Bài B", type_="video_script", status="ERROR",
+                       output="x", approve="APPROVE", ts="ts2")
+    d2 = dict(zip(CONTENT_HEADER, row2))
+    assert d2["Approve(gate 2)"] == "APPROVE"
 
 
 def test_build_content_llm_sonnet_router():
@@ -1741,6 +2338,59 @@ def test_load_dotenv_missing_file_is_noop():
             os.environ.pop("TWMKT_DOTENV", None)
         else:
             os.environ["TWMKT_DOTENV"] = old
+
+
+# --- power_on.py: lock file tự chặn 2 tiến trình cùng máy ($0, không mạng) --
+def test_power_on_lock_parses_and_detects_dead_pid():
+    """parse_lock_content + is_pid_alive: parse "host:pid" đúng/hỏng; PID không
+    tồn tại -> False; PID hiện tại (chính tiến trình test) -> True."""
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+    import power_on as po
+
+    assert po.parse_lock_content("myhost:1234") == ("myhost", 1234)
+    assert po.parse_lock_content("hỏng-không-dấu-hai-chấm") is None
+    assert po.parse_lock_content("host:khong-phai-so") is None
+    assert po.is_pid_alive(999999) is False       # PID gần như chắc chắn không tồn tại
+    assert po.is_pid_alive(os.getpid()) is True    # chính tiến trình test đang chạy
+
+
+def test_power_on_acquire_lock_blocks_same_host_alive_pid():
+    """acquire_lock: lock cùng host + PID CÒN SỐNG (chính tiến trình test) ->
+    raise SystemExit (chặn chạy trùng); PID CHẾT -> dọn sạch, không raise."""
+    import socket
+    import tempfile
+    from pathlib import Path
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+    import power_on as po
+
+    tmp = Path(tempfile.mkdtemp()) / "power_on.lock"
+    tmp.write_text(f"{socket.gethostname()}:{os.getpid()}", encoding="utf-8")
+    try:
+        po.acquire_lock(tmp)
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("phải chặn khi PID cùng host còn sống")
+
+    tmp.write_text(f"{socket.gethostname()}:999999", encoding="utf-8")  # PID chết
+    po.acquire_lock(tmp)   # không raise -> dọn lock cũ, ghi lock mới
+    assert tmp.read_text(encoding="utf-8") == f"{socket.gethostname()}:{os.getpid()}"
+    po.release_lock(tmp)
+    assert not tmp.exists()
+
+
+def test_power_on_acquire_lock_warns_but_allows_different_host():
+    """acquire_lock: lock do máy KHÁC ghi -> chỉ in cảnh báo, KHÔNG raise (không
+    thể tự chặn liên-máy từ 1 file cục bộ)."""
+    import tempfile
+    from pathlib import Path
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+    import power_on as po
+
+    tmp = Path(tempfile.mkdtemp()) / "power_on.lock"
+    tmp.write_text("mot-may-khac:123", encoding="utf-8")
+    po.acquire_lock(tmp)   # không raise
+    po.release_lock(tmp)
 
 
 def _run_all():

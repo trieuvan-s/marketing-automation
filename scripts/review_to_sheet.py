@@ -14,8 +14,10 @@ MÔ HÌNH THU THẬP 3 LỚP:
 
 Sau đó: classify (nhóm, tối đa 2 nhãn) + Field/Topic CHỈ theo TAXONOMY (keyword,
 KHÔNG dùng <category> thô RSS) + marketing_score + hotness_pct (curation/enrich.py,
-$0) + HookAgent(MockLLM) sinh hook ($0). Sắp theo Hot% giảm dần rồi UPSERT tab
-CONTEXT (XÓA vùng dữ liệu, ghi lại) -> hết trộn dòng cũ. Nhật ký ghi tab LOG + console.
+$0) + HookAgent(MockLLM) sinh hook ($0). UPSERT vào CONTEXT THEO URL: url ĐÃ CÓ
+-> BỎ QUA HOÀN TOÀN (giữ nguyên dòng cũ — Status/Execute/Hook/Notes không đổi,
+KHÔNG xoá/ghi đè); url CHƯA CÓ -> thêm dòng PENDING mới. Sắp lại TOÀN BẢNG theo
+Hot% giảm dần sau khi ghi. Nhật ký ghi tab LOG + console.
 
 KHÔNG scale: bản nếm thử. Không gọi LLM đắt (MockLLM), không sinh nội dung.
 
@@ -89,7 +91,7 @@ def _score_weights(settings) -> dict:
 
 
 def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False,
-        debug: bool = False, offline: bool = False) -> dict:
+        debug: bool = False, offline: bool = False, setup: bool = False) -> dict:
     settings = load_settings()
 
     # Ưu tiên ENV (ghi đè tạm) -> settings.yaml (mục sheets). ENV không bắt buộc.
@@ -103,7 +105,10 @@ def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False
         )
 
     board = SheetsBoard(spreadsheet_id=sheet_id, creds_path=creds)
-    created = board.ensure_tabs()   # tạo 8 tab + header lần đầu
+    # ensure_tabs() mặc định RẺ (chỉ tạo/format khi phát hiện tab thiếu/header sai,
+    # xem SheetsBoard._headers_need_setup) — giảm lượt gọi Sheets API mỗi lần chạy
+    # lịch (né quota 429). --setup ép chạy đầy đủ (tạo tab/seed/format lại).
+    created = board.ensure_tabs(force=setup)
     if created:
         board.log("INFO", f"Tạo tab lần đầu: {', '.join(created)}")
 
@@ -130,6 +135,15 @@ def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False
     # thị trường không cần sửa code/deploy lại).
     priority_groups = board.read_priority_groups(default=_DEFAULT_PRIORITY_GROUPS)
     board.log("INFO", f"PriorityGroups (từ SETTINGS): {', '.join(priority_groups)}")
+
+    # Sheet KHÔNG có trigger đẩy (push) sang Python -> đồng bộ Execute PULL-based
+    # ở đây (bổ sung produce_from_sheet.py) để dòng người dùng vừa bấm APPROVE
+    # thủ công trên Sheet cũng được đặt Execute=RUN kể cả khi chỉ lịch crawl chạy
+    # (schedule 4h) trước lịch --draft (30'). Muốn ĐỒNG BỘ NGAY không đợi lịch ->
+    # python scripts/produce_from_sheet.py --sync-only.
+    n_synced = board.sync_approve_execute_flags()
+    if n_synced:
+        board.log("INFO", f"Đồng bộ Execute=RUN cho {n_synced} dòng vừa APPROVE.")
 
     # --- LLM cho HOOK (tầng content_model = Sonnet, bọc LLMRouter đo token/chi phí)
     # LÙI MƯỢT nhưng CÓ CẢNH BÁO RÕ: banner IN RA mỗi lần chạy, không im lặng.
@@ -221,9 +235,11 @@ def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False
             hot_pct=hot, topic=topic, group=group, other_sources=other_urls,
             tickers=c.tickers)))
 
-    scored_rows.sort(key=lambda x: x[0], reverse=True)   # Hot% giảm dần
-    # UPSERT: xóa vùng dữ liệu CONTEXT (giữ header) rồi ghi lại -> hết trộn dòng cũ.
-    written = board.replace_context([row for _, row in scored_rows])
+    scored_rows.sort(key=lambda x: x[0], reverse=True)   # thứ tự chèn (thứ tự cuối do sort_context_by_hot)
+    # UPSERT theo url: dòng ĐÃ CÓ giữ nguyên (không đụng Status/Execute/Hook/Notes
+    # người dùng đã sửa), dòng MỚI mới được thêm. Rồi sắp LẠI TOÀN BẢNG theo Hot%.
+    written = board.upsert_context_rows([row for _, row in scored_rows])
+    board.sort_context_by_hot()
 
     usage = hook_llm.usage.as_dict()
     totals = {
@@ -233,7 +249,8 @@ def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False
     }
     board.log("INFO", f"TỔNG: crawled {totals['crawled']} / kept {totals['kept']} / "
                       f"cụm(gộp sự kiện chéo nguồn) {totals['clusters']} / stored {totals['stored']} / "
-                      f"CONTEXT {totals['written']} (UPSERT) / full-fetch lỗi {totals['full_fetch_failed']}",
+                      f"CONTEXT +{totals['written']} dòng mới (url trùng đã bỏ qua) / "
+                      f"full-fetch lỗi {totals['full_fetch_failed']}",
               engine=engine)
     _print_summary(per_source, totals)
     return {"per_source": per_source, "totals": totals}
@@ -257,7 +274,8 @@ def _print_summary(per_source: list[dict], totals: dict) -> None:
     print("---------- Tổng (sau lọc + gộp sự kiện chéo nguồn, giữ báo Priority cao) ----------")
     print(f"crawled {totals['crawled']} | kept(sau normalize) {totals['kept']} | "
           f"cụm duy nhất {totals['clusters']} | full-fetch lỗi {totals['full_fetch_failed']}")
-    print(f"stored {totals['stored']} | CONTEXT {totals['written']} dòng (UPSERT — ghi đè mỗi lần chạy)")
+    print(f"stored {totals['stored']} | CONTEXT +{totals['written']} dòng mới "
+          f"(url đã có trong CONTEXT giữ nguyên, không đụng)")
     u = totals.get("llm", {})
     n = totals["written"] or 1
     if totals.get("use_llm") and u.get("calls"):
@@ -270,8 +288,8 @@ def _print_summary(per_source: list[dict], totals: dict) -> None:
         print(f"LLM Hook: FALLBACK tất định $0 (không gọi API). "
               f"Ước tính nếu bật LLM: ~${u.get('cost_usd', 0):.4f} "
               f"(~${u.get('cost_usd', 0) / n:.4f}/bài).")
-    print("Mở tab CONTEXT trên Google Sheet để duyệt (cột Status; tick Use để chọn dùng);"
-         " đã sắp theo Hot% giảm dần.")
+    print("Mở tab CONTEXT trên Google Sheet để duyệt (cột Status: APPROVE -> tự đặt "
+         "Execute=RUN, chờ produce_from_sheet.py sản xuất); đã sắp theo Hot% giảm dần.")
 
 
 def _parse_args(argv: list[str]):
@@ -287,10 +305,13 @@ def _parse_args(argv: list[str]):
                     help="In 3 dòng debug Hook (llm type/raw/parsed) cho bài ĐẦU TIÊN.")
     ap.add_argument("--offline", action="store_true",
                     help="Ép Hook fallback tất định $0, bỏ qua Sonnet dù có API key.")
+    ap.add_argument("--setup", action="store_true",
+                    help="Ép chạy đầy đủ ensure_tabs (tạo/seed/format tab) dù header đã đúng "
+                        "— mặc định BỎ QUA để giảm lượt gọi Sheets API (né quota 429).")
     return ap.parse_args(argv)
 
 
 if __name__ == "__main__":
     args = _parse_args(sys.argv[1:])
     run(limit=args.limit, sync_sources=args.sync_sources, from_config=args.from_config,
-        debug=args.debug, offline=args.offline)
+        debug=args.debug, offline=args.offline, setup=args.setup)
