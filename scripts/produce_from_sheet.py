@@ -20,8 +20,10 @@ HAI CHẾ ĐỘ điền nội dung article/video (infographic luôn tất địn
      để dành cho automation 100% không người trông (tương lai, xem CLAUDE.md).
   2. --draft / --ingest: KHÔNG cần API key riêng — nhờ Claude Code (phiên chat
      đang chạy, dùng gói Pro/Max/Team) viết nội dung. --draft chuẩn bị prompt
-     (storage.drafts_dir), Claude đọc + viết JSON đúng schema cạnh đó, --ingest
-     nạp lại qua ĐÚNG guardrail/CONTENT như chế độ 1 (không phân biệt "ai viết").
+     vào storage.drafts_dir/<ngày>/ (theo NGÀY, như storage/output — dễ nhận
+     biết bản nháp mới/tồn đọng), Claude đọc + viết JSON đúng schema cạnh đó,
+     --ingest quét TẤT CẢ thư mục ngày rồi nạp lại qua ĐÚNG guardrail/CONTENT
+     như chế độ 1 (không phân biệt "ai viết", không phân biệt "ngày nào").
      Vì hệ thống đã có 2 cổng duyệt người-trong-vòng-lặp, đây là chế độ MẶC ĐỊNH
      dùng ở giai đoạn hiện tại (xem docs/production_agents_design.md).
 
@@ -56,13 +58,22 @@ from twmkt.agents.production import (  # noqa: E402
     video_fields_from_data,
 )
 from twmkt.agents.prompts import resolve_prompts  # noqa: E402
-from twmkt.agents.voice import load_voice_lock  # noqa: E402
+from twmkt.agents.voice import assemble_voice  # noqa: E402
 from twmkt.config import load_settings  # noqa: E402
 from twmkt.models import ContentDraft, ContentFormat, Source  # noqa: E402
 from twmkt.sheets_board import SheetsBoard, content_row  # noqa: E402
+from twmkt.utils.telegram_notifier import make_notifier  # noqa: E402
 
 _OUTPUT_PREVIEW = 1500   # số ký tự Output đưa lên Sheet (đủ xem; full lưu ra file)
 _ALL_TYPES = ("infographic", "article", "video_script")   # 3 loại all_production_agents() sinh
+_DEFAULT_ACTOR = "[user request]"
+
+
+def _writer_notify_adapter(notifier):
+    """Chuyển Notifier.notify(event, **ctx) (utils/telegram_notifier.py) sang
+    đúng chữ ký notify(event, info: dict) mà agents.writer.run_writer_with_retry
+    đã chừa từ Phase 4.5 — cầu nối 1 dòng, KHÔNG đổi 1 trong 2 interface gốc."""
+    return lambda event, info: notifier.notify(event, **info)
 
 
 def _is_fully_produced(context: str, seen: set[tuple[str, str]]) -> bool:
@@ -141,6 +152,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
         setup: bool = False) -> dict:
     settings = load_settings()
     board = _open_board(settings, setup=setup)
+    notifier = make_notifier(settings)   # PHASE TELE — no-op êm nếu chưa cấu hình
 
     # --- LLM ĐẮT cho Producers (Sonnet mặc định, --model opus nếu cần chất
     # lượng cao hơn). LÙI MƯỢT CÓ CẢNH BÁO: banner IN RÕ, không im lặng.
@@ -185,14 +197,17 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
     done_rows: list[int] = []   # số dòng CONTEXT (1-based) VỪA sản xuất xong -> Execute=DONE
     produced = skipped = flagged = 0
     for item in approved:
+        notifier.notify("start", topic=item["context"], row=item["row"], actor=_DEFAULT_ACTOR)
         evidence = fetch_full_evidence(html_collector, sources, item["source"], item["hook"])
         brief = ProductionBrief(
             title=item["context"], hook=item["hook"], tickers=item["tickers"],
             group=item["group"], topic=item["topic"], url=item["source"],
             evidence=evidence,
         )
+        approx_tol = float(settings.get("guardrail.approx_tolerance_pct", 5)) / 100
         for agent in all_production_agents(content_llm, prompt_overrides=prompt_overrides):
-            draft = apply_guardrails(agent.run(brief), brief.evidence, brief.background)
+            draft = apply_guardrails(agent.run(brief), brief.evidence, brief.background,
+                                     brief.facts, approx_tolerance=approx_tol)
             type_ = draft.fmt.value
             if (item["context"], type_) in seen:
                 skipped += 1
@@ -210,13 +225,18 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                                     status=status, output=preview, notes=note))
             seen.add((item["context"], type_))
             produced += 1
-            flagged += 0 if draft.is_clean else 1
+            if draft.is_clean:
+                notifier.notify("draft_changed", topic=item["context"], type=type_, status=status)
+            else:
+                flagged += 1
+                notifier.notify("error", topic=item["context"], type=type_, issues=note)
         done_rows.append(item["row"])   # xong CẢ 3 loại cho dòng này -> đánh dấu DONE
 
     written = board.append_content_rows(rows)
     board.mark_execute_done(done_rows)   # idempotent: chạy lại bỏ qua (execute=='RUN' lọc ở trên)
     if written:
-        board.regroup_and_merge_content()   # merge dọc Timestamp+Context khi đủ 3 loại
+        board.regroup_and_merge_content()   # merge dọc Timestamp+Context khi >= 2 loại
+        notifier.notify("gate2_done", written=written, approved=len(approved))
     u = content_llm.usage.as_dict()
     board.log("INFO", f"TỔNG Production: approved {len(approved)} / sinh mới {produced} / "
                       f"bỏ qua {skipped} / dính compliance {flagged} / ghi CONTENT {written} / "
@@ -253,7 +273,7 @@ def _prompt_md(slug: str, type_: str, user_prompt: str) -> str:
     # đây — Claude Code tự đọc file .prompt.md này) nên phải nối riêng tại đây, chỉ
     # cho "article" theo đúng phạm vi hiện tại (xem agents/voice.py).
     if type_ == "article":
-        voice = load_voice_lock("analysis")
+        voice = assemble_voice(None)   # đường LEGACY --draft, chưa chạy StructureRouter -> fallback S1+H3+D
         if voice:
             system += f"\n\n---\n\nVOICE-LOCK (giọng văn bắt buộc):\n{voice}"
     return (
@@ -277,10 +297,12 @@ def _prompt_md(slug: str, type_: str, user_prompt: str) -> str:
     )
 
 
-def draft_to_content_draft(type_: str, data: dict, brief: ProductionBrief) -> ContentDraft:
+def draft_to_content_draft(type_: str, data: dict, brief: ProductionBrief, *,
+                           approx_tolerance: float = 0.05) -> ContentDraft:
     """Chuyển JSON Claude Code đã viết (schema article/video) -> ContentDraft đã
-    qua guardrail (evidence + brief.background gộp lại). Hàm THUẦN — DÙNG CHUNG
-    bởi run_ingest() và test (không cần Sheets/mạng). `type_` = 'article' | 'video'."""
+    qua guardrail (evidence + brief.background gộp lại; brief.facts (Mục C) cho
+    phép số làm tròn hợp lý khớp canonical). Hàm THUẦN — DÙNG CHUNG bởi
+    run_ingest() và test (không cần Sheets/mạng). `type_` = 'article' | 'video'."""
     if type_ == "article":
         title, sapo, sections, disclaimer, sources = analysis_fields_from_data(data, brief)
         body = render_analysis(title, sapo, sections, disclaimer, sources, brief)
@@ -289,7 +311,8 @@ def draft_to_content_draft(type_: str, data: dict, brief: ProductionBrief) -> Co
         title, duration, scenes, cta, disclaimer = video_fields_from_data(data, brief)
         body = render_video(title, duration, scenes, cta, disclaimer, brief)
         draft = ContentDraft(fmt=ContentFormat.VIDEO_SCRIPT, title=title, body=body, brief_topic=brief.topic)
-    return apply_guardrails(draft, brief.evidence, brief.background)
+    return apply_guardrails(draft, brief.evidence, brief.background, brief.facts,
+                            approx_tolerance=approx_tolerance)
 
 
 def run_draft(*, limit: int = 5, setup: bool = False) -> dict:
@@ -314,7 +337,12 @@ def run_draft(*, limit: int = 5, setup: bool = False) -> dict:
     seen = board.existing_content_keys()
     out_dir = Path(settings.get("storage.output_dir", "storage/output")) / _today()
     out_dir.mkdir(parents=True, exist_ok=True)
-    drafts_dir = Path(settings.get("storage.drafts_dir", "storage/production_drafts"))
+    # Theo NGÀY (như storage/output/<ngày>) — trước đây ghi phẳng vào drafts_dir,
+    # không phân biệt được bản nháp mới/cũ khi tồn đọng (vd chưa --ingest kịp).
+    # drafts_base = gốc KHÔNG có ngày (dò bản nháp CŨ còn tồn đọng ở NGÀY TRƯỚC,
+    # tránh chuẩn bị trùng); drafts_dir = nơi GHI file MỚI hôm nay.
+    drafts_base = Path(settings.get("storage.drafts_dir", "storage/production_drafts"))
+    drafts_dir = drafts_base / _today()
     drafts_dir.mkdir(parents=True, exist_ok=True)
 
     rows: list[list[str]] = []
@@ -331,7 +359,9 @@ def run_draft(*, limit: int = 5, setup: bool = False) -> dict:
 
         # Infographic: tất định, $0 -> sinh NGAY, không cần Claude Code.
         if (context, "infographic") not in seen:
-            draft = apply_guardrails(InfographicSpecAgent(None).run(brief), brief.evidence, brief.background)
+            approx_tol = float(settings.get("guardrail.approx_tolerance_pct", 5)) / 100
+            draft = apply_guardrails(InfographicSpecAgent(None).run(brief), brief.evidence,
+                                     brief.background, brief.facts, approx_tolerance=approx_tol)
             fn = out_dir / f"{slug}-infographic.json"
             fn.write_text(draft.body, encoding="utf-8")
             rows.append(content_row(context=context, type_="infographic",
@@ -350,16 +380,18 @@ def run_draft(*, limit: int = 5, setup: bool = False) -> dict:
         ):
             if (context, ctype) in seen:
                 continue
-            if (drafts_dir / f"{slug}.{type_}.json").exists():
-                continue   # đã có câu trả lời, chờ --ingest
-            if (drafts_dir / f"{slug}.{type_}.prompt.md").exists():
-                continue   # đã chuẩn bị, đang chờ Claude Code trả lời
+            # Dò TOÀN BỘ thư mục ngày (kể cả ngày trước, tồn đọng chưa --ingest)
+            # -> tránh chuẩn bị TRÙNG prompt cho cùng 1 topic đang chờ dở.
+            if list(drafts_base.glob(f"*/{slug}.{type_}.json")):
+                continue   # đã có câu trả lời (ngày nào đó), chờ --ingest
+            if list(drafts_base.glob(f"*/{slug}.{type_}.prompt.md")):
+                continue   # đã chuẩn bị (ngày nào đó), đang chờ Claude Code trả lời
             (drafts_dir / f"{slug}.{type_}.prompt.md").write_text(
                 _prompt_md(slug, type_, prompt_fn(brief)), encoding="utf-8")
             need_brief = True
             prepared += 1
         brief_path = drafts_dir / f"{slug}.brief.json"
-        if need_brief and not brief_path.exists():
+        if need_brief and not list(drafts_base.glob(f"*/{slug}.brief.json")):
             # execute_row: số dòng CONTEXT (1-based) — run_ingest() đọc lại để
             # biết ghi Execute=DONE cho ĐÚNG dòng nào khi article/video xong.
             brief_path.write_text(
@@ -376,7 +408,7 @@ def run_draft(*, limit: int = 5, setup: bool = False) -> dict:
     written = board.append_content_rows(rows)
     board.mark_execute_done(done_rows)
     if written:
-        board.regroup_and_merge_content()   # merge dọc Timestamp+Context khi đủ 3 loại
+        board.regroup_and_merge_content()   # merge dọc Timestamp+Context khi >= 2 loại
     print(f"[draft] infographic sinh ngay: {infographic_done} | "
           f"yêu cầu article/video chuẩn bị: {prepared} (xem {drafts_dir}) | "
           f"Execute=DONE {len(done_rows)} dòng")
@@ -394,19 +426,24 @@ def run_ingest(*, setup: bool = False) -> dict:
     Dọn file đã tiêu thụ; giữ lại *.prompt.md nào còn thiếu câu trả lời."""
     settings = load_settings()
     board = _open_board(settings, setup=setup)
+    # Quét TẤT CẢ thư mục ngày (storage.drafts_dir/<ngày>/) — bản nháp có thể
+    # tồn đọng từ ngày TRƯỚC nếu --ingest chưa chạy kịp, KHÔNG chỉ hôm nay.
     drafts_dir = Path(settings.get("storage.drafts_dir", "storage/production_drafts"))
-    if not drafts_dir.exists() or not list(drafts_dir.glob("*.brief.json")):
-        print(f"Không có bản nháp nào chờ ({drafts_dir}). Chạy --draft trước.")
+    brief_paths = sorted(drafts_dir.glob("*/*.brief.json"))
+    if not drafts_dir.exists() or not brief_paths:
+        print(f"Không có bản nháp nào chờ ({drafts_dir}/<ngày>/). Chạy --draft trước.")
         return {"ingested": 0, "skipped": 0, "pending": 0}
 
     seen = board.existing_content_keys()
     out_dir = Path(settings.get("storage.output_dir", "storage/output")) / _today()
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    approx_tol = float(settings.get("guardrail.approx_tolerance_pct", 5)) / 100
     rows: list[list[str]] = []
     done_rows: list[int] = []   # dòng CONTEXT (1-based) đã đủ CẢ 3 loại -> Execute=DONE
     ingested = skipped = flagged = pending = 0
-    for brief_path in sorted(drafts_dir.glob("*.brief.json")):
+    for brief_path in brief_paths:
+        day_dir = brief_path.parent   # NGÀY bản nháp được tạo (có thể khác hôm nay)
         slug = brief_path.name[: -len(".brief.json")]
         raw = json.loads(brief_path.read_text(encoding="utf-8"))
         context = raw.pop("context")
@@ -418,14 +455,14 @@ def run_ingest(*, setup: bool = False) -> dict:
         # Bối cảnh mở rộng (research) Claude Code viết ở BƯỚC 1 của _prompt_md —
         # KHÔNG bắt buộc; thiếu file -> brief.background giữ rỗng, guardrail vẫn
         # chạy bình thường (chỉ xét evidence).
-        background_path = drafts_dir / f"{slug}.background.txt"
+        background_path = day_dir / f"{slug}.background.txt"
         if background_path.exists():
             brief.background = background_path.read_text(encoding="utf-8").strip()
 
         remaining = False
         for type_, ctype in (("article", "article"), ("video", "video_script")):
-            answer_path = drafts_dir / f"{slug}.{type_}.json"
-            prompt_path = drafts_dir / f"{slug}.{type_}.prompt.md"
+            answer_path = day_dir / f"{slug}.{type_}.json"
+            prompt_path = day_dir / f"{slug}.{type_}.prompt.md"
             if not answer_path.exists():
                 if prompt_path.exists():
                     remaining = True
@@ -436,7 +473,7 @@ def run_ingest(*, setup: bool = False) -> dict:
                 skipped += 1
                 continue
             data = json.loads(answer_path.read_text(encoding="utf-8"))
-            draft = draft_to_content_draft(type_, data, brief)
+            draft = draft_to_content_draft(type_, data, brief, approx_tolerance=approx_tol)
             fn = out_dir / f"{slug}-{ctype}.md"
             fn.write_text(draft.body, encoding="utf-8")
             preview = draft.body if len(draft.body) <= _OUTPUT_PREVIEW else \
@@ -461,7 +498,7 @@ def run_ingest(*, setup: bool = False) -> dict:
     written = board.append_content_rows(rows)
     board.mark_execute_done(done_rows)
     if written:
-        board.regroup_and_merge_content()   # merge dọc Timestamp+Context khi đủ 3 loại
+        board.regroup_and_merge_content()   # merge dọc Timestamp+Context khi >= 2 loại
     print(f"[ingest] sản phẩm mới: {ingested} | bỏ qua (đã có): {skipped} | "
           f"dính compliance: {flagged} | còn chờ Claude viết: {pending} | ghi CONTENT {written} | "
           f"Execute=DONE {len(done_rows)} dòng")

@@ -52,7 +52,11 @@ from twmkt.curation.enrich import (  # noqa: E402
     classify, cluster_by_event, groups_from_settings, hotness_pct, marketing_score,
 )
 from twmkt.models import ResearchBrief, Source  # noqa: E402
-from twmkt.sheets_board import SheetsBoard, context_row  # noqa: E402
+from twmkt.sheets_board import CONTEXT_HEADER, SheetsBoard, context_row  # noqa: E402
+from twmkt.utils.telegram_notifier import make_notifier  # noqa: E402
+
+_I_CONTEXT = [h.strip().lower() for h in CONTEXT_HEADER].index("context")
+_I_SOURCE = [h.strip().lower() for h in CONTEXT_HEADER].index("source")
 
 # Mặc định nhóm ưu tiên khi tab SETTINGS chưa có/thiếu khóa PriorityGroups
 # (khớp seed row do SheetsBoard.ensure_tabs() ghi lần đầu).
@@ -93,6 +97,7 @@ def _score_weights(settings) -> dict:
 def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False,
         debug: bool = False, offline: bool = False, setup: bool = False) -> dict:
     settings = load_settings()
+    notifier = make_notifier(settings)   # PHASE TELE — no-op êm nếu chưa cấu hình
 
     # Ưu tiên ENV (ghi đè tạm) -> settings.yaml (mục sheets). ENV không bắt buộc.
     sheet_id = (os.environ.get("TWMKT_SHEET_ID") or settings.get("sheets.spreadsheet_id") or "").strip()
@@ -238,8 +243,18 @@ def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False
     scored_rows.sort(key=lambda x: x[0], reverse=True)   # thứ tự chèn (thứ tự cuối do sort_context_by_hot)
     # UPSERT theo url: dòng ĐÃ CÓ giữ nguyên (không đụng Status/Execute/Hook/Notes
     # người dùng đã sửa), dòng MỚI mới được thêm. Rồi sắp LẠI TOÀN BẢNG theo Hot%.
-    written = board.upsert_context_rows([row for _, row in scored_rows])
+    new_rows = board.upsert_context_rows([row for _, row in scored_rows])
+    written = len(new_rows)
     board.sort_context_by_hot()
+
+    # PHASE 4.6: mỗi dòng CONTEXT thật sự MỚI (không phải url trùng bị bỏ qua)
+    # -> báo Telegram kèm link bài viết (Source = url gốc, có thể nhiều dòng
+    # nếu gộp sự kiện chéo nguồn -> lấy dòng ĐẦU = url chính, khớp primary_url()
+    # trong SheetsBoard.upsert_context_rows).
+    for row in new_rows:
+        topic = row[_I_CONTEXT] if _I_CONTEXT < len(row) else ""
+        url = row[_I_SOURCE].splitlines()[0] if _I_SOURCE < len(row) and row[_I_SOURCE] else ""
+        notifier.notify("new_topic", topic=topic, url=url)
 
     usage = hook_llm.usage.as_dict()
     totals = {

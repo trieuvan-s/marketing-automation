@@ -33,7 +33,7 @@ from twmkt.agents.production import (  # noqa: E402
     AnalysisWriterAgent, ProductionBrief, analysis_fields_from_data,
     apply_guardrails, build_analysis_prompt, render_analysis,
 )
-from twmkt.agents.voice import _extract_example, _split_top_sections, load_voice_lock  # noqa: E402
+from twmkt.agents.voice import _extract_example, _split_top_sections, assemble_voice  # noqa: E402
 from twmkt.config import Settings, load_settings  # noqa: E402
 from twmkt.models import ContentDraft, ContentFormat, Source  # noqa: E402
 
@@ -89,7 +89,7 @@ def run(*, slug: str | None = None) -> Path:
     item_slug = _slug(item["context"])
 
     voice_v1 = _voice_v1_equivalent(settings)
-    voice_v2 = load_voice_lock("analysis", settings=settings)   # v2 THẬT — đúng đường sống
+    voice_v2 = assemble_voice(None, settings=settings)   # v2 THẬT — đúng đường sống (fallback S1+H3+D)
 
     llm = factory.build_content_llm(settings)   # $0 nếu thiếu key (lùi mượt, không thêm lệnh gọi mới)
 

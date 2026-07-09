@@ -341,6 +341,28 @@ llm:
   # (hook/enrich/brief-label) KHÔNG liệt ở đây -> giữ lùi mượt như trước.
   fail_loud_steps: ["writer"]
 
+# --- Writer retry (Phase 4.5, gắn lên fail_loud ở trên) --------------
+# Lỗi TẠM THỜI (timeout/rate-limit/exit≠0 -> LLMCallError, xem agents/base.py)
+# -> thử lại tối đa max_retries lần, chờ retry_backoff_s giữa các lần. Lỗi VĨNH
+# VIỄN (guardrail reject/claim cấm, LLM ĐÃ trả lời nhưng nội dung không sạch)
+# -> KHÔNG retry, đánh dấu NEEDS_HUMAN ngay (xem agents/writer.run_writer_with_retry).
+writer:
+  max_retries: 1        # số lần thử LẠI (không tính lượt đầu)
+  retry_backoff_s: 3     # chờ giữa các lần thử lại (giây)
+  timeout_s: 120          # timeout riêng cho LLM client bước writer (factory.build_writer_llm)
+
+# --- Thông báo vận hành (PHASE TELE, src/twmkt/utils/telegram_notifier.py) --
+# 1 chiều, KHÔNG chặn luồng chính — báo qua Telegram khi bắt đầu xử lý/đổi nội
+# dung/duyệt xong Gate 2/lỗi. bot_token/chat_id qua ${ENV} (secrets/.env),
+# KHÔNG hardcode giá trị thật ở đây. Thiếu ENV/enabled=false -> no-op êm.
+notifications:
+  telegram:
+    enabled: true
+    bot_token: ${TELEGRAM_BOT_TOKEN}
+    chat_id: ${TELEGRAM_CHAT_ID}
+    parse_mode: HTML
+    timeout_s: 5
+
 # --- Sản xuất nội dung ----------------------------------------------
 producers:
   hook: true                      # bước Hook (góc marketing) - mục b/c
@@ -349,13 +371,28 @@ producers:
   video_script: true
   newsletter: true                # tất định, $0
 
-# --- Voice-lock: khoá giọng văn (xem docs/voice_examples.md) --------
-# $0 (chỉ đọc file cục bộ, không thêm lệnh gọi API) — nối §1+§2+§3 (luật giọng)
-# + đúng 1 ví dụ (format_example) vào system prompt agent sản xuất tương ứng.
+# --- Route-once (Phase 4.8 Mục A, agents/route_once.py) --------------
+# RouterDecision đóng băng theo chủ đề (JSON file, KHÔNG day-partition — trạng
+# thái "đã chốt", owner tự xoá bằng scripts/reroute.py khi cần route lại).
+router:
+  decisions_path: "storage/router_decisions.json"
+
+# --- Guardrail số canonical (Phase 4.8 Mục C, agents/production.py) --------
+# Số TRONG BÀI khớp với 1 fact.canonical_value trong khoảng dung sai -> KHÔNG
+# coi là bịa số. Mặc định khớp CHÍNH XÁC (0%); nới ≤ approx_tolerance_pct%
+# CHỈ KHI số trong bài đi kèm từ xấp xỉ (gần/khoảng/xấp xỉ/hơn/trên/dưới).
+guardrail:
+  approx_tolerance_pct: 5
+
+# --- Voice-lock ĐỘNG (xem docs/voice_examples.md, agents/voice.assemble_voice) --
+# $0 (chỉ đọc file cục bộ, không thêm lệnh gọi API). Phase 4: khung/hook/anchor
+# giờ do StructureRouterAgent chọn ĐỘNG mỗi bài (agents/structure_router.py) rồi
+# assemble_voice(decision) lắp system prompt Writer — KHÔNG còn map tĩnh
+# format_example trong config (đã bỏ; map anchor mặc định nay nằm trong code,
+# xem voice.py::_DEFAULT_ANCHOR_BY_STRUCTURE, theo bảng ở §0 voice_examples.md).
 voice:
   enabled: true
   examples_path: docs/voice_examples.md
-  format_example: { analysis: D, facebook: C, infographic: C, video: C }
 
 # --- Cổng duyệt người-trong-vòng-lặp --------------------------------
 gates:

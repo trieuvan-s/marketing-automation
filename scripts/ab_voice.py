@@ -32,7 +32,7 @@ from twmkt.agents.production import (  # noqa: E402
     AnalysisWriterAgent, ProductionBrief, analysis_fields_from_data,
     apply_guardrails, build_analysis_prompt, render_analysis,
 )
-from twmkt.agents.voice import load_voice_lock  # noqa: E402
+from twmkt.agents.voice import assemble_voice  # noqa: E402
 from twmkt.config import Settings, load_settings  # noqa: E402
 from twmkt.models import ContentDraft, ContentFormat, Source  # noqa: E402
 from twmkt.sheets_board import SheetsBoard  # noqa: E402
@@ -72,7 +72,7 @@ def generate_article(brief: ProductionBrief, llm, *, voice_settings: Settings) -
     ở chỗ voice-lock lấy từ `voice_settings` truyền vào (thay vì luôn đọc
     settings.yaml thật) để A/B kiểm soát được biến bật/tắt."""
     agent = AnalysisWriterAgent(llm)
-    voice = load_voice_lock("analysis", settings=voice_settings)
+    voice = assemble_voice(None, settings=voice_settings)
     extra = f"\n\n---\n\nVOICE-LOCK (giọng văn bắt buộc):\n{voice}" if voice else ""
     data = try_json_object(agent._ask(build_analysis_prompt(brief), extra_system=extra))
     title, sapo, sections, disclaimer, sources = analysis_fields_from_data(data, brief)

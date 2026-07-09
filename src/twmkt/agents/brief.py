@@ -18,12 +18,22 @@ rỗng vẫn hợp lệ, InfographicSpecAgent cũ vẫn chạy y nguyên bằng 
 CHỐNG BỊA (verify_fact_in_evidence): mỗi fact.value PHẢI xuất hiện NGUYÊN VĂN
 trong ÍT NHẤT 1 câu của evidence+background -> không có thì LOẠI fact đó, nhất
 quán với guardrail hiện có (agents/production.unsupported_numbers).
+
+PHASE 4.8 MỤC C — SỐ CANONICAL ("AI hiểu ở Brief, CODE phán ở Guardrail"):
+LLM trả THÊM 2 field/fact — "raw" (cụm nguyên văn value+unit, COPY Y NGUYÊN từ
+văn bản, kể cả từ xấp xỉ nếu có, vd "gần 600 tỷ đồng") và "approx" (bool, có
+từ xấp xỉ hay không). CODE (KHÔNG phải AI) tính `canonical_value` = số học
+THẬT từ value+unit (agents/_numeric.parse_magnitude_token) — không tin AI làm
+toán. RÀNG BUỘC CHỐNG TRÔI: "raw" PHẢI là substring THẬT (kiểm bằng `in`, không
+chỉ verify_fact_in_evidence theo câu) của evidence+background -> thiếu/sai thì
+LOẠI fact ngay, KHÔNG lọt xuống writer/guardrail.
 """
 from __future__ import annotations
 
 import re
 
 from ._jsonparse import try_json_object
+from ._numeric import has_approx_word, parse_magnitude_token
 from ..models import FACT_KINDS, Fact
 from .base import LLMClient
 
@@ -54,8 +64,14 @@ _SYSTEM = (
     "\"...SSI vẫn lựa chọn 8 cổ phiếu có triển vọng tích cực...\" PHẢI cho ra "
     '{"value": "8", "label": "Số cổ phiếu SSI khuyến nghị", "unit": null, "kind": "count"} '
     "— dù không có %/đơn vị tiền đi kèm.\n"
+    "Với MỖI fact, THÊM 2 trường (Phase 4.8 Mục C, chống trôi số): \"raw\" = cụm "
+    "NGUYÊN VĂN chứa value bạn COPY Y NGUYÊN từ văn bản (kể cả từ xấp xỉ nếu có, "
+    "vd \"gần 600 tỷ đồng\") — PHẢI tìm được y hệt bằng tìm-chuỗi trong văn bản "
+    "gốc, TUYỆT ĐỐI KHÔNG diễn giải/viết lại; \"approx\" = true nếu cụm đó có từ "
+    "xấp xỉ (gần/khoảng/xấp xỉ/hơn/trên/dưới), false nếu là số chính xác.\n"
     'Trả về DUY NHẤT JSON: {"facts": [{"value": str, "label": str, "unit": str hoặc null, '
-    '"kind": "percent|money|count|growth|date|ranking|target|other"}]}. '
+    '"kind": "percent|money|count|growth|date|ranking|target|other", '
+    '"raw": str, "approx": bool}]}. '
     "KHÔNG markdown, KHÔNG lời dẫn."
 )
 
@@ -138,9 +154,26 @@ def facts_from_llm_output(raw: str, evidence: str, background: str = "") -> list
         sent = _verify_candidates(value, unit, source_text)
         if sent is None:
             continue   # không xuất hiện trong evidence/background -> nghi bịa, LOẠI
+
+        # Mục C (Phase 4.8): "raw" PHẢI là substring THẬT của evidence+background
+        # (kiểm `in`, chặt hơn verify_fact_in_evidence theo câu) -> chống AI tự
+        # paraphrase/bịa cụm không có thật. Thiếu/sai -> LOẠI fact, KHÔNG lọt
+        # xuống writer/guardrail (canonical_value không có ý nghĩa nếu raw giả).
+        raw_phrase = str(item.get("raw", "")).strip()
+        if not raw_phrase or raw_phrase not in source_text:
+            continue
+
         kind_raw = str(item.get("kind", "")).strip().lower()
         kind = kind_raw if kind_raw in FACT_KINDS else "other"   # kind lạ -> "other", KHÔNG loại fact
-        out.append(Fact(value=value, label=label, unit=unit, source=sent, kind=kind))
+        # canonical_value: CODE tính (KHÔNG tin AI làm toán) từ value+unit đã
+        # verify ở trên — parse_magnitude_token thuần, tất định.
+        canonical_value = parse_magnitude_token(f"{value}{unit or ''}")
+        # approx: AI tự báo HOẶC code tự dò từ chính "raw" (an toàn kép, không
+        # tin mù cờ AI điền, cùng triết lý với driver_count/residual_tension
+        # ở structure_router.py).
+        approx = bool(item.get("approx", False)) or has_approx_word(raw_phrase)
+        out.append(Fact(value=value, label=label, unit=unit, source=sent, kind=kind,
+                        raw=raw_phrase, canonical_value=canonical_value, approx=approx))
         seen.add(value)
     return out
 

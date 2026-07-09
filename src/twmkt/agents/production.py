@@ -34,6 +34,16 @@ GUARDRAIL (chạy SAU khi sinh, TRƯỚC khi ghi CONTENT, xem apply_guardrails()
   - Trích nguồn báo: gắn "Nguồn: <domain>" TẤT ĐỊNH khi render (không phụ thuộc
     LLM có nhớ ghi hay không).
 
+PHASE 4.8 MỤC C — SỐ CANONICAL: số trong body KHÔNG khớp NGUYÊN VĂN evidence
+(vd Writer viết "gần 600 tỷ" trong khi evidence chỉ có "585 tỷ đồng") KHÔNG còn
+tự động bị flag — nếu `facts` (agents/brief.py) có 1 fact.canonical_value lệch
+≤ dung sai (0% mặc định, nới ≤ guardrail.approx_tolerance_pct% CHỈ KHI số
+trong body đi kèm từ xấp xỉ ngay trước nó) thì coi là HỢP LỆ. Đây vẫn là PHÉP
+TÍNH SỐ HỌC TẤT ĐỊNH (agents/_numeric.py) — KHÔNG gọi LLM để phán. `facts`
+rỗng/không truyền (đa số call site hiện tại CHƯA wire agents/brief.run_brief())
+-> cơ chế này no-op hoàn toàn, lùi về hành vi CŨ (chỉ so khớp evidence trực
+tiếp) — KHÔNG đổi hành vi các đường sản xuất hiện có.
+
 Cơ chế PROMPTS (đổi văn phong không cần sửa code): xem agents/prompts.py +
 sheets_board.SheetsBoard.read_prompt_versions. Gọi all_production_agents(llm,
 prompt_overrides=...) để áp bản prompt đã kích hoạt trên tab PROMPTS.
@@ -46,10 +56,11 @@ from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
 from ._jsonparse import try_json_object
+from ._numeric import has_approx_word, parse_magnitude_token
 from ..guardrails import compliance
 from ..models import ContentDraft, ContentFormat, Fact
 from .base import Agent, LLMClient
-from .voice import load_voice_lock
+from .voice import assemble_voice
 
 _DISCLAIMER = (
     "Nội dung chỉ mang tính thông tin, không phải khuyến nghị đầu tư. "
@@ -90,31 +101,85 @@ def domain_of(url: str) -> str:
         return ""
 
 
-def unsupported_numbers(body: str, source_text: str) -> list[str]:
+def _normalize_number(token: str) -> str:
+    """Chuẩn hoá SO SÁNH 1 token số (Phase 4.6, sửa false-positive phát hiện
+    khi validate): bỏ hết dấu '.'/',' trong token — token do _MAGNITUDE_RE bắt
+    CHỈ chứa số + đơn vị (không có câu chữ khác lẫn vào) nên an toàn để bỏ dấu
+    phân cách, bất kể kiểu viết: evidence gốc hay để dấu CHẤM thập phân kiểu
+    quốc tế ("12.61%" — dữ liệu bảng/HOSE), trong khi Writer viết đúng chuẩn
+    tiếng Việt bằng dấu PHẨY ("12,61%") — không chuẩn hoá thì 2 chuỗi này
+    KHÁC NHAU dù CÙNG 1 con số, gây báo sai 'bịa số'."""
+    return re.sub(r"[.,]", "", token.lower().strip())
+
+
+_DEFAULT_APPROX_TOLERANCE = 0.05   # Mục C: nới ≤5% CHỈ KHI số TRONG BÀI đi kèm từ xấp xỉ
+_APPROX_LOOKBACK = 12               # số ký tự nhìn NGƯỢC trước token để tìm từ xấp xỉ
+
+
+def _matches_canonical_fact(tok: str, body: str, start: int, facts: list[Fact],
+                            tolerance: float) -> bool:
+    """Mục C (Phase 4.8): số TRONG BÀI (`tok`, tại vị trí `start`) HỢP LỆ nếu
+    có ÍT NHẤT 1 fact.canonical_value lệch ≤ `tolerance` (0 = khớp chính xác;
+    nới lên `tolerance` CHỈ được gọi khi `tok` trong bài đi kèm từ xấp xỉ ngay
+    trước nó — xem apply_guardrails/unsupported_numbers). So khớp SỐ HỌC tất
+    định (agents/_numeric.py) — guardrail luôn là CODE, KHÔNG bao giờ để AI
+    phán 1 số là an toàn."""
+    val = parse_magnitude_token(tok)
+    if val is None:
+        return False
+    effective_tolerance = tolerance if has_approx_word(body[max(0, start - _APPROX_LOOKBACK):start]) else 0.0
+    for f in facts:
+        if f.canonical_value is None or f.canonical_value == 0:
+            continue
+        if abs(val - f.canonical_value) / abs(f.canonical_value) <= effective_tolerance:
+            return True
+    return False
+
+
+def unsupported_numbers(body: str, source_text: str, facts: list[Fact] | None = None, *,
+                        approx_tolerance: float = _DEFAULT_APPROX_TOLERANCE) -> list[str]:
     """Số liệu tài chính (%, tỷ, triệu...) xuất hiện trong `body` nhưng KHÔNG có
-    trong `source_text` (evidence + background gộp lại) -> nghi bịa số. Hàm
-    THUẦN, dùng bởi apply_guardrails()."""
+    trong `source_text` (evidence + background gộp lại) VÀ không khớp canonical
+    nào trong `facts` -> nghi bịa số. Hàm THUẦN, dùng bởi apply_guardrails().
+    Thứ tự kiểm (dừng ở bước đầu tiên khớp):
+      1. So khớp CHÍNH XÁC trong evidence.
+      2. Sau khi chuẩn hoá dấu thập phân (_normalize_number, Phase 4.6 fix 1) —
+         chấp nhận Writer đổi "12.61%" (evidence) thành "12,61%" (chuẩn tiếng
+         Việt) mà KHÔNG coi là bịa số, miễn CHỮ SỐ giống hệt.
+      3. Mục C (Phase 4.8): khớp SỐ HỌC với 1 fact.canonical_value trong dung
+         sai (0% mặc định; ≤ approx_tolerance nếu số trong bài đi kèm từ xấp
+         xỉ) — `facts` rỗng/None -> bước này no-op, hành vi y hệt trước Mục C."""
     low = source_text.lower()
+    evidence_norm = {_normalize_number(m.group(0)) for m in _MAGNITUDE_RE.finditer(source_text)}
+    facts = facts or []
     bad, seen = [], set()
     for m in _MAGNITUDE_RE.finditer(body):
         tok = m.group(0)
         key = tok.lower().strip()
         if key in low or key in seen:
             continue
+        if _normalize_number(tok) in evidence_norm:
+            continue   # khớp sau khi chuẩn hoá dấu thập phân -> KHÔNG nghi bịa
+        if facts and _matches_canonical_fact(tok, body, m.start(), facts, approx_tolerance):
+            continue   # khớp canonical (đúng số hoặc làm tròn hợp lý) -> KHÔNG nghi bịa
         seen.add(key)
         bad.append(tok)
     return bad
 
 
-def apply_guardrails(draft: ContentDraft, evidence: str, background: str = "") -> ContentDraft:
+def apply_guardrails(draft: ContentDraft, evidence: str, background: str = "",
+                     facts: list[Fact] | None = None, *,
+                     approx_tolerance: float = _DEFAULT_APPROX_TOLERANCE) -> ContentDraft:
     """Chạy compliance.check (disclaimer/claim cấm) + chặn bịa số (evidence +
     background gộp lại — background = bối cảnh Claude Code research thêm khi
-    viết). Gắn draft.compliance_issues (Status=ERROR nếu vi phạm). Trả lại draft."""
+    viết; `facts` (agents/brief.py, tuỳ chọn) cho phép số làm tròn hợp lý khớp
+    canonical, xem unsupported_numbers). Gắn draft.compliance_issues
+    (Status=ERROR nếu vi phạm). Trả lại draft."""
     issues = compliance.check(draft)
     source_text = f"{evidence}\n{background}"
     if source_text.strip():   # infographic trích số THẲNG từ evidence -> luôn rỗng, bỏ qua vô ích
         issues += [f"Số liệu không thấy trong evidence/background: {t}" for t in
-                   unsupported_numbers(draft.body, source_text)]
+                   unsupported_numbers(draft.body, source_text, facts, approx_tolerance=approx_tolerance)]
     draft.compliance_issues = issues
     return draft
 
@@ -145,7 +210,9 @@ class AnalysisWriterAgent(Agent):
     )
 
     def run(self, brief: ProductionBrief) -> ContentDraft:
-        voice = load_voice_lock("analysis")
+        # decision=None -> fallback an toàn S1+H3+D (chưa chạy StructureRouter ở
+        # đường LEGACY này — xem agents/writer.py cho đường MỚI có router thật).
+        voice = assemble_voice(None)
         extra = f"\n\n---\n\nVOICE-LOCK (giọng văn bắt buộc):\n{voice}" if voice else ""
         data = try_json_object(self._ask(build_analysis_prompt(brief), extra_system=extra))
         title, sapo, sections, disclaimer, sources = analysis_fields_from_data(data, brief)

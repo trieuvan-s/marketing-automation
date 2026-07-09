@@ -132,12 +132,26 @@ class Fact:
     VĂN trong `source` (1 câu evidence thật). Fact nào không verify được bị loại
     ngay ở agents/brief.facts_from_llm_output(), KHÔNG bao giờ tồn tại instance
     Fact "bịa".
+
+    PHASE 4.8 MỤC C — SỐ CANONICAL: nguyên tắc "AI hiểu ở Brief, CODE phán ở
+    Guardrail" — sự giòn với NGÔN NGỮ số ("gần 600 tỷ"/"585 tỉ"/"585 tỷ đồng"
+    cùng 1 số thật) được xử ở khâu TRÍCH (agents/brief.py, AI nhận diện biến
+    thể cách viết); guardrail (agents/production.unsupported_numbers) chỉ làm
+    PHÉP TÍNH SỐ HỌC TẤT ĐỊNH trên `canonical_value` — KHÔNG BAO GIỜ để AI làm
+    quan toà phán 1 số là an toàn.
     """
     value: str            # "8,18", "8", "1.200" — nguyên văn số trong evidence (KHÔNG kèm unit)
     label: str             # "GDP 6T/2026", "LNTT MB" — nhãn CÓ NGHĨA, không phải "Số liệu N"
     unit: str | None = None    # "%", "tỷ đồng"... None nếu value không đi kèm đơn vị (vd đếm)
     source: str = ""       # câu evidence gốc chứa value (audit/verify)
     kind: str = "other"    # xem FACT_KINDS — percent|money|count|growth|date|ranking|target|other
+    raw: str = ""                          # cụm NGUYÊN VĂN (value+unit, kể cả từ xấp xỉ nếu có) —
+                                            # PHẢI là substring THẬT của evidence+background, xem
+                                            # agents/brief.facts_from_llm_output (không thì LOẠI fact)
+    canonical_value: float | None = None   # số máy đọc được, CODE tính từ value+unit (agents/
+                                            # _numeric.parse_magnitude_token) — vd "585 tỷ" -> 585e9
+    approx: bool = False                   # true nếu raw có từ xấp xỉ (gần/khoảng/xấp xỉ/hơn/
+                                            # trên/dưới) — agents/_numeric.has_approx_word
 
 
 @dataclass

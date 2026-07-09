@@ -186,6 +186,20 @@ def is_fail_loud_step(settings: Settings, step: str) -> bool:
     return step in (settings.get("llm.fail_loud_steps", ["writer"]) or [])
 
 
+def build_writer_llm(settings: Settings) -> LLMClient:
+    """LLM client RIÊNG cho bước 'writer' (Phase 4.5, agents/writer.run_writer_
+    with_retry) — CÙNG mode với make_llm() nhưng timeout đọc từ `writer.timeout_s`
+    (KHÔNG dùng chung llm.claude_code.timeout_s với brief/router) vì Writer là
+    bước QUAN TRỌNG (fail_loud mặc định), có thể cần chờ lâu hơn/ngắn hơn 2 bước
+    kia tuỳ ngân sách vận hành."""
+    mode = (settings.get("llm.mode", "mock") or "mock").lower()
+    if mode == "claude_code":
+        timeout_s = float(settings.get("writer.timeout_s", 120))
+        print(f"LLM backend (writer): {mode} (timeout_s={timeout_s:.0f})")
+        return ClaudeCodeLLM(timeout_s=timeout_s)
+    return make_llm(settings)
+
+
 # --- Cổng duyệt: console | auto | sheets -----------------------------------
 def build_gate(settings: Settings, *, gate: str) -> ApprovalGate:
     """gate = 'research' | 'content'. Đọc gates.<gate>.type."""

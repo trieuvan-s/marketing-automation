@@ -43,7 +43,7 @@ khung S1–S5 + hook + anchor). System prompt writer = **phần phổ quát** + 
    nghiệp, chính sách). Không để một nhận định trôi nổi mà không có mỏ neo dữ liệu.
 6. **Số liệu phải có thật trong evidence.** (Trùng với guardrail — nhắc lại vì giọng này *lấy uy tín
    từ số*, nên số sai là hỏng cả giọng lẫn compliance.)
-
+7. **Triển khai kịch bản với văn phong kể chuyện, nên sử dụng câu ghép và một câu trên 10 từ.**
 ---
 
 ## 2. Menu khung diễn giải (chọn 1 theo hình dạng thông tin)
@@ -80,8 +80,17 @@ Năm khung. Mỗi khung ghi: *khi nào dùng · xương · hook hợp · anchor*
 - *Hook:* tuỳ khung bao ngoài. *Anchor:* đoạn "Hòa Phát… Masan… MB… HDBank…" trong Ví dụ D.
 
 **S5 · Phản đề / biện chứng** (nghịch lý → steelman → bước lùi → suy luận ngược → cả-hai-cùng-đúng)
-- *Khi nào:* **CHỈ khi có một nghịch lý/căng thẳng thật** cần hoá giải, hoặc thông tin dễ bị đọc một
-  chiều. **KHÔNG phải mặc định.** Đây là khung mạnh nhất nhưng dùng sai chỗ thì gượng.
+- *Khi nào:* **CHỈ khi có một nghịch lý/căng thẳng thật** cần hoá giải. **KHÔNG phải mặc định.**
+  Khung mạnh nhất nhưng dùng sai chỗ thì gượng.
+- *Thước đo "nghịch lý THẬT" (test bắt buộc trước khi chọn S5):* **sau khi giải thích xong, CÒN LẠI
+  một căng thẳng / câu hỏi mở người đọc phải ngồi với hay không?**
+  - CÒN dư căng thẳng → nghịch lý thật → S5. VD Ví dụ A: giải thích xong vẫn treo *"rủi ro dời về
+    đâu, ai đỡ nếu xe trượt"*.
+  - Mâu thuẫn **TAN HẾT** thành một luận điểm sạch sau khi giải thích → chỉ là mâu thuẫn **bề mặt**
+    → dùng **S1**, KHÔNG phải S5. VD bài SSI: mâu thuẫn "cảnh báo rủi ro mà vẫn chọn cổ phiếu" tan
+    gọn thành *"SSI đặt cược vào câu chuyện riêng từng doanh nghiệp"* — hết căng thẳng → S1.
+  - *Lưu ý:* hook dạng "ngã ba/mâu thuẫn" (H1) **không** tự động = nghịch lý thật. Hook là bề mặt
+    câu chữ; test trên soi ở tầng cấu trúc. Một bài S1 vẫn được mở bằng hook H1.
 - *Xương:* (1) mở bằng nghịch lý → (2) dựng đủ lý lẽ phía lo ngại (*"Mối lo ấy có cơ sở thật."*) →
   (3) bước lùi (*"Nhưng nếu lùi một bước và hỏi câu khác…"*) → (4) suy luận ngược (*"phải tin điều gì
   thì nước đi này mới hợp lý"* — bài dài để nguyên câu hỏi; bài tin hoá thành khẳng định điều kiện

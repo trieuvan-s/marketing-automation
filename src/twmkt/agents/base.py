@@ -4,17 +4,24 @@ Nguyên tắc: LLM chỉ sinh NGÔN NGỮ (diễn giải, văn phong). Mọi CON
 từ ervn (tất định). MockLLM cho phép chạy offline, AnthropicLLM cho production,
 ClaudeCodeLLM dùng CLI `claude -p` (gói Pro/Max/Team, không cần API key riêng).
 
-`complete(system, prompt, *, model=None, fail_loud=False)`: 2 tham số MỞ RỘNG
-(keyword-only, mặc định giữ hành vi CŨ) để pipeline mới (factory.make_llm +
-llm.step_models) chọn model theo TỪNG BƯỚC — mọi call site CŨ gọi
-`complete(system, prompt)` (2 tham số dương) vẫn chạy y nguyên, kể cả xuyên qua
-LLMRouter (agents/router.py, KHÔNG đụng tới ở đây) vì LLMRouter tự gọi
-`base.complete(system, prompt)` không kèm `model`/`fail_loud`.
+`complete(system, prompt, *, model=None, fail_loud=False, temperature=None)`: 3
+tham số MỞ RỘNG (keyword-only, mặc định giữ hành vi CŨ) để pipeline mới
+(factory.make_llm + llm.step_models) chọn model/độ ngẫu nhiên theo TỪNG BƯỚC —
+mọi call site CŨ gọi `complete(system, prompt)` (2 tham số dương) vẫn chạy y
+nguyên, kể cả xuyên qua LLMRouter (agents/router.py, KHÔNG đụng tới ở đây) vì
+LLMRouter tự gọi `base.complete(system, prompt)` không kèm tham số mở rộng.
   - `model=None` -> backend tự dùng model mặc định của nó (constructor).
   - `fail_loud=False` (mặc định) -> LÙI MƯỢT như cũ (cảnh báo + trả ""). Bước
     QUAN TRỌNG (vd Writer — xem CLAUDE.md v3 roadmap) truyền `fail_loud=True`
     -> lỗi/timeout/is_error RAISE `LLMCallError` thay vì im lặng trả "" (không
     được sinh nội dung rỗng/ngầm rồi ghi CONTENT như thật).
+  - `temperature=None` (Phase 3.6, ổn định StructureRouter) -> backend tự dùng
+    mặc định của nó. AnthropicLLM: truyền THẲNG vào API (0.0-1.0, hỗ trợ đầy
+    đủ). ClaudeCodeLLM: CLI `claude -p` KHÔNG expose tham số sampling nào (đã
+    kiểm `claude -p --help` — không có `--temperature`/`--seed`) -> tham số bị
+    BỎ QUA (no-op), cảnh báo 1 lần nếu có truyền giá trị, KHÔNG raise. Với
+    backend này, độ ổn định dựa vào THƯỚC ĐO (residual_tension, xem
+    agents/structure_router.py) thay vì tham số sampling.
 """
 from __future__ import annotations
 
@@ -32,15 +39,15 @@ class LLMCallError(RuntimeError):
 
 class LLMClient(Protocol):
     def complete(self, system: str, prompt: str, *, model: str | None = None,
-                fail_loud: bool = False) -> str: ...
+                fail_loud: bool = False, temperature: float | None = None) -> str: ...
 
 
 class MockLLM(LLMClient):
     """Trả lời tất định, không gọi mạng. Dùng cho demo/test. Không bao giờ lỗi
-    -> `fail_loud` không có tác dụng (nhận tham số để khớp interface)."""
+    -> `fail_loud`/`temperature` không có tác dụng (nhận tham số để khớp interface)."""
 
     def complete(self, system: str, prompt: str, *, model: str | None = None,
-                fail_loud: bool = False) -> str:
+                fail_loud: bool = False, temperature: float | None = None) -> str:
         role = system.strip().splitlines()[0] if system.strip() else "agent"
         head = prompt.strip().splitlines()[0][:80] if prompt.strip() else ""
         return f"[MOCK::{role}] {head}"
@@ -91,17 +98,18 @@ class AnthropicLLM(LLMClient):
         return ""
 
     def complete(self, system: str, prompt: str, *, model: str | None = None,
-                fail_loud: bool = False) -> str:
+                fail_loud: bool = False, temperature: float | None = None) -> str:
         ok, why = self.is_available()
         if not ok:
             return self._fail(f"AnthropicLLM không dùng được ({why})", fail_loud=fail_loud)
         resolved_model = self._ALIASES.get(model, model) if model else self.model
+        kwargs = {} if temperature is None else {"temperature": temperature}
         try:
             import anthropic
             client = anthropic.Anthropic()
             msg = client.messages.create(
                 model=resolved_model, max_tokens=self.max_tokens,
-                system=system, messages=[{"role": "user", "content": prompt}],
+                system=system, messages=[{"role": "user", "content": prompt}], **kwargs,
             )
             return "".join(b.text for b in msg.content if b.type == "text")
         except Exception as e:              # auth/mạng/quota... -> lùi mượt hoặc raise
@@ -129,6 +137,7 @@ class ClaudeCodeLLM(LLMClient):
         self.timeout_s = timeout_s
         self._run_fn = run_fn
         self._warned = False
+        self._temp_warned = False
 
     def _warn(self, msg: str) -> None:
         if not self._warned:
@@ -142,7 +151,12 @@ class ClaudeCodeLLM(LLMClient):
         return ""
 
     def complete(self, system: str, prompt: str, *, model: str | None = None,
-                fail_loud: bool = False) -> str:
+                fail_loud: bool = False, temperature: float | None = None) -> str:
+        if temperature is not None and not self._temp_warned:
+            print(f"[CẢNH BÁO] ClaudeCodeLLM: 'claude -p' không expose tham số sampling "
+                 f"(temperature={temperature} bị BỎ QUA, no-op) — dựa vào thước đo "
+                 f"(vd residual_tension) để giảm dao động thay vì tham số.")
+            self._temp_warned = True
         full_prompt = f"{system}\n\n{prompt}" if system.strip() else prompt
         cmd = [self.binary, "-p", full_prompt, "--output-format", "json"]
         if model:

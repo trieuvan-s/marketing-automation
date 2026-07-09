@@ -717,6 +717,21 @@ def test_sheets_context_row_column_order():
     assert d2["Status"] == "APPROVE" and d2["Execute"] == "RUN"
 
 
+def test_context_row_and_content_row_default_timestamp_is_ddmmyyyy_no_time():
+    """Timestamp mặc định (ts=None) PHẢI là DD/MM/YYYY, KHÔNG giờ:phút:giây —
+    khác LOG.timestamp (vẫn ISO đầy đủ, không đổi)."""
+    import re
+    from twmkt.sheets_board import context_row, content_row, CONTEXT_HEADER, CONTENT_HEADER
+
+    ddmmyyyy = re.compile(r"^\d{2}/\d{2}/\d{4}$")
+
+    ctx_row = context_row(title="T", hook_line="H", source_url="http://u", score=1, hot_pct=1.0)
+    assert ddmmyyyy.match(ctx_row[CONTEXT_HEADER.index("Timestamp")])
+
+    con_row = content_row(context="C", type_="article", status="DONE", output="x")
+    assert ddmmyyyy.match(con_row[CONTENT_HEADER.index("Timestamp")])
+
+
 def test_build_format_requests_covers_features_and_is_deterministic():
     """Hàm thuần build_format_requests: đủ loại request + idempotent (xóa trước thêm)."""
     from twmkt.sheets_board import (
@@ -1335,9 +1350,10 @@ def test_upsert_context_rows_skips_existing_url_appends_new():
                       score=99, hot_pct=99.0)   # điểm/nội dung KHÁC nhưng CÙNG url
     new = context_row(title="Bài mới", hook_line="h3", source_url="http://u/2",
                       score=2, hot_pct=2.0)
-    n = board.upsert_context_rows([dup, new])
+    written = board.upsert_context_rows([dup, new])
 
-    assert n == 1                               # chỉ 1 dòng MỚI được ghi
+    assert written == [new]                     # trả CHÍNH dòng mới (không phải chỉ đếm)
+    assert len(written) == 1                    # chỉ 1 dòng MỚI được ghi
     assert len(ws._v) == 3                       # header + 1 cũ + 1 mới (KHÔNG trùng)
     assert ws._v[1] == list(existing)             # dòng cũ (APPROVE/RUN) Y NGUYÊN, không bị đè
     assert ws.appended == [new]                    # CHỈ dòng thật sự mới được append
@@ -1353,9 +1369,9 @@ def test_upsert_context_rows_called_twice_no_duplicate():
     board._ws["CONTEXT"] = ws
 
     row = context_row(title="Bài A", hook_line="h", source_url="http://u/1", score=1, hot_pct=1.0)
-    n1 = board.upsert_context_rows([row])
-    n2 = board.upsert_context_rows([row])          # "crawl lại" cùng url
-    assert n1 == 1 and n2 == 0
+    r1 = board.upsert_context_rows([row])
+    r2 = board.upsert_context_rows([row])          # "crawl lại" cùng url
+    assert len(r1) == 1 and len(r2) == 0
     assert len(ws._v) == 2                          # header + đúng 1 dòng, KHÔNG trùng
 
 
@@ -1483,19 +1499,21 @@ def test_regroup_content_rows_makes_same_context_contiguous():
     assert out == [a1, a2, a3, b1]   # A liền kề (giữ thứ tự trong-nhóm), B sau
 
 
-def test_content_merge_ranges_only_full_3_types_contiguous():
-    """content_merge_ranges: CHỈ trả dải cho Context có ĐỦ 3 loại VÀ liền kề; chủ
-    đề thiếu loại (chỉ 2/3) -> KHÔNG merge."""
+def test_content_merge_ranges_threshold_is_2_types_not_full_3():
+    """content_merge_ranges: ngưỡng merge là >= 2 loại KHÁC NHAU liền kề (KHÔNG
+    còn bắt buộc đủ cả 3) — Context 3 loại VÀ Context chỉ 2 loại đều được merge;
+    Context chỉ 1 loại (dù nhiều dòng) thì KHÔNG."""
     from twmkt.sheets_board import content_merge_ranges, CONTENT_HEADER, content_row
 
     a_info = content_row(context="A", type_="infographic", status="DONE", output="x")
     a_art = content_row(context="A", type_="article", status="DONE", output="x")
     a_vid = content_row(context="A", type_="video_script", status="DONE", output="x")
     b_info = content_row(context="B", type_="infographic", status="DONE", output="x")
-    b_art = content_row(context="B", type_="article", status="DONE", output="x")   # thiếu video_script
-    rows = [a_info, a_art, a_vid, b_info, b_art]
+    b_art = content_row(context="B", type_="article", status="DONE", output="x")   # chỉ 2/3 loại -> VẪN merge
+    c_info = content_row(context="C", type_="infographic", status="DONE", output="x")
+    rows = [a_info, a_art, a_vid, b_info, b_art, c_info]
     ranges = content_merge_ranges(CONTENT_HEADER, rows)
-    assert ranges == [(1, 4)]   # dòng Sheet 2..4 (A đủ 3 loại); B (thiếu) không có dải
+    assert ranges == [(1, 4), (4, 6)]   # A (3 loại) VÀ B (2 loại) đều merge; C (1 loại) không có dải
 
 
 def test_regroup_and_merge_content_reorders_and_sends_merge_requests():
@@ -1794,6 +1812,19 @@ def test_unsupported_numbers_flags_hallucinated_figures():
     assert unsupported_numbers("Lãi tăng 40% so với cùng kỳ.", evidence) == []
     bad = unsupported_numbers("Lợi nhuận tăng 999% - kỷ lục chưa từng có.", evidence)
     assert bad and "999%" in bad[0]
+
+
+def test_unsupported_numbers_accepts_vietnamese_comma_decimal_matching_evidence_period():
+    """Phase 4.6 (phát hiện qua validate generalization): evidence kiểu quốc tế
+    dùng dấu CHẤM thập phân ("12.61%" — dữ liệu bảng/HOSE); Writer viết đúng
+    chuẩn tiếng Việt bằng dấu PHẨY ("12,61%") — PHẢI được chấp nhận (cùng 1 con
+    số), KHÔNG báo nhầm "bịa số"."""
+    from twmkt.agents.production import unsupported_numbers
+    evidence = "Trong quý 2, Chứng khoán VPS dẫn đầu với thị phần 12.61%, giảm so với 15.32%."
+    assert unsupported_numbers("VPS dẫn đầu với 12,61% thị phần, giảm so với 15,32%.", evidence) == []
+    # Số THẬT SỰ không có trong evidence (dù chuẩn hoá dấu) vẫn phải bị bắt.
+    bad = unsupported_numbers("Thị phần lên tới 88,88%.", evidence)
+    assert bad and "88,88%" in bad[0]
 
 
 def test_apply_guardrails_flags_error_on_hallucination():
@@ -2188,7 +2219,7 @@ def test_facts_from_llm_output_reassembles_value_when_llm_splits_unit():
     import json as _json
 
     raw = _json.dumps({"facts": [
-        {"value": "8,18", "label": "GDP 6 tháng đầu năm 2026", "unit": "%"},
+        {"value": "8,18", "label": "GDP 6 tháng đầu năm 2026", "unit": "%", "raw": "8,18%"},
     ]}, ensure_ascii=False)
     facts = facts_from_llm_output(raw, _SSI_EVIDENCE)
     assert len(facts) == 1
@@ -2203,9 +2234,10 @@ def test_facts_from_llm_output_labels_meaningful_and_drops_hallucinated():
     import json as _json
 
     raw = _json.dumps({"facts": [
-        {"value": "8,18%", "label": "GDP 6 tháng đầu năm 2026", "unit": "%"},
-        {"value": "8 cổ phiếu", "label": "Số cổ phiếu SSI khuyến nghị triển vọng tích cực", "unit": None},
-        {"value": "15%", "label": "Biên lợi nhuận bịa (không có trong bài)", "unit": "%"},
+        {"value": "8,18%", "label": "GDP 6 tháng đầu năm 2026", "unit": "%", "raw": "8,18%"},
+        {"value": "8 cổ phiếu", "label": "Số cổ phiếu SSI khuyến nghị triển vọng tích cực", "unit": None,
+         "raw": "8 cổ phiếu"},
+        {"value": "15%", "label": "Biên lợi nhuận bịa (không có trong bài)", "unit": "%", "raw": "15%"},
     ]}, ensure_ascii=False)
 
     facts = facts_from_llm_output(raw, _SSI_EVIDENCE)
@@ -2235,7 +2267,7 @@ def test_run_brief_passes_model_and_verifies_output():
         def complete(self, system, prompt, *, model=None, fail_loud=False):
             assert model == "haiku" and fail_loud is False
             return _json.dumps({"facts": [
-                {"value": "8,18%", "label": "GDP 6 tháng đầu năm 2026", "unit": "%"}]})
+                {"value": "8,18%", "label": "GDP 6 tháng đầu năm 2026", "unit": "%", "raw": "8,18%"}]})
 
     facts = run_brief(_FakeBriefLLM(), _SSI_EVIDENCE, model="haiku")
     assert len(facts) == 1
@@ -2281,9 +2313,11 @@ def test_facts_from_llm_output_parses_kind_and_falls_back_to_other():
     import json as _json
 
     raw = _json.dumps({"facts": [
-        {"value": "8", "label": "Số cổ phiếu SSI khuyến nghị", "unit": None, "kind": "count"},
-        {"value": "8,18%", "label": "GDP 6T/2026", "kind": "percent"},
-        {"value": "8 cổ phiếu", "label": "Nhãn không kind hợp lệ", "kind": "khong-ton-tai"},
+        {"value": "8", "label": "Số cổ phiếu SSI khuyến nghị", "unit": None, "kind": "count",
+         "raw": "8 cổ phiếu"},
+        {"value": "8,18%", "label": "GDP 6T/2026", "kind": "percent", "raw": "8,18%"},
+        {"value": "8 cổ phiếu", "label": "Nhãn không kind hợp lệ", "kind": "khong-ton-tai",
+         "raw": "8 cổ phiếu"},
     ]}, ensure_ascii=False)
     facts = facts_from_llm_output(raw, _SSI_EVIDENCE)
     by_value = {f.value: f for f in facts}
@@ -2300,13 +2334,182 @@ def test_facts_from_llm_output_attributes_count_fact_to_correct_sentence_not_per
     import json as _json
 
     raw = _json.dumps({"facts": [
-        {"value": "8", "label": "Số cổ phiếu SSI khuyến nghị", "unit": None, "kind": "count"},
+        {"value": "8", "label": "Số cổ phiếu SSI khuyến nghị", "unit": None, "kind": "count",
+         "raw": "8 cổ phiếu"},
     ]}, ensure_ascii=False)
     facts = facts_from_llm_output(raw, _SSI_EVIDENCE)
     assert len(facts) == 1
     assert facts[0].kind == "count"
     assert facts[0].source.startswith("Tuy nhiên SSI vẫn lựa chọn 8 cổ phiếu")
     assert "8,18%" not in facts[0].source
+
+
+# --- Phase 4.8 Mục C: số CANONICAL (agents/_numeric.py + guardrail) ---------
+def test_parse_vn_decimal_handles_vn_and_international_and_mixed_separators():
+    from twmkt.agents._numeric import parse_vn_decimal
+
+    assert parse_vn_decimal("8,18") == 8.18            # chỉ ',' -> thập phân (VN)
+    assert parse_vn_decimal("1.200") == 1200            # chỉ '.', 3 chữ số sau -> nghìn (VN)
+    assert parse_vn_decimal("12.61") == 12.61           # chỉ '.', 2 chữ số sau -> thập phân (fix 1)
+    assert parse_vn_decimal("4.072,69") == 4072.69       # cả 2 dấu, ',' sau cùng -> thập phân (VN)
+    assert parse_vn_decimal("4,072.69") == 4072.69       # cả 2 dấu, '.' sau cùng -> thập phân (quốc tế)
+    assert parse_vn_decimal("600") == 600
+    assert parse_vn_decimal("") is None
+    assert parse_vn_decimal("abc") is None
+
+
+def test_parse_magnitude_token_scales_by_unit_word():
+    from twmkt.agents._numeric import parse_magnitude_token
+
+    assert parse_magnitude_token("600 tỷ") == 600e9
+    assert parse_magnitude_token("585tỷ đồng") == 585e9
+    assert parse_magnitude_token("1.200 tỷ đồng") == 1200e9
+    assert parse_magnitude_token("2 nghìn tỷ") == 2e12
+    assert parse_magnitude_token("94 triệuUSD") == 94e6
+    assert parse_magnitude_token("12,61%") == 12.61
+    assert parse_magnitude_token("12.61%") == 12.61     # fix 1: cùng giá trị dù khác dấu thập phân
+    assert parse_magnitude_token("") is None
+
+
+def test_has_approx_word_detects_common_hedge_words():
+    from twmkt.agents._numeric import has_approx_word
+
+    assert has_approx_word("bán ròng gần 600 tỷ đồng") is True
+    assert has_approx_word("khoảng 40% nhu cầu") is True
+    assert has_approx_word("đúng 585 tỷ đồng") is False
+    assert has_approx_word("") is False
+
+
+def test_facts_from_llm_output_computes_canonical_value_and_approx_flag():
+    """Mục C: Brief (AI) trả thêm raw/approx; CODE (KHÔNG phải AI) tính
+    canonical_value từ value+unit đã verify."""
+    from twmkt.agents.brief import facts_from_llm_output
+    import json as _json
+
+    evidence = "Khối ngoại bán ròng toàn thị trường 585 tỷ đồng trong phiên hôm nay."
+    raw = _json.dumps({"facts": [
+        {"value": "585", "label": "Khối ngoại bán ròng toàn thị trường", "unit": "tỷ đồng",
+         "kind": "money", "raw": "585 tỷ đồng", "approx": False},
+    ]}, ensure_ascii=False)
+    facts = facts_from_llm_output(raw, evidence)
+    assert len(facts) == 1
+    f = facts[0]
+    assert f.raw == "585 tỷ đồng"
+    assert f.canonical_value == 585e9
+    assert f.approx is False
+
+
+def test_facts_from_llm_output_drops_fact_when_raw_not_substring_of_evidence():
+    """(test 4, Mục C) raw KHÔNG phải substring THẬT của evidence -> LOẠI fact
+    NGAY, dù value/unit riêng lẻ có verify được (chống AI paraphrase/bịa cụm)."""
+    from twmkt.agents.brief import facts_from_llm_output
+    import json as _json
+
+    evidence = "Khối ngoại bán ròng toàn thị trường 585 tỷ đồng trong phiên hôm nay."
+    raw = _json.dumps({"facts": [
+        {"value": "585", "label": "Khối ngoại bán ròng", "unit": "tỷ đồng",
+         "raw": "khoảng 585 tỷ đồng chẵn"},   # cụm bịa, KHÔNG xuất hiện y hệt trong evidence
+    ]}, ensure_ascii=False)
+    assert facts_from_llm_output(raw, evidence) == []
+
+
+def test_facts_from_llm_output_approx_flag_true_when_raw_has_hedge_word_even_if_ai_forgets():
+    """approx = cờ AI trả HOẶC code tự dò trong raw (an toàn kép, không tin mù AI)."""
+    from twmkt.agents.brief import facts_from_llm_output
+    import json as _json
+
+    evidence = "Nhu cầu điện tại Havana chỉ được đáp ứng khoảng 1% trong ngày sự cố."
+    raw = _json.dumps({"facts": [
+        {"value": "1", "label": "Phần trăm nhu cầu điện đáp ứng tại Havana", "unit": "%",
+         "raw": "khoảng 1%", "approx": False},   # AI QUÊN đánh dấu approx=True
+    ]}, ensure_ascii=False)
+    facts = facts_from_llm_output(raw, evidence)
+    assert len(facts) == 1 and facts[0].approx is True   # code tự dò "khoảng" -> ép True
+
+
+def test_fact_new_fields_default_backward_compatible():
+    from twmkt.models import Fact
+
+    f = Fact(value="1%", label="x")
+    assert f.raw == "" and f.canonical_value is None and f.approx is False
+
+
+# --- Phase 4.8 Mục C: guardrail canonical (agents/production.py) -----------
+def _fact(canonical, approx=False):
+    from twmkt.models import Fact
+    return Fact(value="x", label="y", canonical_value=canonical, approx=approx)
+
+
+def test_unsupported_numbers_accepts_approx_rounding_within_tolerance_when_body_hedges():
+    """(test 1, Mục C) 'gần 600 tỷ' trong bài, evidence chỉ có '585 tỷ' -> fact
+    canonical=585e9 + số trong bài đi kèm từ xấp xỉ ('gần') -> is_clean (KHÔNG
+    chặn oan, đúng bug false-positive Phase 4.7 'khối ngoại')."""
+    from twmkt.agents.production import unsupported_numbers
+
+    body = "Khối ngoại bán ròng gần 600 tỷ đồng trong phiên hôm nay."
+    evidence = "Khối ngoại bán ròng 585 tỷ đồng trong phiên hôm nay."
+    facts = [_fact(585e9)]
+    assert unsupported_numbers(body, evidence, facts) == []
+
+
+def test_unsupported_numbers_still_flags_exact_decimal_mismatch_without_hedge_word():
+    """(test 5, Mục C) '855 tỷ' khi evidence/canonical chỉ có 585 tỷ (lệch
+    ~46%, KHÔNG có từ xấp xỉ) -> vẫn bị chặn, KHÔNG nhầm là làm tròn hợp lý."""
+    from twmkt.agents.production import unsupported_numbers
+
+    body = "Khối ngoại bán ròng 855 tỷ đồng trong phiên hôm nay."
+    evidence = "Khối ngoại bán ròng 585 tỷ đồng trong phiên hôm nay."
+    facts = [_fact(585e9)]
+    bad = unsupported_numbers(body, evidence, facts)
+    assert any("855" in b for b in bad)
+
+
+def test_unsupported_numbers_flags_number_with_no_matching_canonical_fact():
+    """(test 3, Mục C) '999 tỷ' bịa hoàn toàn, không khớp evidence lẫn canonical
+    nào trong facts[] -> vẫn bị chặn (guardrail chặn số bịa tuyệt đối)."""
+    from twmkt.agents.production import unsupported_numbers
+
+    body = "Lợi nhuận tăng vọt lên 999 tỷ đồng."
+    evidence = "Khối ngoại bán ròng 585 tỷ đồng trong phiên hôm nay."
+    facts = [_fact(585e9)]
+    bad = unsupported_numbers(body, evidence, facts)
+    assert any("999" in b for b in bad)
+
+
+def test_unsupported_numbers_decimal_separator_regression_still_clean_with_facts_param():
+    """(test 2, Mục C) Không regress fix 1: '12,61%' viết trong bài, evidence
+    '12.61%' -> vẫn is_clean dù giờ có truyền thêm `facts` (tham số optional)."""
+    from twmkt.agents.production import unsupported_numbers
+
+    body = "Tỷ suất lợi nhuận đạt 12,61% trong quý này."
+    evidence = "Tỷ suất lợi nhuận đạt 12.61% trong quý này (dữ liệu bảng HOSE)."
+    assert unsupported_numbers(body, evidence, facts=[]) == []
+    assert unsupported_numbers(body, evidence) == []   # facts mặc định None -> vẫn hoạt động như cũ
+
+
+def test_unsupported_numbers_exact_tolerance_zero_rejects_rounding_without_hedge_word():
+    """Số trong bài KHÔNG đi kèm từ xấp xỉ -> dung sai mặc định = 0 (khớp
+    CHÍNH XÁC), dù lệch nhỏ (600 vs 585, ~2.6%) vẫn bị chặn — 5% CHỈ áp dụng
+    khi có từ xấp xỉ ngay trước số (khác test 1 ở trên)."""
+    from twmkt.agents.production import unsupported_numbers
+
+    body = "Khối ngoại bán ròng 600 tỷ đồng trong phiên hôm nay."   # KHÔNG có "gần"/"khoảng"
+    evidence = "Khối ngoại bán ròng 585 tỷ đồng trong phiên hôm nay."
+    facts = [_fact(585e9)]
+    bad = unsupported_numbers(body, evidence, facts)
+    assert any("600" in b for b in bad)
+
+
+def test_apply_guardrails_threads_facts_and_tolerance_end_to_end():
+    from twmkt.agents.production import apply_guardrails
+    from twmkt.models import ContentDraft, ContentFormat
+
+    body = ("# Bài test\n\nKhối ngoại bán ròng gần 600 tỷ đồng.\n\n"
+            "_Nội dung chỉ mang tính thông tin, không phải khuyến nghị đầu tư._")
+    draft = ContentDraft(fmt=ContentFormat.ARTICLE, title="t", body=body)
+    evidence = "Khối ngoại bán ròng 585 tỷ đồng trong phiên hôm nay."
+    draft = apply_guardrails(draft, evidence, "", [_fact(585e9)])
+    assert draft.is_clean, draft.compliance_issues
 
 
 # --- Phase 3: StructureRouter (agents/structure_router.py) ------------------
@@ -2318,12 +2521,13 @@ def test_route_from_llm_output_valid_schema_parses_correctly():
         "content_type": "article", "structure": "S3", "hook": "H1",
         "secondary_structure": None,
         "rationale": "Nhiều dữ kiện rời dồn về 1 xu hướng chung ở cuối bài.",
-        "signals": {"has_genuine_paradox": False, "driver_count": 2, "has_central_thesis": False},
+        "signals": {"has_genuine_paradox": False, "drivers": ["A", "B"], "has_central_thesis": False},
     }, ensure_ascii=False)
     d = route_from_llm_output(raw)
     assert d.content_type == "article" and d.structure == "S3" and d.hook == "H1"
     assert d.secondary_structure is None and d.fallback is False
-    assert d.signals == {"has_genuine_paradox": False, "driver_count": 2, "has_central_thesis": False}
+    assert d.signals == {"has_genuine_paradox": False, "residual_tension": None,
+                         "drivers": ["A", "B"], "driver_count": 2, "has_central_thesis": False}
     assert "xu hướng" in d.rationale
 
 
@@ -2344,7 +2548,7 @@ def test_route_from_llm_output_rejects_s5_without_genuine_paradox():
     raw = _json.dumps({
         "content_type": "article", "structure": "S5", "hook": "H1",
         "secondary_structure": None, "rationale": "Có vẻ nghịch lý.",
-        "signals": {"has_genuine_paradox": False, "driver_count": 0, "has_central_thesis": True},
+        "signals": {"has_genuine_paradox": False, "drivers": [], "has_central_thesis": True},
     }, ensure_ascii=False)
     d = route_from_llm_output(raw)
     assert d.structure != "S5"
@@ -2352,47 +2556,226 @@ def test_route_from_llm_output_rejects_s5_without_genuine_paradox():
 
 
 def test_route_from_llm_output_allows_s5_when_genuine_paradox_true():
+    """S5 hợp lệ khi has_genuine_paradox=true KÈM residual_tension (Phase 3.6 —
+    thiếu residual_tension thì claim paradox không đứng vững, xem test khác)."""
     from twmkt.agents.structure_router import route_from_llm_output
     import json as _json
 
     raw = _json.dumps({
         "content_type": "article", "structure": "S5", "hook": "H1",
         "secondary_structure": None, "rationale": "2 tín hiệu thật sự mâu thuẫn.",
-        "signals": {"has_genuine_paradox": True, "driver_count": 0, "has_central_thesis": True},
+        "signals": {"has_genuine_paradox": True,
+                   "residual_tension": "Vẫn không rõ ai sẽ đỡ khi rủi ro thành hiện thực.",
+                   "drivers": [], "has_central_thesis": True},
     }, ensure_ascii=False)
     d = route_from_llm_output(raw)
     assert d.structure == "S5" and d.fallback is False
+    assert d.signals["residual_tension"] == "Vẫn không rõ ai sẽ đỡ khi rủi ro thành hiện thực."
 
 
-def test_route_from_llm_output_driver_count_ge3_reflected_in_secondary_s4():
+def test_route_from_llm_output_paradox_claim_without_residual_tension_forced_false():
+    """Phase 3.6: has_genuine_paradox=true mà residual_tension=null -> claim
+    KHÔNG hợp lệ, CODE tự ép về false (kể cả khi structure không phải S5, vẫn
+    phải ép — bất hợp lệ là bất hợp lệ, không phụ thuộc structure nào)."""
     from twmkt.agents.structure_router import route_from_llm_output
     import json as _json
 
     raw = _json.dumps({
         "content_type": "article", "structure": "S1", "hook": "H3",
-        "secondary_structure": "S4",
+        "secondary_structure": None, "rationale": "Luận điểm gọn, không còn vướng gì.",
+        "signals": {"has_genuine_paradox": True, "residual_tension": None,
+                   "drivers": [], "has_central_thesis": True},
+    }, ensure_ascii=False)
+    d = route_from_llm_output(raw)
+    assert d.signals["has_genuine_paradox"] is False
+    assert d.signals["residual_tension"] is None
+    assert d.fallback is False   # S1 không cần paradox -> không cần fallback cả quyết định
+
+
+def test_route_from_llm_output_s5_with_paradox_but_no_residual_tension_falls_back():
+    """Phase 3.6, mục (i): input 'mâu thuẫn đã tan hết' (LLM claim S5+paradox
+    nhưng residual_tension=null) -> KHÔNG được ra S5 — code ép has_genuine_
+    paradox=false TRƯỚC, rồi ràng buộc S5-cần-paradox-thật fallback như thường."""
+    from twmkt.agents.structure_router import route_from_llm_output
+    import json as _json
+
+    raw = _json.dumps({
+        "content_type": "article", "structure": "S5", "hook": "H1",
+        "secondary_structure": None,
+        "rationale": "Nghe có vẻ mâu thuẫn nhưng giải thích xong thì gọn, không còn gì vướng.",
+        "signals": {"has_genuine_paradox": True, "residual_tension": None,
+                   "drivers": [], "has_central_thesis": True},
+    }, ensure_ascii=False)
+    d = route_from_llm_output(raw)
+    assert d.structure != "S5"
+    assert d.structure == "S1" and d.hook == "H3" and d.fallback is True
+
+
+def test_route_from_llm_output_forces_s5_when_paradox_effective_even_if_llm_chose_other_structure():
+    """Phase 4.8-B2: reproduce đúng ca "tự mâu thuẫn" phát hiện qua probe Ví dụ
+    A ở báo cáo Phase 4.8 — LLM báo has_genuine_paradox=true KÈM residual_tension
+    hợp lệ (paradox EFFECTIVE=True) nhưng lại tự chọn structure="S1" (rationale
+    "khép sạch"). CODE PHẢI ép structure=S5, GHI ĐÈ lựa chọn tự mâu thuẫn của
+    LLM (chiều NGƯỢC LẠI của luật S5 cũ, trước 4.8-B2 còn thiếu)."""
+    from twmkt.agents.structure_router import route_from_llm_output
+    import json as _json
+
+    raw = _json.dumps({
+        "content_type": "article", "structure": "S1", "hook": "H2",
+        "secondary_structure": None,
+        "rationale": "Logic khép lại sạch thành 1 thuyết minh nhân quả, không phải nghịch lý mở.",
+        "signals": {"has_genuine_paradox": True,
+                   "residual_tension": "Rủi ro hệ thống dồn về vài người vay lớn nhất, ai đỡ nếu vỡ.",
+                   "drivers": [], "has_central_thesis": True},
+    }, ensure_ascii=False)
+    d = route_from_llm_output(raw)
+    assert d.structure == "S5"                 # ÉP, KHÔNG rơi S1 như LLM tự chọn
+    assert d.fallback is False                  # đây là ép-thành-công, không phải fallback lỗi
+    assert d.signals["has_genuine_paradox"] is True
+    assert d.signals["residual_tension"] is not None
+    assert d.hook == "H2"                        # hook giữ nguyên, không bị ép theo structure
+
+
+def test_route_from_llm_output_paradox_normalized_false_does_not_force_s5():
+    """Đối chứng: paradox=true nhưng residual_tension=null -> chuẩn hoá EFFECTIVE
+    =false (RÀNG BUỘC #3 cũ) -> luật ép S5 mới (RÀNG BUỘC #4) KHÔNG kích hoạt,
+    structure giữ NGUYÊN lựa chọn gốc của LLM (S3, không bị kéo về S1 lẫn S5)."""
+    from twmkt.agents.structure_router import route_from_llm_output
+    import json as _json
+
+    raw = _json.dumps({
+        "content_type": "article", "structure": "S3", "hook": "H1",
+        "secondary_structure": None, "rationale": "Dữ kiện rời dồn về 1 xu hướng chung.",
+        "signals": {"has_genuine_paradox": True, "residual_tension": None,
+                   "drivers": [], "has_central_thesis": False},
+    }, ensure_ascii=False)
+    d = route_from_llm_output(raw)
+    assert d.signals["has_genuine_paradox"] is False   # ép chuẩn hoá về false (như trước 4.8-B2)
+    assert d.structure == "S3"                          # KHÔNG bị ép S5 (luật #4 không kích hoạt)
+    assert d.fallback is False
+
+
+def test_route_from_llm_output_no_paradox_keeps_llm_chosen_structure_regression():
+    """Regression: paradox=false (thật, không lai) -> S1-S4 do LLM chọn giữ
+    NGUYÊN, luật ép S5 mới không đụng vào các chủ đề khép-sạch bình thường."""
+    from twmkt.agents.structure_router import route_from_llm_output
+    import json as _json
+
+    raw = _json.dumps({
+        "content_type": "article", "structure": "S4", "hook": "H1",
+        "secondary_structure": None, "rationale": "Nhiều driver độc lập song hành.",
+        "signals": {"has_genuine_paradox": False,
+                   "drivers": ["A", "B", "C"], "has_central_thesis": False},
+    }, ensure_ascii=False)
+    d = route_from_llm_output(raw)
+    assert d.structure == "S4" and d.fallback is False
+
+
+def test_get_or_route_freezes_forced_s5_decision_no_second_llm_call():
+    """Tích hợp với Mục A (route-once): quyết định S5 bị-ép-đúng cũng được đóng
+    băng bình thường — gọi get_or_route() lần 2 (mô phỏng video/infographic
+    cùng chủ đề) đọc lại ĐÚNG S5 đã ép, KHÔNG gọi router lần 2."""
+    from twmkt.agents.route_once import RouterDecisionStore, get_or_route
+    from twmkt.agents.production import ProductionBrief
+    import json as _json, tempfile
+    from pathlib import Path
+
+    class _ContradictoryParadoxLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, system, prompt, *, model=None, fail_loud=False, temperature=None):
+            self.calls += 1
+            return _json.dumps({
+                "content_type": "article", "structure": "S1", "hook": "H2",
+                "secondary_structure": None,
+                "rationale": "Logic khép lại sạch.",
+                "signals": {"has_genuine_paradox": True,
+                           "residual_tension": "Ai đỡ nếu rủi ro thành hiện thực.",
+                           "drivers": [], "has_central_thesis": True},
+            }, ensure_ascii=False)
+
+    llm = _ContradictoryParadoxLLM()
+    store = RouterDecisionStore(Path(tempfile.mkdtemp()) / "router_decisions.json")
+    brief = ProductionBrief(title="Chủ đề nghịch lý thật")
+
+    d1 = get_or_route(llm, brief, store=store, key="k-forced-s5")
+    d2 = get_or_route(llm, brief, store=store, key="k-forced-s5")
+
+    assert llm.calls == 1                # route-once vẫn giữ, không gọi lần 2
+    assert d1.structure == d2.structure == "S5"
+
+
+def test_route_from_llm_output_drivers_list_of_4_forces_secondary_s4():
+    """Phase 3.5: drivers=[a,b,c,d] (4 tên) -> driver_count TÍNH BẰNG CODE =4 ->
+    code TỰ ÉP secondary_structure=S4, KỂ CẢ khi LLM không tự điền (None) —
+    không tin mù LLM tự nhớ set secondary_structure."""
+    from twmkt.agents.structure_router import route_from_llm_output
+    import json as _json
+
+    raw = _json.dumps({
+        "content_type": "article", "structure": "S1", "hook": "H3",
+        "secondary_structure": None,   # LLM KHÔNG tự điền -> code vẫn phải ép S4
         "rationale": "Luận điểm trung tâm rõ, kèm 1 đoạn liệt kê 4 driver độc lập.",
-        "signals": {"has_genuine_paradox": False, "driver_count": 4, "has_central_thesis": True},
+        "signals": {"has_genuine_paradox": False,
+                   "drivers": ["Hòa Phát", "Masan", "MB", "HDBank"],
+                   "has_central_thesis": True},
     }, ensure_ascii=False)
     d = route_from_llm_output(raw)
     assert d.structure == "S1" and d.secondary_structure == "S4"
-    assert d.signals["driver_count"] >= 3
+    assert d.signals["drivers"] == ["Hòa Phát", "Masan", "MB", "HDBank"]
+    assert d.signals["driver_count"] == 4
     assert d.fallback is False
+
+
+def test_route_from_llm_output_driver_count_never_diverges_from_drivers_list():
+    """driver_count PHẢI luôn = len(drivers) — field "driver_count" rời LLM lỡ
+    trả kèm (SAI, không khớp len(drivers)) bị BỎ QUA hoàn toàn, không tin mù."""
+    from twmkt.agents.structure_router import route_from_llm_output
+    import json as _json
+
+    raw = _json.dumps({
+        "content_type": "article", "structure": "S2", "hook": "H2",
+        "secondary_structure": None, "rationale": "...",
+        "signals": {"has_genuine_paradox": False, "drivers": ["A", "B"],
+                   "driver_count": 99,   # SAI, lệch len(drivers) -> phải bị bỏ qua
+                   "has_central_thesis": True},
+    }, ensure_ascii=False)
+    d = route_from_llm_output(raw)
+    assert d.signals["driver_count"] == 2          # = len(drivers), KHÔNG phải 99 (field lạ bị bỏ qua)
+    assert d.secondary_structure is None            # count=2 <3 -> KHÔNG ép S4
 
 
 def test_route_from_llm_output_invalid_secondary_dropped_not_fallback():
     """secondary_structure lạ -> bỏ giá trị đó (None), KHÔNG fallback cả quyết
-    định (field phụ, không đáng huỷ toàn bộ)."""
+    định (field phụ, không đáng huỷ toàn bộ). driver_count=1 (<3) -> KHÔNG ép S4."""
     from twmkt.agents.structure_router import route_from_llm_output
     import json as _json
 
     raw = _json.dumps({
         "content_type": "article", "structure": "S2", "hook": "H2",
         "secondary_structure": "S9-khong-ton-tai", "rationale": "...",
-        "signals": {"has_genuine_paradox": False, "driver_count": 1, "has_central_thesis": True},
+        "signals": {"has_genuine_paradox": False, "drivers": ["A"], "has_central_thesis": True},
     }, ensure_ascii=False)
     d = route_from_llm_output(raw)
     assert d.structure == "S2" and d.secondary_structure is None and d.fallback is False
+
+
+def test_route_from_llm_output_s4_rule_skipped_when_structure_already_s4():
+    """structure chính ĐÃ LÀ S4 -> luật ép secondary=S4 KHÔNG áp dụng (S4 đã là
+    khung chính, secondary_structure giữ nguyên giá trị LLM tự điền/None)."""
+    from twmkt.agents.structure_router import route_from_llm_output
+    import json as _json
+
+    raw = _json.dumps({
+        "content_type": "article", "structure": "S4", "hook": "H2",
+        "secondary_structure": None, "rationale": "Cả bài là song hành nhiều driver.",
+        "signals": {"has_genuine_paradox": False,
+                   "drivers": ["A", "B", "C", "D", "E"], "has_central_thesis": False},
+    }, ensure_ascii=False)
+    d = route_from_llm_output(raw)
+    assert d.structure == "S4" and d.secondary_structure is None
+    assert d.signals["driver_count"] == 5
 
 
 def test_run_route_with_mockllm_falls_back_gracefully():
@@ -2416,6 +2799,125 @@ def test_build_router_prompt_includes_facts_kind_and_classification():
     prompt = build_router_prompt(brief, classification={"hotness_pct": 87})
     assert "GDP 6T/2026" in prompt and "[percent]" in prompt
     assert "hotness_pct" in prompt and "87" in prompt
+
+
+# --- Phase 4.8 Mục A: route-once + đóng băng (agents/route_once.py) --------
+class _RouterJsonLLM:
+    """Fake LLM router trả JSON hợp lệ tất định — đếm số lần complete() được
+    gọi để chứng minh route-once KHÔNG gọi router lần 2 khi đã đóng băng."""
+
+    def __init__(self, structure: str = "S3", hook: str = "H1"):
+        self.calls = 0
+        self._structure = structure
+        self._hook = hook
+
+    def complete(self, system, prompt, *, model=None, fail_loud=False, temperature=None):
+        self.calls += 1
+        import json as _json
+        return _json.dumps({
+            "content_type": "article", "structure": self._structure, "hook": self._hook,
+            "secondary_structure": None, "rationale": "Test rationale nhất quán.",
+            "signals": {"has_genuine_paradox": False, "drivers": [], "has_central_thesis": True},
+        }, ensure_ascii=False)
+
+
+def _tmp_decisions_path():
+    import tempfile
+    from pathlib import Path
+    return Path(tempfile.mkdtemp()) / "router_decisions.json"
+
+
+def test_get_or_route_calls_router_exactly_once_then_freezes():
+    """(1) Cùng key gọi get_or_route() 2 LẦN -> run_route() CHỈ gọi LLM ĐÚNG 1
+    LẦN (lần 2 đọc từ store) -> cùng 1 quyết định (khác với 4.7: gọi router 2
+    lần trực tiếp ra 2 kết quả khác nhau do temperature no-op)."""
+    from twmkt.agents.route_once import RouterDecisionStore, get_or_route
+    from twmkt.agents.production import ProductionBrief
+
+    llm = _RouterJsonLLM(structure="S3", hook="H1")
+    store = RouterDecisionStore(_tmp_decisions_path())
+    brief = ProductionBrief(title="Chủ đề test route-once")
+
+    d1 = get_or_route(llm, brief, store=store, key="k1")
+    d2 = get_or_route(llm, brief, store=store, key="k1")
+
+    assert llm.calls == 1                       # KHÔNG gọi router lần 2
+    assert d1.structure == d2.structure == "S3"
+    assert d1.hook == d2.hook == "H1"
+    assert d1.rationale == d2.rationale
+    assert d1.signals == d2.signals
+
+
+def test_get_or_route_second_content_type_reuses_frozen_decision_no_llm_call():
+    """(2) video/infographic của CÙNG chủ đề (cùng key) đọc ĐÚNG RouterDecision
+    article đã route trước đó — LLM route lần 2 (mô phỏng gọi từ agent khác)
+    KHÔNG được đụng tới (PoisonLLM raise nếu bị gọi)."""
+    from twmkt.agents.route_once import RouterDecisionStore, get_or_route
+    from twmkt.agents.production import ProductionBrief
+
+    class PoisonLLM:
+        def complete(self, *a, **kw):
+            raise AssertionError("KHÔNG được gọi router lần 2 khi đã đóng băng (vi phạm route-once)")
+
+    store = RouterDecisionStore(_tmp_decisions_path())
+    brief = ProductionBrief(title="Chủ đề test route-once")
+
+    article_llm = _RouterJsonLLM(structure="S3", hook="H1")
+    d_article = get_or_route(article_llm, brief, store=store, key="cung-chu-de")
+    assert article_llm.calls == 1
+
+    d_video = get_or_route(PoisonLLM(), brief, store=store, key="cung-chu-de")
+    d_infographic = get_or_route(PoisonLLM(), brief, store=store, key="cung-chu-de")
+
+    assert d_video.structure == d_infographic.structure == d_article.structure == "S3"
+    assert d_video.hook == d_infographic.hook == d_article.hook
+
+
+def test_router_decision_store_persists_across_instances():
+    """(3) File JSON bền qua nhiều instance/tiến trình khác nhau (không chỉ
+    cache trong bộ nhớ 1 process) — RouterDecisionStore MỚI trỏ cùng path đọc
+    lại được quyết định instance TRƯỚC đã ghi."""
+    from twmkt.agents.route_once import RouterDecisionStore, get_or_route
+    from twmkt.agents.production import ProductionBrief
+
+    path = _tmp_decisions_path()
+    llm = _RouterJsonLLM(structure="S4", hook="H2")
+    brief = ProductionBrief(title="Chủ đề bền vững")
+    get_or_route(llm, brief, store=RouterDecisionStore(path), key="k-persist")
+
+    store2 = RouterDecisionStore(path)   # instance MỚI, cùng file
+    cached = store2.get("k-persist")
+    assert cached is not None and cached.structure == "S4" and cached.hook == "H2"
+
+
+def test_reroute_clears_frozen_decision_then_router_called_again():
+    """(4) Cửa RE-ROUTE thủ công: store.clear(key) xoá quyết định đóng băng ->
+    get_or_route() SAU ĐÓ gọi router lại (KHÔNG tự động, phải xoá tay trước)."""
+    from twmkt.agents.route_once import RouterDecisionStore, get_or_route
+    from twmkt.agents.production import ProductionBrief
+
+    store = RouterDecisionStore(_tmp_decisions_path())
+    brief = ProductionBrief(title="Chủ đề cần route lại")
+
+    llm1 = _RouterJsonLLM(structure="S1", hook="H3")
+    get_or_route(llm1, brief, store=store, key="k-reroute")
+    assert llm1.calls == 1
+
+    cleared = store.clear("k-reroute")
+    assert cleared is True
+    assert store.get("k-reroute") is None
+
+    llm2 = _RouterJsonLLM(structure="S4", hook="H1")
+    d2 = get_or_route(llm2, brief, store=store, key="k-reroute")
+    assert llm2.calls == 1              # router ĐƯỢC gọi lại sau khi xoá
+    assert d2.structure == "S4"
+
+
+def test_router_decision_store_clear_returns_false_when_key_missing():
+    from twmkt.agents.route_once import RouterDecisionStore
+
+    store = RouterDecisionStore(_tmp_decisions_path())
+    assert store.clear("khong-ton-tai") is False
 
 
 # --- Render Infographic (src/twmkt/render, $0 tất định) --------------------
@@ -2481,85 +2983,341 @@ def _voice_settings(**overrides):
         "voice": {
             "enabled": True,
             "examples_path": os.path.join(REPO_ROOT, "docs", "voice_examples.md"),
-            "format_example": {"analysis": "A", "facebook": "C", "infographic": "C", "video": "C"},
         }
     }
     data["voice"].update(overrides)
     return Settings(data)
 
 
-def test_load_voice_lock_always_includes_3_rule_sections():
-    """load_voice_lock: LUÔN có mặt §1 (Luật giọng) + §2 (Chiêu chữ ký) +
-    §3 (Nên/Tránh), bất kể format nào."""
-    from twmkt.agents.voice import load_voice_lock
-
-    out = load_voice_lock("analysis", settings=_voice_settings())
-    assert "## 1. Luật giọng" in out
-    assert "## 2. Sáu chiêu chữ ký" in out
-    assert "## 3. Nên / Tránh" in out
-
-
-def test_load_voice_lock_picks_exactly_one_example_per_format():
-    """load_voice_lock: CHỌN đúng 1 ví dụ theo voice.format_example[fmt] — không
-    nhồi cả 3 ví dụ (tiết kiệm context)."""
-    from twmkt.agents.voice import load_voice_lock
-
-    analysis_out = load_voice_lock("analysis", settings=_voice_settings())
-    assert "### Ví dụ A" in analysis_out
-    assert "### Ví dụ B" not in analysis_out
-    assert "### Ví dụ C" not in analysis_out
-
-    video_out = load_voice_lock("video", settings=_voice_settings())
-    assert "### Ví dụ C" in video_out
-    assert "### Ví dụ A" not in video_out
-    assert "### Ví dụ B" not in video_out
+class _FakeDecision:
+    """Duck-type RouterDecision (agents/structure_router.py) — assemble_voice()
+    chỉ cần .structure/.secondary_structure/.hook/.content_type, KHÔNG import
+    RouterDecision thật (tránh vòng import, xem agents/voice.py docstring)."""
+    def __init__(self, structure="S1", secondary_structure=None, hook="H3",
+                content_type="article"):
+        self.structure = structure
+        self.secondary_structure = secondary_structure
+        self.hook = hook
+        self.content_type = content_type
 
 
-def test_load_voice_lock_disabled_returns_empty():
-    """voice.enabled=false -> "" (rỗng), không đọc file."""
-    from twmkt.agents.voice import load_voice_lock
+def test_assemble_voice_always_includes_universal_sections():
+    """assemble_voice: LUÔN có mặt §1 (Luật giọng) + Menu hook/Luật chuyển ý (§2b)
+    + Luật kết chung (§2c) + Nên/Tránh (§3), bất kể decision nào."""
+    from twmkt.agents.voice import assemble_voice
 
-    out = load_voice_lock("analysis", settings=_voice_settings(enabled=False))
+    out = assemble_voice(_FakeDecision(), settings=_voice_settings())
+    assert "Luật giọng (bất biến)" in out
+    assert "Luật chuyển ý mượt" in out
+    assert "Luật kết chung" in out
+    assert "Nên / Tránh" in out
+
+
+def test_assemble_voice_selects_primary_and_secondary_structure_blocks():
+    """Đúng ca SSI (S1 + khung phụ S4): assemble_voice PHẢI có khối S1 VÀ khối
+    S4, nhưng KHÔNG có khối S2/S3/S5 (chỉ nối đúng 2 khung router chọn, không
+    nhồi cả 5)."""
+    from twmkt.agents.voice import assemble_voice
+
+    out = assemble_voice(_FakeDecision(structure="S1", secondary_structure="S4"),
+                         settings=_voice_settings())
+    assert "S1 · Tổng" in out
+    assert "S4 · Song hành" in out
+    assert "S2 · Diễn dịch" not in out
+    assert "S3 · Quy nạp" not in out
+    assert "S5 · Phản đề" not in out
+
+
+def test_assemble_voice_no_secondary_only_includes_primary_block():
+    from twmkt.agents.voice import assemble_voice
+
+    out = assemble_voice(_FakeDecision(structure="S5", secondary_structure=None),
+                         settings=_voice_settings())
+    assert "S5 · Phản đề" in out
+    assert "S1 · Tổng" not in out and "S4 · Song hành" not in out
+
+
+def test_assemble_voice_picks_anchor_by_structure_map():
+    """Anchor mặc định theo khung CHÍNH (§0 voice_examples.md): S1->D, S5->A,
+    S2->B — CHỈ đúng 1 ví dụ, không lẫn ví dụ khác."""
+    from twmkt.agents.voice import assemble_voice
+
+    out_s1 = assemble_voice(_FakeDecision(structure="S1"), settings=_voice_settings())
+    assert "### Ví dụ D" in out_s1 and "### Ví dụ A" not in out_s1 and "### Ví dụ B" not in out_s1
+
+    out_s5 = assemble_voice(_FakeDecision(structure="S5"), settings=_voice_settings())
+    assert "### Ví dụ A" in out_s5 and "### Ví dụ D" not in out_s5
+
+    out_s2 = assemble_voice(_FakeDecision(structure="S2"), settings=_voice_settings())
+    assert "### Ví dụ B" in out_s2 and "### Ví dụ D" not in out_s2
+
+
+def test_assemble_voice_filters_hook_menu_to_chosen_pattern():
+    """§2b Menu hook PHẢI thu hẹp còn ĐÚNG 1 bullet khớp decision.hook — 2 bullet
+    còn lại KHÔNG xuất hiện, nhưng "Luật hook"/"Luật chuyển ý mượt" vẫn giữ nguyên."""
+    from twmkt.agents.voice import assemble_voice
+
+    out = assemble_voice(_FakeDecision(hook="H1"), settings=_voice_settings())
+    assert "H1 · Ngã ba" in out
+    assert "H2 · Chi tiết bị bỏ qua" not in out
+    assert "H3 · Sự thật + câu hỏi trực diện" not in out
+    assert "Luật hook:" in out
+    assert "Luật chuyển ý mượt" in out
+
+
+def test_assemble_voice_disabled_returns_empty():
+    from twmkt.agents.voice import assemble_voice
+
+    out = assemble_voice(_FakeDecision(), settings=_voice_settings(enabled=False))
     assert out == ""
 
-    # thiếu hẳn key voice -> mặc định enabled=false -> vẫn "" (không crash).
     from twmkt.config import Settings
-    out2 = load_voice_lock("analysis", settings=Settings({}))
+    out2 = assemble_voice(_FakeDecision(), settings=Settings({}))   # thiếu key -> mặc định false
     assert out2 == ""
 
 
-def test_load_voice_lock_missing_file_degrades_to_empty_no_crash():
-    """File examples_path KHÔNG tồn tại -> cảnh báo + "" (LÙI MƯỢT, không raise)."""
-    from twmkt.agents.voice import load_voice_lock
+def test_assemble_voice_missing_file_degrades_to_empty_no_crash():
+    from twmkt.agents.voice import assemble_voice
 
-    out = load_voice_lock("analysis", settings=_voice_settings(
-        examples_path="khong/ton/tai.md"))
+    out = assemble_voice(_FakeDecision(), settings=_voice_settings(examples_path="khong/ton/tai.md"))
     assert out == ""
 
 
-def test_load_voice_lock_unknown_format_falls_back_to_whole_file():
-    """format không có trong voice.format_example -> không tìm được ví dụ khớp ->
-    parse coi như hỏng -> inject NGUYÊN file (degrade an toàn, không rỗng/không crash)."""
-    from twmkt.agents.voice import load_voice_lock
+def test_assemble_voice_none_decision_uses_safe_default_s1_h3_d():
+    """decision=None (chưa chạy router, vd đường LEGACY --draft) -> fallback AN
+    TOÀN cùng nghĩa StructureRouter._fallback(): S1 + H3 + Ví dụ D."""
+    from twmkt.agents.voice import assemble_voice
 
-    out = load_voice_lock("khong-ton-tai-format", settings=_voice_settings())
-    assert out != ""
-    assert "## 1. Luật giọng" in out and "### Ví dụ A" in out and "### Ví dụ C" in out
-
-
-def test_load_voice_lock_v2_includes_2b_and_example_d():
-    """v2 (docs/voice_examples.md): loader PHẢI nhận đúng header "## 2b." (không
-    phải số thuần) như 1 mục riêng, và chọn đúng Ví dụ D khi format_example
-    trỏ tới D — không lẫn A/B/C."""
-    from twmkt.agents.voice import load_voice_lock
-
-    out = load_voice_lock("analysis", settings=_voice_settings(
-        format_example={"analysis": "D", "facebook": "C", "infographic": "C", "video": "C"}))
-    assert "## 2b. Menu hook" in out
+    out = assemble_voice(None, settings=_voice_settings())
+    assert "S1 · Tổng" in out
+    assert "H3 · Sự thật + câu hỏi trực diện" in out
     assert "### Ví dụ D" in out
-    assert "### Ví dụ A" not in out
-    assert "### Ví dụ B" not in out
-    assert "### Ví dụ C" not in out
+
+
+def test_assemble_voice_unknown_structure_falls_back_to_whole_section2():
+    """structure lạ (không tồn tại trong menu §2) -> KHÔNG tìm được khối -> dùng
+    NGUYÊN §2 (degrade an toàn, không rỗng/không crash)."""
+    from twmkt.agents.voice import assemble_voice
+
+    out = assemble_voice(_FakeDecision(structure="S9"), settings=_voice_settings())
+    assert out != ""
+    assert "S1 · Tổng" in out and "S5 · Phản đề" in out   # NGUYÊN §2 -> có đủ cả 5 khung
+
+
+# --- Phase 4: Writer (agents/writer.py) --------------------------------------
+def test_build_writer_system_includes_persona_and_voice():
+    from twmkt.agents.writer import build_writer_system
+    from twmkt.agents.production import AnalysisWriterAgent
+
+    system = build_writer_system(_FakeDecision(structure="S1", secondary_structure="S4", hook="H1"))
+    assert AnalysisWriterAgent.system in system      # persona/schema JSON dùng CHUNG
+    assert "VOICE-LOCK" in system
+    assert "S1 · Tổng" in system and "S4 · Song hành" in system
+    assert "H1 · Ngã ba" in system
+
+
+def test_run_writer_parses_llm_json_and_renders_body():
+    """run_writer: LLM trả JSON đúng schema -> body dựng từ sections thật (dùng
+    LẠI analysis_fields_from_data/render_analysis — CHƯA qua guardrail, caller
+    tự gọi apply_guardrails() sau, xem docstring module)."""
+    from twmkt.agents.writer import run_writer
+    from twmkt.agents.production import ProductionBrief
+    import json as _json
+
+    class JsonLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            return _json.dumps({
+                "title": "SSI 8 cổ phiếu — bài viết thật",
+                "sapo": "Tóm tắt.",
+                "sections": [{"heading": "Bối cảnh", "content": "GDP tăng 8,18%."}],
+                "disclaimer": "Nội dung chỉ mang tính thông tin, không phải khuyến nghị "
+                              "đầu tư. Nhà đầu tư tự chịu trách nhiệm với quyết định của mình.",
+                "sources": [],
+            }, ensure_ascii=False)
+
+    brief = ProductionBrief(title="SSI 8 cổ phiếu", hook="SSI: 8 cổ phiếu", tickers=["SSI"],
+                            url="https://cafef.vn/ssi.chn", evidence="GDP tăng 8,18%.")
+    draft = run_writer(JsonLLM(), brief, _FakeDecision(structure="S1", secondary_structure="S4"))
+    assert draft.title == "SSI 8 cổ phiếu — bài viết thật"
+    assert "Bối cảnh" in draft.body and "GDP tăng 8,18%." in draft.body
+
+
+def test_run_writer_defaults_to_fail_loud_true():
+    """Writer là bước QUAN TRỌNG -> fail_loud=True MẶC ĐỊNH (khác brief/router) —
+    xác nhận complete() nhận đúng fail_loud=True khi KHÔNG truyền tham số."""
+    from twmkt.agents.writer import run_writer
+    from twmkt.agents.production import ProductionBrief
+
+    seen = {}
+
+    class SpyLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            seen["fail_loud"] = fail_loud
+            seen["model"] = model
+            return ""   # rỗng -> lùi mượt tất định ở tầng schema (không liên quan fail_loud ở đây)
+
+    brief = ProductionBrief(title="Bài test", evidence="Dữ kiện.")
+    run_writer(SpyLLM(), brief, model="sonnet")
+    assert seen["fail_loud"] is True
+    assert seen["model"] == "sonnet"
+
+
+# --- Phase 4.5: Writer retry (agents/writer.run_writer_with_retry) ----------
+def _clean_writer_json() -> str:
+    import json as _json
+    return _json.dumps({
+        "title": "Bài sạch", "sapo": "Tóm tắt.",
+        "sections": [{"heading": "Bối cảnh", "content": "Doanh thu tăng nhẹ."}],
+        "disclaimer": "Nội dung chỉ mang tính thông tin, không phải khuyến nghị đầu tư. "
+                      "Nhà đầu tư tự chịu trách nhiệm với quyết định của mình.",
+        "sources": [],
+    }, ensure_ascii=False)
+
+
+def _writer_retry_settings(**overrides):
+    from twmkt.config import Settings
+    data = {"writer": {"max_retries": 1, "retry_backoff_s": 3, "timeout_s": 120}}
+    data["writer"].update(overrides)
+    return Settings(data)
+
+
+class _FlakyLLM:
+    """Raise LLMCallError `fail_times` lần đầu, sau đó trả `then_json`."""
+    def __init__(self, fail_times: int, then_json: str):
+        from twmkt.agents.base import LLMCallError
+        self._LLMCallError = LLMCallError
+        self.fail_times = fail_times
+        self.then_json = then_json
+        self.calls = 0
+
+    def complete(self, system, prompt, *, model=None, fail_loud=False):
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise self._LLMCallError(f"lỗi giả lập lần {self.calls}")
+        return self.then_json
+
+
+def test_run_writer_with_retry_timeout_once_then_success_no_failed():
+    """(i) fake timeout 1 lần rồi thành công -> 1 retry, ra nội dung, KHÔNG FAILED."""
+    from twmkt.agents.writer import run_writer_with_retry, WriterOutcome
+    from twmkt.agents.production import ProductionBrief
+
+    llm = _FlakyLLM(fail_times=1, then_json=_clean_writer_json())
+    brief = ProductionBrief(title="Bài test", evidence="Doanh thu tăng nhẹ.")
+    r = run_writer_with_retry(llm, brief, settings=_writer_retry_settings(), sleep=lambda s: None)
+    assert r.outcome == WriterOutcome.DONE
+    assert r.attempts == 2          # lần 1 lỗi (không tính là attempt thành công), lần 2 mới ra bài
+    assert llm.calls == 2
+    assert r.draft is not None and r.draft.is_clean
+
+
+def test_run_writer_with_retry_exceeds_max_retries_marks_failed_and_rerunnable():
+    """(ii) timeout vượt max_retries -> FAILED (KHÔNG trả nội dung rỗng coi như
+    thật); gọi lại lần sau (cùng state/key) PHẢI tái chạy được (không bị skip
+    như DONE)."""
+    from twmkt.agents.writer import run_writer_with_retry, WriterOutcome
+    from twmkt.agents.production import ProductionBrief
+
+    llm = _FlakyLLM(fail_times=99, then_json=_clean_writer_json())   # luôn lỗi
+    brief = ProductionBrief(title="Bài test", evidence="Doanh thu tăng nhẹ.")
+    state: dict[str, str] = {}
+    r1 = run_writer_with_retry(llm, brief, settings=_writer_retry_settings(),
+                               state=state, key="k1", sleep=lambda s: None)
+    assert r1.outcome == WriterOutcome.FAILED
+    assert r1.draft is None                      # KHÔNG có nội dung "" coi như thật
+    assert r1.attempts == 2                       # max_retries=1 -> tối đa 2 lượt gọi
+    assert state["k1"] == "FAILED"
+    assert llm.calls == 2
+
+    # Tái chạy: FAILED KHÔNG bị skip (khác DONE) -> llm.complete() được gọi lại.
+    r2 = run_writer_with_retry(llm, brief, settings=_writer_retry_settings(),
+                               state=state, key="k1", sleep=lambda s: None)
+    assert llm.calls == 4                          # 2 lượt gọi thêm ở lần chạy lại
+    assert r2.outcome == WriterOutcome.FAILED       # llm vẫn luôn lỗi trong test này
+
+
+def test_run_writer_with_retry_guardrail_reject_no_retry_needs_human():
+    """(iii) guardrail reject (số bịa, không có trong evidence) -> NEEDS_HUMAN
+    NGAY, KHÔNG retry (llm.complete() chỉ gọi ĐÚNG 1 lần)."""
+    from twmkt.agents.writer import run_writer_with_retry, WriterOutcome
+    from twmkt.agents.production import ProductionBrief
+    import json as _json
+
+    class RejectLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            self.calls += 1
+            return _json.dumps({
+                "title": "Bài vi phạm", "sapo": "Tóm tắt.",
+                "sections": [{"heading": "Bối cảnh", "content": "Lợi nhuận tăng 999% so với cùng kỳ."}],
+                "disclaimer": "Nội dung chỉ mang tính thông tin, không phải khuyến nghị đầu tư. "
+                              "Nhà đầu tư tự chịu trách nhiệm với quyết định của mình.",
+                "sources": [],
+            }, ensure_ascii=False)
+
+    llm = RejectLLM()
+    brief = ProductionBrief(title="Bài test", evidence="Doanh thu tăng nhẹ.")   # KHÔNG có "999%"
+    r = run_writer_with_retry(llm, brief, settings=_writer_retry_settings(), sleep=lambda s: None)
+    assert r.outcome == WriterOutcome.NEEDS_HUMAN
+    assert llm.calls == 1              # KHÔNG retry cho lỗi vĩnh viễn
+    assert "999%" in r.reason
+
+
+def test_run_writer_with_retry_done_is_idempotent_skips_rerun():
+    """(iv) idempotent: state[key]=="DONE" -> SKIP hoàn toàn, KHÔNG gọi llm lần
+    nào (dùng LLM sẽ raise nếu bị gọi để chứng minh không hề đụng tới)."""
+    from twmkt.agents.writer import run_writer_with_retry, WriterOutcome
+    from twmkt.agents.production import ProductionBrief
+
+    class PoisonLLM:
+        def complete(self, *a, **kw):
+            raise AssertionError("KHÔNG được gọi LLM khi state đã DONE (vi phạm idempotent)")
+
+    brief = ProductionBrief(title="Bài test", evidence="Doanh thu tăng nhẹ.")
+    state = {"k1": "DONE"}
+    r = run_writer_with_retry(PoisonLLM(), brief, settings=_writer_retry_settings(),
+                              state=state, key="k1", sleep=lambda s: None)
+    assert r.outcome == WriterOutcome.DONE
+    assert r.attempts == 0
+    assert state["k1"] == "DONE"
+
+
+def test_run_writer_with_retry_calls_notify_hook_at_retry_failed_needs_human():
+    """notify(event, info) PHẢI được gọi tại đúng 3 điểm: retry, failed, needs_human."""
+    from twmkt.agents.writer import run_writer_with_retry
+    from twmkt.agents.production import ProductionBrief
+    import json as _json
+
+    events: list[str] = []
+
+    def notify(event, info):
+        events.append(event)
+
+    # retry -> failed (luôn lỗi)
+    llm_fail = _FlakyLLM(fail_times=99, then_json=_clean_writer_json())
+    brief = ProductionBrief(title="Bài test", evidence="Doanh thu tăng nhẹ.")
+    run_writer_with_retry(llm_fail, brief, settings=_writer_retry_settings(),
+                          notify=notify, sleep=lambda s: None)
+    assert events.count("retry") == 2 and events.count("failed") == 1
+
+    # needs_human (guardrail reject)
+    events.clear()
+
+    class RejectLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            return _json.dumps({
+                "title": "X", "sapo": "Y",
+                "sections": [{"heading": "Z", "content": "Lãi tăng 999%."}],
+                "disclaimer": "Nội dung chỉ mang tính thông tin, không phải khuyến nghị đầu tư. "
+                              "Nhà đầu tư tự chịu trách nhiệm với quyết định của mình.",
+                "sources": [],
+            }, ensure_ascii=False)
+
+    run_writer_with_retry(RejectLLM(), brief, settings=_writer_retry_settings(),
+                          notify=notify, sleep=lambda s: None)
+    assert events == ["needs_human"]
 
 
 def test_prompts_v1_files_match_code_defaults_no_drift():
@@ -2687,6 +3445,160 @@ def test_build_content_llm_sonnet_router():
         offline=False)
     assert isinstance(real.base, AnthropicLLM) and real.base.model == "claude-sonnet-4-6"
     assert real.default_tier is Tier.SMART
+
+
+def test_build_writer_llm_reads_writer_timeout_s_not_shared_claude_code_timeout():
+    """factory.build_writer_llm: mode=claude_code -> ClaudeCodeLLM.timeout_s lấy
+    từ writer.timeout_s (KHÔNG dùng chung llm.claude_code.timeout_s)."""
+    from twmkt.agents.base import ClaudeCodeLLM, MockLLM as _Mock
+
+    llm = factory.build_writer_llm(Settings({
+        "llm": {"mode": "claude_code", "claude_code": {"timeout_s": 999}},
+        "writer": {"timeout_s": 45},
+    }))
+    assert isinstance(llm, ClaudeCodeLLM) and llm.timeout_s == 45.0
+
+    mock_llm = factory.build_writer_llm(Settings({"llm": {"mode": "mock"}}))
+    assert isinstance(mock_llm, _Mock)
+
+
+# --- PHASE TELE: Telegram Notifier (src/twmkt/utils/telegram_notifier.py) ---
+class _FakeTgResp:
+    def __init__(self, status_code, json_data, text=""):
+        self.status_code = status_code
+        self._json = json_data
+        self.text = text
+
+    def json(self):
+        return self._json
+
+
+def test_format_message_escapes_html_special_chars():
+    """HTML escape đúng khi ctx chứa <, >, & — tránh vỡ parse_mode=HTML."""
+    from twmkt.utils.telegram_notifier import format_message
+
+    msg = format_message("start", {"topic": "A & B <script>alert('x')</script>"})
+    assert "&amp;" in msg
+    assert "&lt;script&gt;" in msg
+    assert "<script>" not in msg
+    assert "⏳" in msg   # emoji đúng event
+
+
+def test_format_message_maps_writer_retry_events_to_error_emoji():
+    """Phase 4.6+4.7: failed/needs_human (lỗi CUỐI, event thật run_writer_with_
+    retry bắn ra, Phase 4.5) PHẢI dùng emoji 🚨; retry (còn đang thử lại, độ khẩn
+    thấp hơn) dùng ⚠️ riêng — cả 3 trước đây rơi vào "ℹ️" mặc định."""
+    from twmkt.utils.telegram_notifier import format_message
+
+    for event in ("failed", "needs_human"):
+        msg = format_message(event, {"reason": "x"})
+        assert "🚨" in msg, f"event={event!r} thiếu emoji 🚨"
+        assert "ℹ️" not in msg
+
+    retry_msg = format_message("retry", {"reason": "x"})
+    assert "⚠️" in retry_msg and "🚨" not in retry_msg and "ℹ️" not in retry_msg
+
+
+def test_null_notifier_is_noop_returns_false():
+    from twmkt.utils.telegram_notifier import NullNotifier
+
+    assert NullNotifier().notify("start", topic="x") is False
+
+
+def test_telegram_notifier_non_blocking_on_network_error():
+    """Non-blocking: mock lỗi network -> notify trả False, KHÔNG raise."""
+    import httpx
+    from twmkt.utils.telegram_notifier import TelegramNotifier
+
+    original_post = httpx.post
+
+    def _boom(*a, **kw):
+        raise ConnectionError("mạng lỗi giả lập")
+
+    httpx.post = _boom
+    try:
+        n = TelegramNotifier(bot_token="x", chat_id="y")
+        ok = n.notify("error", topic="test lỗi mạng")
+        assert ok is False
+    finally:
+        httpx.post = original_post
+
+
+def test_telegram_notifier_non_blocking_on_http_error_status():
+    import httpx
+    from twmkt.utils.telegram_notifier import TelegramNotifier
+
+    original_post = httpx.post
+    httpx.post = lambda *a, **kw: _FakeTgResp(500, {}, text="Internal Server Error")
+    try:
+        n = TelegramNotifier(bot_token="x", chat_id="y")
+        assert n.notify("error", topic="x") is False
+    finally:
+        httpx.post = original_post
+
+
+def test_telegram_notifier_non_blocking_on_ok_false():
+    import httpx
+    from twmkt.utils.telegram_notifier import TelegramNotifier
+
+    original_post = httpx.post
+    httpx.post = lambda *a, **kw: _FakeTgResp(200, {"ok": False, "description": "chat not found"})
+    try:
+        n = TelegramNotifier(bot_token="x", chat_id="y")
+        assert n.notify("error", topic="x") is False
+    finally:
+        httpx.post = original_post
+
+
+def test_telegram_notifier_success_returns_true():
+    import httpx
+    from twmkt.utils.telegram_notifier import TelegramNotifier
+
+    original_post = httpx.post
+    seen = {}
+
+    def _fake_post(url, *, json=None, timeout=None):
+        seen["url"] = url
+        seen["json"] = json
+        seen["timeout"] = timeout
+        return _FakeTgResp(200, {"ok": True, "result": {}})
+
+    httpx.post = _fake_post
+    try:
+        n = TelegramNotifier(bot_token="123:abc", chat_id="999", timeout_s=7)
+        assert n.notify("gate2_done", written=3) is True
+        assert "123:abc" in seen["url"] and "sendMessage" in seen["url"]
+        assert seen["json"]["chat_id"] == "999" and seen["timeout"] == 7
+    finally:
+        httpx.post = original_post
+
+
+def test_make_notifier_selects_null_when_disabled():
+    from twmkt.utils.telegram_notifier import make_notifier, NullNotifier
+
+    s = Settings({"notifications": {"telegram": {"enabled": False}}})
+    assert isinstance(make_notifier(s), NullNotifier)
+
+
+def test_make_notifier_selects_null_when_env_unexpanded():
+    """ENV chưa set -> os.path.expandvars GIỮ NGUYÊN "${VAR}" (không trả rỗng)
+    -> make_notifier PHẢI nhận diện đây là "thiếu cấu hình" -> NullNotifier."""
+    from twmkt.utils.telegram_notifier import make_notifier, NullNotifier
+
+    s = Settings({"notifications": {"telegram": {
+        "enabled": True, "bot_token": "${TELEGRAM_BOT_TOKEN}", "chat_id": "${TELEGRAM_CHAT_ID}"}}})
+    assert isinstance(make_notifier(s), NullNotifier)
+
+
+def test_make_notifier_selects_telegram_when_configured():
+    from twmkt.utils.telegram_notifier import make_notifier, TelegramNotifier
+
+    s = Settings({"notifications": {"telegram": {
+        "enabled": True, "bot_token": "123:abc", "chat_id": "999",
+        "parse_mode": "HTML", "timeout_s": 7}}})
+    n = make_notifier(s)
+    assert isinstance(n, TelegramNotifier)
+    assert n.bot_token == "123:abc" and n.chat_id == "999" and n.timeout_s == 7.0
 
 
 # --- Banner "LLM active" (lùi mượt CÓ CẢNH BÁO — không im lặng) -------------
@@ -2862,12 +3774,7 @@ def test_power_on_acquire_lock_warns_but_allows_different_host():
 # mới) — ghi rõ lý do + phase sẽ fix, để suite chạy XANH sạch mà không che giấu
 # nợ kỹ thuật. Nếu ai lỡ fix xong mà quên bỏ khỏi danh sách này -> in XPASS (cảnh
 # báo, không fail) để dễ nhận ra và dọn lại.
-_XFAIL = {
-    "test_load_voice_lock_always_includes_3_rule_sections":
-        "Phase 4 (voice-lock động): agents/voice.py còn hardcode §1+§2+§2b+§3 "
-        "tĩnh; docs/voice_examples.md đã lên v3 (§2 = menu S1-S5, router chọn "
-        "động) nhưng loader chưa cập nhật theo -> tiêu đề §2 đổi, assert cũ lệch.",
-}
+_XFAIL: dict[str, str] = {}   # trống — Phase 4 đã fix xfail duy nhất còn lại (voice-lock động)
 
 
 def _run_all():

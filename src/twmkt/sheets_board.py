@@ -239,6 +239,20 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _now_ddmmyyyy() -> str:
+    """Ngày hiện tại dạng DD/MM/YYYY (KHÔNG giờ:phút:giây) — dùng cho cột
+    Timestamp CONTEXT/CONTENT (yêu cầu hiển thị gọn). Múi giờ Asia/Ho_Chi_Minh,
+    khớp storage.timezone (storage/output/<ngày> dùng CÙNG múi giờ này ở
+    produce_from_sheet._today()) — tránh lệch ngày so với UTC gần nửa đêm.
+    LOG.timestamp KHÔNG đổi, vẫn dùng _now_iso() đầy đủ giờ để audit."""
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh"))
+    except Exception:  # pragma: no cover - thiếu tzdata (hiếm) -> lùi UTC
+        now = datetime.now(timezone.utc)
+    return now.strftime("%d/%m/%Y")
+
+
 def _col_a1(n: int) -> str:
     """Số cột (1-based) -> chữ cái A1 (1->A, 15->O). Tránh phụ thuộc gspread ở lõi."""
     s = ""
@@ -399,7 +413,7 @@ def context_row(*, title: str, hook_line: str, source_url: str, score: int, hot_
     Publisher/Field KHÔNG ghi ra sheet (chỉ dùng nội bộ cho cluster/tiebreak).
     """
     return [
-        ts or _now_iso(),                                 # Timestamp
+        ts or _now_ddmmyyyy(),                            # Timestamp (DD/MM/YYYY, không giờ)
         f"{hot_pct:.1f}",                                   # Hot%
         str(score),                                          # Score
         group,                                                # Group
@@ -420,7 +434,7 @@ def content_row(*, context: str, type_: str, status: str, output: str,
     Output|Notes|Approve(gate 2)). Status: DONE (sạch)|ERROR (lỗi/compliance) —
     kết quả sản xuất, tất định. Approve(gate 2): cổng NGƯỜI duyệt nội dung
     (PENDING mặc định, thay tab ContentReview cũ)."""
-    return [ts or _now_iso(), context, type_, status, output, notes, approve]
+    return [ts or _now_ddmmyyyy(), context, type_, status, output, notes, approve]
 
 
 _FULL_TYPES = frozenset({"article", "video_script", "infographic"})
@@ -467,12 +481,18 @@ def regroup_content_rows(header: list[str], rows: list[list[str]]) -> list[list[
     return out
 
 
+_MIN_MERGE_TYPES = 2   # ngưỡng merge: Context có >= N loại KHÁC NHAU (article/video_script/
+                        # infographic) liền kề là merge — KHÔNG còn bắt buộc đủ cả 3 (_FULL_TYPES
+                        # vẫn giữ làm tập THAM KHẢO 3 loại hợp lệ, không dùng để so đủ/thiếu nữa).
+
+
 def content_merge_ranges(header: list[str], rows: list[list[str]]) -> list[tuple[int, int]]:
     """`rows` PHẢI đã regroup (regroup_content_rows) trước — hàm này chỉ tìm dải,
     KHÔNG tự sắp lại. Trả list (start, end) 0-based/end-exclusive TÍNH THEO SHEET
-    (offset +1 vì hàng 1 là header) — mỗi dải là 1 Context có ĐỦ CẢ 3 loại
-    (_FULL_TYPES: article/video_script/infographic) nằm ở các hàng LIÊN TIẾP.
-    Context thiếu loại hoặc hàng không liền kề (chưa regroup) -> KHÔNG merge."""
+    (offset +1 vì hàng 1 là header) — mỗi dải là 1 Context có TỪ _MIN_MERGE_TYPES
+    (mặc định 2) loại KHÁC NHAU trở lên (đếm loại PHÂN BIỆT, không đếm số hàng)
+    nằm ở các hàng LIÊN TIẾP. Context chỉ 1 loại hoặc hàng không liền kề (chưa
+    regroup) -> KHÔNG merge."""
     low = [h.strip().lower() for h in header]
     if "context" not in low or "type" not in low:
         return []
@@ -490,7 +510,7 @@ def content_merge_ranges(header: list[str], rows: list[list[str]]) -> list[tuple
         while j < n and (rows[j][ic].strip() if ic < len(rows[j]) else "") == ctx:
             types_seen.add(rows[j][it].strip().lower() if it < len(rows[j]) else "")
             j += 1
-        if _FULL_TYPES <= types_seen:
+        if len(types_seen) >= _MIN_MERGE_TYPES:
             ranges.append((i + 1, j + 1))
         i = j
     return ranges
@@ -1049,10 +1069,11 @@ class SheetsBoard:
     def regroup_and_merge_content(self) -> int:
         """Sắp lại tab CONTENT để các hàng CÙNG chủ đề (Context) liền kề nhau
         (regroup_content_rows — CHỈ đổi vị trí, không đổi dữ liệu), rồi merge dọc
-        cột Timestamp+Context cho các chủ đề đã ĐỦ 3 loại article/video_script/
-        infographic (content_merge_ranges). Idempotent: unmerge TOÀN vùng dữ
-        liệu trước khi merge lại nên gọi nhiều lần không lỗi/không merge chồng.
-        Trả số dải đã merge (0 -> không đổi gì, kể cả khi tab rỗng/thiếu cột)."""
+        cột Timestamp+Context cho các chủ đề có TỪ 2 LOẠI khác nhau trở lên
+        (article/video_script/infographic — content_merge_ranges, ngưỡng
+        _MIN_MERGE_TYPES). Idempotent: unmerge TOÀN vùng dữ liệu trước khi merge
+        lại nên gọi nhiều lần không lỗi/không merge chồng. Trả số dải đã merge
+        (0 -> không đổi gì, kể cả khi tab rỗng/thiếu cột)."""
         ws = self._tab("CONTENT")
         values = ws.get_all_values()
         if len(values) < 2:
@@ -1123,12 +1144,15 @@ class SheetsBoard:
         )
         return True
 
-    def upsert_context_rows(self, rows: list[list[str]]) -> int:
+    def upsert_context_rows(self, rows: list[list[str]]) -> list[list[str]]:
         """UPSERT NHIỀU dòng vào CONTEXT theo url (cột Source), 1 lượt (2 lệnh
         gọi API): url ĐÃ CÓ -> BỎ QUA HOÀN TOÀN (giữ nguyên dòng cũ — Status/
         Execute/Hook/Notes... không đổi); url CHƯA CÓ -> append. KHÔNG xoá/ghi
         đè dòng đã có (khác replace_context cũ đã bỏ). `rows` phải ĐÚNG thứ tự
-        CONTEXT_HEADER (dùng context_row). Trả số dòng MỚI đã ghi."""
+        CONTEXT_HEADER (dùng context_row). Trả CHÍNH CÁC DÒNG MỚI đã ghi (KHÔNG
+        chỉ đếm số lượng — Phase 4.6: review_to_sheet.py cần Context/Source của
+        từng dòng mới để bắn notify kèm link bài viết); `len(...)` thay cho số
+        đếm cũ nếu chỉ cần đếm."""
         ws = self._tab("CONTEXT")
         existing_urls = self._context_urls(ws)
         i_src = [h.strip().lower() for h in CONTEXT_HEADER].index("source")
@@ -1140,7 +1164,7 @@ class SheetsBoard:
         new_rows = [r for r in rows if primary_url(r) and primary_url(r) not in existing_urls]
         if new_rows:
             ws.append_rows(new_rows, value_input_option="USER_ENTERED")
-        return len(new_rows)
+        return new_rows
 
     def sync_approve_execute_flags(self) -> int:
         """MỌI dòng CONTEXT có Status=APPROVE và Execute RỖNG -> tự đặt Execute=
