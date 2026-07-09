@@ -149,6 +149,13 @@ PROMPTS_HEADER = ["Name", "Version", "Enable"]
 # SAU Status = cờ thực thi sản xuất: rỗng (mới) -> RUN (tự đặt khi Status=APPROVE,
 # xem sync_approve_execute_flags) -> DONE (đã sinh xong CONTENT, idempotent —
 # produce_from_sheet bỏ qua dòng đã DONE). tickers/Notes giữ cuối để audit.
+# PHASE 4.9 — cầu nối writer retry: Execute còn nhận 2 giá trị nữa, map từ
+# agents.writer.WriterOutcome của bài ARTICLE (xem scripts/produce_from_sheet.run):
+#   FAILED       lỗi TẠM THỜI (hạ tầng gọi LLM) — produce_from_sheet TỰ ĐỘNG coi
+#                như RUN ở lượt sau (tái chạy được, KHÔNG cần người reset tay).
+#   NEEDS_HUMAN  guardrail reject VĨNH VIỄN — produce_from_sheet BỎ QUA dòng này
+#                ở các lượt sau cho tới khi người CHỦ ĐỘNG đổi Execute về RUN
+#                (móc cho nút MANUAL của Phase 5, chưa có UI riêng ở phase này).
 CONTEXT_HEADER = ["Timestamp", "Hot%", "Score", "Group", "Topic", "Context", "Hook",
                   "Source", "Status", "Execute", "tickers", "Notes"]
 # "engine" TẠM (haiku|sonnet|mock) — đối chiếu model NÀO thực sự chạy cho mỗi
@@ -783,7 +790,8 @@ def _tab_requests(t: TabMeta) -> list[dict]:
                                    _one_of_list(["PENDING", "APPROVE", "REJECT"])))
     if t.name == "CONTEXT" and "execute" in low:  # -> dropdown cờ thực thi sản xuất
         c = low.index("execute")
-        out.append(_set_validation(sid, 1, fmt_rows, c, _one_of_list(["RUN", "DONE"])))
+        out.append(_set_validation(sid, 1, fmt_rows, c,
+                                   _one_of_list(["RUN", "DONE", "FAILED", "NEEDS_HUMAN"])))
     if t.name == "CONTENT" and "status" in low:  # -> dropdown (kết quả sản xuất, tất định)
         c = low.index("status")
         out.append(_set_validation(sid, 1, fmt_rows, c,
@@ -807,6 +815,8 @@ def _tab_requests(t: TabMeta) -> list[dict]:
             c = low.index("execute")
             out.append(_text_eq_rule(sid, c, 1, fmt_rows, "RUN", _C_RUN))
             out.append(_text_eq_rule(sid, c, 1, fmt_rows, "DONE", _C_APPROVE))
+            out.append(_text_eq_rule(sid, c, 1, fmt_rows, "FAILED", _C_PENDING))       # vàng — tái chạy được
+            out.append(_text_eq_rule(sid, c, 1, fmt_rows, "NEEDS_HUMAN", _C_REJECT))   # đỏ — chờ người
         if "score" in low:
             c = low.index("score")
             out.append(_score_scale_rule(sid, c, 1, fmt_rows))
@@ -1197,15 +1207,23 @@ class SheetsBoard:
         approved_context_from_rows()["row"]) VỪA sản xuất XONG (đủ nội dung, đã
         ghi CONTENT) — idempotent: lần chạy sau approved_context_from_rows lọc
         theo execute=='RUN' sẽ tự bỏ qua dòng đã DONE. No-op nếu `rows` rỗng."""
-        if not rows:
+        self.set_execute_values({r: "DONE" for r in rows})
+
+    def set_execute_values(self, status_by_row: dict[int, str]) -> None:
+        """Ghi Execute cho NHIỀU dòng CONTEXT (số dòng 1-based), MỖI DÒNG 1 giá
+        trị RIÊNG (Phase 4.9 — map WriterOutcome của bài ARTICLE vào Execute:
+        DONE/FAILED/NEEDS_HUMAN có thể khác nhau giữa các dòng CÙNG 1 lượt chạy,
+        khác mark_execute_done() chỉ ghi "DONE" đồng loạt — nay dùng chung hàm
+        này bên dưới). No-op nếu `status_by_row` rỗng hoặc thiếu cột Execute."""
+        if not status_by_row:
             return
         ws = self._tab("CONTEXT")
         header = [h.strip().lower() for h in ws.row_values(1)]
         if "execute" not in header:
             return
         col_letter = _col_a1(header.index("execute") + 1)
-        ws.batch_update([{"range": f"{col_letter}{r}", "values": [["DONE"]]} for r in rows],
-                        value_input_option="RAW")
+        ws.batch_update([{"range": f"{col_letter}{r}", "values": [[v]]}
+                         for r, v in status_by_row.items()], value_input_option="RAW")
 
     def _context_urls(self, ws) -> set[str]:
         """Tập url đã có ở tab CONTEXT (ánh xạ theo tên cột 'source'; ô Source

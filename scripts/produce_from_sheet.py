@@ -3,10 +3,12 @@
 Luồng:
   CONTEXT (Status=APPROVE)  --đọc-->  full-fetch thân bài thật (tất định, $0)
     -->  Production (LLM ĐẮT: Sonnet, đã qua cổng 1)
-    • AnalysisWriterAgent  (bài phân tích, LLM, schema JSON)
-    • VideoScriptAgent     (kịch bản video, LLM, schema JSON)
+    • ARTICLE (Phase 4.9 — Brief → route-once (đóng băng) → run_writer_with_retry,
+      xem agents/brief.py + agents/route_once.py + agents/writer.py)
+    • VideoScriptAgent     (kịch bản video, LLM, schema JSON — đường 3-agent cũ)
     • InfographicSpecAgent (spec JSON, tất định $0 — số liệu trích thẳng evidence)
-  --guardrail-->  compliance (disclaimer/claim cấm) + chặn bịa số (so evidence)
+  --guardrail-->  compliance (disclaimer/claim cấm) + chặn bịa số (so evidence,
+    Mục C: chấp nhận số làm tròn hợp lý khớp facts[].canonical_value)
   --ghi-->  tab CONTENT (Context|Type|Status|Output) + storage/output/<ngày>/
   --> người duyệt xem & duyệt sản phẩm (cổng 2) --> Publish (giai đoạn sau).
 
@@ -14,6 +16,28 @@ Nguyên tắc: LLM đắt CHỈ chạy ở đây (sau cổng 1). Đã sinh rồi
 (Context,Type) trong CONTENT) -> KHỎI tốn Sonnet lại. LÙI MƯỢT: thiếu SDK/khóa ->
 Mock ($0), agent tự dựng khung tất định, KHÔNG crash. Văn phong agent nạp từ tab
 PROMPTS (Name|Version|Enable) -> prompts/<Name>.<Version>.md; thiếu -> default code.
+
+PHASE 4.9 — CẦU NỐI writer retry vào vòng thật (đóng gap Phase 4.5): trước phase
+này, agents/writer.run_writer_with_retry() (retry/backoff/FAILED/NEEDS_HUMAN,
+Phase 4.5) CHƯA từng được gọi bởi bất kỳ script sản xuất thật nào — chỉ được
+kiểm bằng script tạm khi validate Phase 4.6/4.7/4.8. `run()` (chế độ gọi API
+thật, KHÔNG phải --draft/--ingest) giờ dùng ĐÚNG pipeline này cho ARTICLE:
+  1. run_brief() trích facts[] (Mục C: raw/canonical_value/approx).
+  2. get_or_route() route-once — 1 chủ đề CHỈ route 1 lần, đóng băng (agents/
+     route_once.RouterDecisionStore, storage theo router.decisions_path).
+  3. run_writer_with_retry() -> WriterOutcome.DONE/FAILED/NEEDS_HUMAN, map vào
+     cột CONTEXT.Execute (xem sheets_board.py, khối comment cạnh CONTEXT_HEADER):
+       DONE         -> ghi CONTENT, Execute=DONE (nếu video+infographic cũng
+                        xong — SheetsBoard.set_execute_values qua _is_fully_produced).
+       FAILED       -> Execute=FAILED, KHÔNG ghi CONTENT (chưa có nội dung thật),
+                        TỰ ĐỘNG tái chạy được lượt sau (không cần người reset).
+       NEEDS_HUMAN  -> Execute=NEEDS_HUMAN, VẪN ghi CONTENT (Status=ERROR, để
+                        người xem lý do reject), CHỜ người đổi Execute về RUN
+                        (móc cho nút MANUAL của Phase 5, chưa có UI riêng).
+Video/Infographic KHÔNG đổi — vẫn qua đường 3-agent Producer cũ (chưa có
+RouterDecision, xem báo cáo Phase 4.7 §3: kiến trúc hiện tại chỉ ARTICLE tiêu
+thụ router). --draft/--ingest (chế độ Claude Code tự viết) KHÔNG đổi ở phase
+này — vẫn dùng voice-lock fallback tĩnh (assemble_voice(None)), ngoài phạm vi.
 
 HAI CHẾ ĐỘ điền nội dung article/video (infographic luôn tất định, $0):
   1. Mặc định / --offline: gọi AnthropicLLM API (cần ANTHROPIC_API_KEY riêng) —
@@ -51,6 +75,8 @@ from twmkt._encoding import ensure_utf8_stdio  # noqa: E402
 ensure_utf8_stdio()
 
 from twmkt import factory  # noqa: E402
+from twmkt.agents.base import MockLLM  # noqa: E402
+from twmkt.agents.brief import run_brief  # noqa: E402
 from twmkt.agents.production import (  # noqa: E402
     AnalysisWriterAgent, InfographicSpecAgent, ProductionBrief, VideoScriptAgent,
     all_production_agents, analysis_fields_from_data, apply_guardrails,
@@ -58,7 +84,9 @@ from twmkt.agents.production import (  # noqa: E402
     video_fields_from_data,
 )
 from twmkt.agents.prompts import resolve_prompts  # noqa: E402
+from twmkt.agents.route_once import RouterDecisionStore, get_or_route  # noqa: E402
 from twmkt.agents.voice import assemble_voice  # noqa: E402
+from twmkt.agents.writer import WriterOutcome, run_writer_with_retry  # noqa: E402
 from twmkt.config import load_settings  # noqa: E402
 from twmkt.models import ContentDraft, ContentFormat, Source  # noqa: E402
 from twmkt.sheets_board import SheetsBoard, content_row  # noqa: E402
@@ -152,11 +180,12 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
         setup: bool = False) -> dict:
     settings = load_settings()
     board = _open_board(settings, setup=setup)
-    notifier = make_notifier(settings)   # PHASE TELE — no-op êm nếu chưa cấu hình
+    notifier = make_notifier(settings)   # PHASE TELE — no-op êm nếu chưa cấu hình; KHỞI TẠO Ở TẦNG CAO NHẤT
 
-    # --- LLM ĐẮT cho Producers (Sonnet mặc định, --model opus nếu cần chất
-    # lượng cao hơn). LÙI MƯỢT CÓ CẢNH BÁO: banner IN RÕ, không im lặng.
-    # --offline luôn ép Mock (kể cả có key) để kiểm chứng $0.
+    # --- LLM ĐẮT cho Producers video/infographic (đường 3-agent cũ, Sonnet mặc
+    # định, --model opus nếu cần chất lượng cao hơn). LÙI MƯỢT CÓ CẢNH BÁO:
+    # banner IN RÕ, không im lặng. --offline luôn ép Mock (kể cả có key) để
+    # kiểm chứng $0.
     llm = factory.llm_status(settings)
     use_llm = (not offline) and llm.use_llm
     banner = ("LLM active: MOCK ($0 fallback) — lý do: --offline (ép mock)"
@@ -166,19 +195,35 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
     engine = factory.model_engine_label(llm.content_model, use_llm=use_llm)
     board.log("INFO", banner, engine=engine)
 
-    # Execute: dòng vừa APPROVE (Execute rỗng) -> tự đặt RUN; rồi CHỈ xử lý dòng
-    # Status=APPROVE VÀ Execute=RUN (Execute=DONE -> đã sinh xong, bỏ qua —
-    # idempotent, produce chạy lại KHÔNG sinh Content trùng).
+    # --- LLM RIÊNG cho ARTICLE (Phase 4.9: Brief -> route-once -> Writer-with-
+    # retry) — adapter make_llm/step_model, SONG SONG với content_llm/LLMRouter
+    # ở trên (KHÔNG dùng chung). --offline ép MockLLM ($0) cho đường này luôn,
+    # khớp tinh thần "kiểm chứng $0" của cờ.
+    route_llm = MockLLM() if offline else factory.make_llm(settings)
+    writer_llm = MockLLM() if offline else factory.build_writer_llm(settings)
+    router_store = RouterDecisionStore(
+        settings.get("router.decisions_path", "storage/router_decisions.json"))
+
+    # Execute: dòng vừa APPROVE (Execute rỗng) -> tự đặt RUN; rồi xử lý dòng
+    # Status=APPROVE VÀ Execute ĐANG "RUN" (mới/đã reset tay) HOẶC "FAILED"
+    # (Phase 4.9: lỗi TẠM THỜI của bài article — TỰ ĐỘNG tái chạy, không cần
+    # người reset). Execute=DONE (xong hẳn) / NEEDS_HUMAN (chờ người) -> bỏ qua,
+    # idempotent — produce chạy lại KHÔNG sinh Content trùng, KHÔNG đụng dòng
+    # đang chờ người can thiệp.
     board.sync_approve_execute_flags()
-    approved = [a for a in board.read_approved_context() if a["execute"] == "RUN"]
+    approved = [a for a in board.read_approved_context() if a["execute"] in ("RUN", "FAILED")]
     if not approved:
-        print("Không có dòng CONTEXT nào Status=APPROVE và Execute=RUN (chưa sản xuất). "
-              "Duyệt ở tab CONTEXT trước.")
+        print("Không có dòng CONTEXT nào Status=APPROVE và Execute=RUN/FAILED (chưa sản xuất "
+              "hoặc đang chờ NEEDS_HUMAN). Duyệt ở tab CONTEXT trước.")
         return {"approved": 0, "produced": 0, "skipped": 0}
     approved = approved[:limit]
 
     # PROMPTS: đọc LIVE tab (Name|Version|Enable) -> resolve prompts/<name>.<v>.md;
-    # thiếu tab/dòng/file -> giữ default nội bộ trong code (KHÔNG crash).
+    # thiếu tab/dòng/file -> giữ default nội bộ trong code (KHÔNG crash). LƯU Ý
+    # (Phase 4.9): override "analysis" (article) KHÔNG còn áp dụng — đường
+    # article mới dùng voice-lock động (agents/voice.assemble_voice theo
+    # RouterDecision), KHÔNG qua prompt_overrides; override "video"/
+    # "infographic" vẫn áp dụng như cũ.
     default_prompts = {a.prompt_name: a.system for a in all_production_agents()}
     prompt_overrides = resolve_prompts(
         board.read_prompt_versions(), default_prompts,
@@ -192,20 +237,75 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
     seen = board.existing_content_keys()   # (Context, Type) đã sinh -> bỏ qua
     out_dir = Path(settings.get("storage.output_dir", "storage/output")) / _today()
     out_dir.mkdir(parents=True, exist_ok=True)
+    approx_tol = float(settings.get("guardrail.approx_tolerance_pct", 5)) / 100
 
     rows: list[list[str]] = []
-    done_rows: list[int] = []   # số dòng CONTEXT (1-based) VỪA sản xuất xong -> Execute=DONE
+    done_rows: list[int] = []          # đủ CẢ 3 loại -> Execute=DONE
+    failed_rows: list[int] = []        # Phase 4.9: article FAILED (lỗi tạm thời) -> Execute=FAILED
+    needs_human_rows: list[int] = []   # Phase 4.9: article NEEDS_HUMAN (guardrail reject) -> chờ người
     produced = skipped = flagged = 0
     for item in approved:
         notifier.notify("start", topic=item["context"], row=item["row"], actor=_DEFAULT_ACTOR)
         evidence = fetch_full_evidence(html_collector, sources, item["source"], item["hook"])
+
+        # --- ARTICLE (Phase 4.9): Brief -> route-once (đóng băng) -> Writer-
+        # with-retry. Bỏ qua HOÀN TOÀN nếu đã có trong CONTENT (idempotent,
+        # KHÔNG tốn thêm lượt Brief/Router/Writer cho bài đã DONE).
+        write_article = (item["context"], "article") not in seen
+        facts = (run_brief(route_llm, evidence, model=factory.step_model(settings, "brief"),
+                           fail_loud=factory.is_fail_loud_step(settings, "brief"))
+                if write_article else [])
         brief = ProductionBrief(
             title=item["context"], hook=item["hook"], tickers=item["tickers"],
             group=item["group"], topic=item["topic"], url=item["source"],
-            evidence=evidence,
+            evidence=evidence, facts=facts,
         )
-        approx_tol = float(settings.get("guardrail.approx_tolerance_pct", 5)) / 100
+
+        article_outcome = None
+        if not write_article:
+            skipped += 1
+        else:
+            decision = get_or_route(
+                route_llm, brief, store=router_store, key=_slug(item["context"]),
+                model=factory.step_model(settings, "router"),
+                fail_loud=factory.is_fail_loud_step(settings, "router"))
+            r = run_writer_with_retry(
+                writer_llm, brief, decision, settings=settings,
+                model=factory.step_model(settings, "writer"),
+                notify=_writer_notify_adapter(notifier))
+            article_outcome = r.outcome
+            if r.outcome == WriterOutcome.DONE:
+                fn = out_dir / f"{_slug(item['context'])}-article.md"
+                fn.write_text(r.draft.body, encoding="utf-8")
+                preview = r.draft.body if len(r.draft.body) <= _OUTPUT_PREVIEW else \
+                    r.draft.body[:_OUTPUT_PREVIEW] + f"\n…(xem {fn.name})"
+                rows.append(content_row(context=item["context"], type_="article",
+                                        status="DONE", output=preview, notes=""))
+                seen.add((item["context"], "article"))
+                produced += 1
+                notifier.notify("draft_changed", topic=item["context"], type="article", status="DONE")
+            elif r.outcome == WriterOutcome.NEEDS_HUMAN:
+                # LLM ĐÃ trả lời nhưng guardrail reject -> VẪN ghi CONTENT (Status=
+                # ERROR) để người xem lý do, nhưng KHÔNG seen.add (chưa coi là xong).
+                note = "; ".join(r.draft.compliance_issues)
+                fn = out_dir / f"{_slug(item['context'])}-article.md"
+                fn.write_text(r.draft.body, encoding="utf-8")
+                preview = r.draft.body if len(r.draft.body) <= _OUTPUT_PREVIEW else \
+                    r.draft.body[:_OUTPUT_PREVIEW] + f"\n…(xem {fn.name})"
+                rows.append(content_row(context=item["context"], type_="article",
+                                        status="ERROR", output=preview, notes=note))
+                flagged += 1
+                notifier.notify("error", topic=item["context"], type="article", issues=note)
+            else:   # FAILED — hết retry (lỗi hạ tầng gọi LLM), KHÔNG có draft -> KHÔNG ghi CONTENT rác
+                flagged += 1
+                notifier.notify("error", topic=item["context"], type="article", issues=r.reason)
+
+        # --- VIDEO/INFOGRAPHIC: vẫn qua đường 3-agent Producer cũ (KHÔNG có
+        # RouterDecision — kiến trúc hiện tại, xem báo cáo Phase 4.7 §3, CHỈ
+        # ARTICLE tiêu thụ router).
         for agent in all_production_agents(content_llm, prompt_overrides=prompt_overrides):
+            if isinstance(agent, AnalysisWriterAgent):
+                continue   # article đã xử lý ở nhánh route-once+retry trên
             draft = apply_guardrails(agent.run(brief), brief.evidence, brief.background,
                                      brief.facts, approx_tolerance=approx_tol)
             type_ = draft.fmt.value
@@ -230,21 +330,38 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
             else:
                 flagged += 1
                 notifier.notify("error", topic=item["context"], type=type_, issues=note)
-        done_rows.append(item["row"])   # xong CẢ 3 loại cho dòng này -> đánh dấu DONE
+
+        # Execute (Phase 4.9): article FAILED/NEEDS_HUMAN quyết định dòng CHƯA
+        # xong (dù video/infographic có xong hay không); article DONE (hoặc đã
+        # DONE từ trước, write_article=False) -> xét đủ CẢ 3 loại như cũ.
+        if article_outcome == WriterOutcome.FAILED:
+            failed_rows.append(item["row"])
+        elif article_outcome == WriterOutcome.NEEDS_HUMAN:
+            needs_human_rows.append(item["row"])
+        elif _is_fully_produced(item["context"], seen):
+            done_rows.append(item["row"])
 
     written = board.append_content_rows(rows)
-    board.mark_execute_done(done_rows)   # idempotent: chạy lại bỏ qua (execute=='RUN' lọc ở trên)
+    # 1 lượt gọi Sheets API duy nhất cho MỌI thay đổi Execute (né 429, cùng
+    # triết lý retry/backoff hiện có) — thay vì gọi mark_execute_done() +
+    # set_execute_values() riêng.
+    execute_updates: dict[int, str] = {r: "DONE" for r in done_rows}
+    execute_updates.update({r: "FAILED" for r in failed_rows})
+    execute_updates.update({r: "NEEDS_HUMAN" for r in needs_human_rows})
+    board.set_execute_values(execute_updates)   # idempotent: chạy lại lọc theo execute ở trên
     if written:
         board.regroup_and_merge_content()   # merge dọc Timestamp+Context khi >= 2 loại
         notifier.notify("gate2_done", written=written, approved=len(approved))
     u = content_llm.usage.as_dict()
     board.log("INFO", f"TỔNG Production: approved {len(approved)} / sinh mới {produced} / "
                       f"bỏ qua {skipped} / dính compliance {flagged} / ghi CONTENT {written} / "
-                      f"Execute=DONE {len(done_rows)} dòng",
+                      f"Execute=DONE {len(done_rows)} / FAILED {len(failed_rows)} / "
+                      f"NEEDS_HUMAN {len(needs_human_rows)} dòng",
               engine=engine)
     _summary(len(approved), produced, skipped, flagged, use_llm, u, out_dir)
     return {"approved": len(approved), "produced": produced, "skipped": skipped,
-            "flagged": flagged, "llm": u, "use_llm": use_llm, "written": written}
+            "flagged": flagged, "llm": u, "use_llm": use_llm, "written": written,
+            "failed": len(failed_rows), "needs_human": len(needs_human_rows)}
 
 
 def _today() -> str:

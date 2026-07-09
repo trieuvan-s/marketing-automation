@@ -757,9 +757,10 @@ def test_build_format_requests_covers_features_and_is_deterministic():
     # (CONTENT.cond_format_count=0 trong test này -> không sinh xóa cho CONTENT).
     assert kinds.count("deleteBanding") == 1
     assert kinds.count("deleteConditionalFormatRule") == 3
-    # CONTEXT: Status(APPROVE/PENDING/REJECT=3) + Execute(RUN/DONE=2) + score + hot%
-    # CONTENT: "Approve(gate 2)"(APPROVE/PENDING/REJECT=3) => 4+3+3 = 10
-    assert kinds.count("addConditionalFormatRule") == 10
+    # CONTEXT: Status(APPROVE/PENDING/REJECT=3) + Execute(RUN/DONE/FAILED/NEEDS_HUMAN=4,
+    # Phase 4.9) + score + hot% => 3+4+1+1 = 9
+    # CONTENT: "Approve(gate 2)"(APPROVE/PENDING/REJECT=3) => 9+3 = 12
+    assert kinds.count("addConditionalFormatRule") == 12
     # checkbox: SOURCES.Enable + PROMPTS.Enable (Use đã xoá, KHÔNG còn checkbox CONTEXT)
     # dropdown: CONTEXT.Status + CONTEXT.Execute + CONTENT.Status + CONTENT."Approve(gate 2)"
     sd = [r["setDataValidation"] for r in reqs if "setDataValidation" in r]
@@ -1423,6 +1424,29 @@ def test_mark_execute_done_sets_done_for_given_rows_only():
 
     board.mark_execute_done([])    # rỗng -> no-op, không lỗi
     assert ws.batch_updates and len(ws.batch_updates) == 1   # không gọi thêm batch_update
+
+
+def test_set_execute_values_writes_different_status_per_row():
+    """Phase 4.9: set_execute_values ghi GIÁ TRỊ RIÊNG mỗi dòng trong CÙNG 1
+    lượt (vd 1 dòng DONE, 1 dòng FAILED, 1 dòng NEEDS_HUMAN) — khác
+    mark_execute_done() chỉ ghi 1 giá trị đồng loạt."""
+    from twmkt.sheets_board import SheetsBoard, CONTEXT_HEADER, context_row
+
+    board = SheetsBoard(spreadsheet_id="X", creds_path="Y")
+    rows = [context_row(title=t, hook_line="h", source_url=f"http://u/{i}", score=1,
+                        hot_pct=1.0, status="APPROVE", execute="RUN")
+           for i, t in enumerate(("A", "B", "C"))]
+    ws = _FakeContextWS([list(CONTEXT_HEADER), *[list(r) for r in rows]])
+    board._ws["CONTEXT"] = ws
+
+    board.set_execute_values({2: "DONE", 3: "FAILED", 4: "NEEDS_HUMAN"})
+    i_ex = [h.lower() for h in CONTEXT_HEADER].index("execute")
+    assert ws._v[1][i_ex] == "DONE"
+    assert ws._v[2][i_ex] == "FAILED"
+    assert ws._v[3][i_ex] == "NEEDS_HUMAN"
+
+    board.set_execute_values({})   # rỗng -> no-op
+    assert len(ws.batch_updates) == 1
 
 
 def test_approved_context_from_rows_captures_execute_and_row_number():
@@ -2105,6 +2129,257 @@ def test_produce_execute_filter_excludes_done_prevents_duplicate_content():
     ]
     approved = [a for a in approved_context_from_rows(rows) if a["execute"] == "RUN"]
     assert [a["context"] for a in approved] == ["Chờ sản xuất"]   # DONE + rỗng đều bị loại
+
+
+def test_run_execute_filter_phase49_includes_failed_excludes_needs_human():
+    """Phase 4.9: run() (đường gọi API thật) lọc execute in ('RUN','FAILED') —
+    FAILED (lỗi tạm thời của article) TỰ ĐỘNG tái chạy; DONE/NEEDS_HUMAN/rỗng
+    bị loại (NEEDS_HUMAN chờ người chủ động reset, xem sheets_board.py)."""
+    from twmkt.sheets_board import approved_context_from_rows, CONTEXT_HEADER, context_row
+
+    rows = [
+        CONTEXT_HEADER,
+        context_row(title="Đã xong", hook_line="h", source_url="http://u/1",
+                   score=1, hot_pct=1.0, status="APPROVE", execute="DONE"),
+        context_row(title="Chờ sản xuất", hook_line="h", source_url="http://u/2",
+                   score=1, hot_pct=1.0, status="APPROVE", execute="RUN"),
+        context_row(title="Vừa duyệt chưa sync", hook_line="h", source_url="http://u/3",
+                   score=1, hot_pct=1.0, status="APPROVE", execute=""),
+        context_row(title="Lỗi tạm thời lần trước", hook_line="h", source_url="http://u/4",
+                   score=1, hot_pct=1.0, status="APPROVE", execute="FAILED"),
+        context_row(title="Đang chờ người", hook_line="h", source_url="http://u/5",
+                   score=1, hot_pct=1.0, status="APPROVE", execute="NEEDS_HUMAN"),
+    ]
+    approved = [a for a in approved_context_from_rows(rows) if a["execute"] in ("RUN", "FAILED")]
+    assert {a["context"] for a in approved} == {"Chờ sản xuất", "Lỗi tạm thời lần trước"}
+
+
+# --- Phase 4.9: cầu nối run_writer_with_retry vào produce_from_sheet.run() ---
+# Fakes dùng CHUNG cho 3 kịch bản outcome (DONE/FAILED/NEEDS_HUMAN) — monkeypatch
+# _open_board/make_notifier/factory.make_llm/factory.build_writer_llm/load_settings
+# của MODULE produce_from_sheet -> chạy run() THẬT (không phải mô phỏng rời rạc),
+# $0 tuyệt đối (không gọi mạng/CLI thật), khôi phục nguyên trạng sau mỗi test.
+class _FakeProduceBoard:
+    def __init__(self, approved_rows):
+        self._approved = approved_rows
+        self.execute_updates: dict[int, str] = {}
+        self.appended_content: list[list[str]] = []
+        self.merged_called = False
+
+    def log(self, *a, **kw):
+        pass
+
+    def sync_approve_execute_flags(self):
+        return 0
+
+    def read_approved_context(self):
+        return self._approved
+
+    def read_prompt_versions(self):
+        return {}
+
+    def read_sources(self):
+        return []
+
+    def existing_content_keys(self):
+        return set()
+
+    def append_content_rows(self, rows):
+        self.appended_content.extend(rows)
+        return len(rows)
+
+    def set_execute_values(self, status_by_row):
+        self.execute_updates.update(status_by_row)
+
+    def mark_execute_done(self, rows):
+        self.set_execute_values({r: "DONE" for r in rows})
+
+    def regroup_and_merge_content(self):
+        self.merged_called = True
+        return 0
+
+
+class _FakeProduceNotifier:
+    def __init__(self):
+        self.events: list[tuple[str, dict]] = []
+
+    def notify(self, event, **ctx):
+        self.events.append((event, ctx))
+        return True
+
+
+class _EmptyRouteLLM:
+    """route_llm giả cho brief+router (Phase 4.9 test) — trả rỗng cho CẢ 2 bước
+    -> facts=[] (lùi mượt), router fallback S1+H3 (không quan trọng ở test này,
+    trọng tâm là outcome CỦA WRITER)."""
+
+    def complete(self, *a, **kw):
+        return ""
+
+
+def _run_produce_scenario(writer_llm, approved_row: dict):
+    """Chạy produce_from_sheet.run() THẬT với board/notifier/route_llm/writer_llm
+    giả lập qua monkeypatch — trả (result, board, notifier). Khôi phục mọi
+    monkeypatch trong finally (không rò rỉ sang test khác)."""
+    import tempfile
+    from pathlib import Path
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+    import produce_from_sheet as pfs
+    from twmkt.config import Settings, load_settings as real_load_settings
+
+    base = real_load_settings()
+    data = dict(base.raw)
+    data["router"] = {"decisions_path": str(Path(tempfile.mkdtemp()) / "router_decisions.json")}
+    test_settings = Settings(data)
+
+    board = _FakeProduceBoard([approved_row])
+    notifier = _FakeProduceNotifier()
+
+    orig = {
+        "load_settings": pfs.load_settings, "_open_board": pfs._open_board,
+        "make_notifier": pfs.make_notifier, "make_llm": pfs.factory.make_llm,
+        "build_writer_llm": pfs.factory.build_writer_llm,
+    }
+    pfs.load_settings = lambda *a, **kw: test_settings
+    pfs._open_board = lambda settings, **kw: board
+    pfs.make_notifier = lambda settings: notifier
+    pfs.factory.make_llm = lambda settings: _EmptyRouteLLM()
+    pfs.factory.build_writer_llm = lambda settings: writer_llm
+    try:
+        result = pfs.run(limit=5)
+    finally:
+        pfs.load_settings = orig["load_settings"]
+        pfs._open_board = orig["_open_board"]
+        pfs.make_notifier = orig["make_notifier"]
+        pfs.factory.make_llm = orig["make_llm"]
+        pfs.factory.build_writer_llm = orig["build_writer_llm"]
+    return result, board, notifier
+
+
+def _approved_row(context: str, row: int) -> dict:
+    return {"context": context, "hook": "hook gợi ý", "source": "", "tickers": [],
+           "group": "", "topic": "", "execute": "RUN", "row": row}
+
+
+def test_run_article_done_writes_content_marks_execute_done_and_notifies():
+    """outcome=DONE: ghi CONTENT (article), Execute=DONE, notify start+draft_changed
+    (+ gate2_done vì written>0). Dùng writer_llm trả JSON sạch (_clean_writer_json)."""
+    class _CleanWriterLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            return _clean_writer_json()
+
+    result, board, notifier = _run_produce_scenario(
+        _CleanWriterLLM(), _approved_row("Bài test 4.9 DONE", row=2))
+
+    assert board.execute_updates.get(2) == "DONE"
+    article_rows = [r for r in board.appended_content if r[2] == "article"]  # Context|Type|Status|...
+    assert len(article_rows) == 1 and article_rows[0][3] == "DONE"           # Status
+    events = [e for e, _ in notifier.events]
+    article_events = [e for e, ctx in notifier.events if ctx.get("type") == "article"]
+    assert "start" in events and "gate2_done" in events
+    assert "draft_changed" in article_events and "error" not in article_events
+
+
+def test_run_article_failed_marks_execute_failed_no_content_no_draft_changed():
+    """outcome=FAILED (lỗi hạ tầng, hết retry): KHÔNG ghi CONTENT rác, Execute=
+    FAILED (tái chạy được), notify start + retry/failed (adapter Phase 4.5) +
+    error (type=article, Phase 4.9), KHÔNG draft_changed cho article (video/
+    infographic vẫn xử lý bình thường qua đường cũ nên CÓ THỂ tự draft_changed
+    RIÊNG — chỉ kiểm phạm vi type=article, không kiểm toàn cục)."""
+    class _AlwaysRaiseLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            from twmkt.agents.base import LLMCallError
+            raise LLMCallError("lỗi giả lập hạ tầng")
+
+    result, board, notifier = _run_produce_scenario(
+        _AlwaysRaiseLLM(), _approved_row("Bài test 4.9 FAILED", row=3))
+
+    assert board.execute_updates.get(3) == "FAILED"
+    assert not any(r[2] == "article" for r in board.appended_content)
+    events = [e for e, _ in notifier.events]
+    article_events = [e for e, ctx in notifier.events if ctx.get("type") == "article"]
+    assert "start" in events and "retry" in events and "failed" in events
+    assert "error" in article_events and "draft_changed" not in article_events
+
+
+def test_run_article_needs_human_marks_execute_needs_human_writes_error_content():
+    """outcome=NEEDS_HUMAN (guardrail reject số bịa): VẪN ghi CONTENT (Status=
+    ERROR, để người xem lý do), Execute=NEEDS_HUMAN (chờ người), notify error."""
+    import json as _json
+
+    class _HallucinatingLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            return _json.dumps({
+                "title": "Bài bịa số", "sapo": "Tóm tắt.",
+                "sections": [{"heading": "Bối cảnh", "content": "Lợi nhuận tăng 999% so với cùng kỳ."}],
+                "disclaimer": "Nội dung chỉ mang tính thông tin, không phải khuyến nghị đầu tư. "
+                              "Nhà đầu tư tự chịu trách nhiệm với quyết định của mình.",
+                "sources": [],
+            }, ensure_ascii=False)
+
+    result, board, notifier = _run_produce_scenario(
+        _HallucinatingLLM(), _approved_row("Bài test 4.9 NEEDS_HUMAN", row=4))
+
+    assert board.execute_updates.get(4) == "NEEDS_HUMAN"
+    article_rows = [r for r in board.appended_content if r[2] == "article"]
+    assert len(article_rows) == 1 and article_rows[0][3] == "ERROR"
+    events = [e for e, _ in notifier.events]
+    article_events = [e for e, ctx in notifier.events if ctx.get("type") == "article"]
+    assert "start" in events and "needs_human" in events   # adapter Phase 4.5
+    assert "error" in article_events and "draft_changed" not in article_events
+
+
+def test_run_article_idempotent_skips_writer_when_already_in_content():
+    """Idempotent: (context,'article') ĐÃ có trong CONTENT (existing_content_keys)
+    -> KHÔNG gọi writer_llm lần nào (PoisonLLM raise nếu bị gọi), skip hoàn toàn."""
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+    import produce_from_sheet as pfs
+
+    class _PoisonWriterLLM:
+        def complete(self, *a, **kw):
+            raise AssertionError("KHÔNG được gọi writer khi article đã có trong CONTENT")
+
+    class _BoardWithExistingArticle(_FakeProduceBoard):
+        def existing_content_keys(self):
+            return {("Bài đã có article", "article")}
+
+    import tempfile
+    from pathlib import Path
+    from twmkt.config import Settings, load_settings as real_load_settings
+
+    base = real_load_settings()
+    data = dict(base.raw)
+    data["router"] = {"decisions_path": str(Path(tempfile.mkdtemp()) / "router_decisions.json")}
+    test_settings = Settings(data)
+    board = _BoardWithExistingArticle([_approved_row("Bài đã có article", row=2)])
+    notifier = _FakeProduceNotifier()
+
+    orig = {
+        "load_settings": pfs.load_settings, "_open_board": pfs._open_board,
+        "make_notifier": pfs.make_notifier, "make_llm": pfs.factory.make_llm,
+        "build_writer_llm": pfs.factory.build_writer_llm,
+    }
+    pfs.load_settings = lambda *a, **kw: test_settings
+    pfs._open_board = lambda settings, **kw: board
+    pfs.make_notifier = lambda settings: notifier
+    pfs.factory.make_llm = lambda settings: _EmptyRouteLLM()
+    pfs.factory.build_writer_llm = lambda settings: _PoisonWriterLLM()
+    try:
+        pfs.run(limit=5)   # KHÔNG raise -> PoisonLLM không hề bị gọi
+    finally:
+        pfs.load_settings = orig["load_settings"]
+        pfs._open_board = orig["_open_board"]
+        pfs.make_notifier = orig["make_notifier"]
+        pfs.factory.make_llm = orig["make_llm"]
+        pfs.factory.build_writer_llm = orig["build_writer_llm"]
+
+    # article KHÔNG được ghi lại (đã có sẵn, PoisonLLM chứng minh KHÔNG bị gọi).
+    assert not any(r[2] == "article" for r in board.appended_content)
+    # video/infographic vẫn được xử lý bình thường (existing_content_keys chỉ có
+    # article) -> lượt này sinh đủ CẢ 3 loại (article đã có từ trước + video/
+    # infographic mới) -> Execute=DONE ĐÚNG theo logic cũ (_is_fully_produced),
+    # KHÔNG phải vì writer chạy lại.
+    assert board.execute_updates.get(2) == "DONE"
 
 
 def test_prompt_md_requires_research_before_writing():
