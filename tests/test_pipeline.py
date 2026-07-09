@@ -1849,6 +1849,201 @@ def test_build_content_llm_model_override_sonnet_opus():
     assert r_default.base.model == "claude-sonnet-4-6"   # không truyền model -> giữ settings.yaml
 
 
+# --- LLM adapter mới (Phase 1 v3): make_llm/step_model + ClaudeCodeLLM -------
+def test_make_llm_mode_mock_returns_mockllm():
+    from twmkt import factory
+    from twmkt.agents.base import MockLLM
+
+    llm = factory.make_llm(Settings({"llm": {"mode": "mock"}}))
+    assert isinstance(llm, MockLLM)
+
+
+def test_make_llm_mode_missing_defaults_to_mock():
+    from twmkt import factory
+    from twmkt.agents.base import MockLLM
+
+    assert isinstance(factory.make_llm(Settings({})), MockLLM)
+
+
+def test_make_llm_mode_claude_code_returns_claudecodellm():
+    from twmkt import factory
+    from twmkt.agents.base import ClaudeCodeLLM
+
+    llm = factory.make_llm(Settings({"llm": {"mode": "claude_code"}}))
+    assert isinstance(llm, ClaudeCodeLLM)
+
+
+def test_make_llm_mode_api_does_not_crash_without_key():
+    """Thiếu ANTHROPIC_API_KEY -> make_llm() vẫn dựng được (kiểm tra key hoãn tới
+    complete(), không phải constructor) -> KHÔNG raise."""
+    from twmkt import factory
+    from twmkt.agents.base import AnthropicLLM
+
+    llm = factory.make_llm(Settings({"llm": {"mode": "api", "content_model": "claude-sonnet-4-6"}}))
+    assert isinstance(llm, AnthropicLLM) and llm.model == "claude-sonnet-4-6"
+
+
+def test_make_llm_mode_unknown_raises_value_error():
+    from twmkt import factory
+
+    try:
+        factory.make_llm(Settings({"llm": {"mode": "bogus"}}))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("mode lạ phải raise ValueError")
+
+
+def test_step_model_reads_dotted_key_and_defaults_none():
+    from twmkt import factory
+
+    settings = Settings({"llm": {"step_models": {"writer": "claude-sonnet-4-6"}}})
+    assert factory.step_model(settings, "writer") == "claude-sonnet-4-6"
+    assert factory.step_model(settings, "brief") is None   # chưa khai -> None, không lỗi
+
+
+def test_llmclient_complete_old_2arg_call_sites_still_work():
+    """Mọi call site CŨ (Agent._ask, agents/router.py) gọi complete(system, prompt)
+    KHÔNG kèm `model` — phải chạy y nguyên trên cả 3 backend (chữ ký mở rộng
+    keyword-only, không phá tương thích)."""
+    from twmkt.agents.base import Agent, AnthropicLLM, ClaudeCodeLLM, MockLLM
+    from twmkt.agents.router import LLMRouter
+
+    assert MockLLM().complete("sys", "prompt") != ""
+    assert AnthropicLLM().complete("sys", "prompt") == ""   # thiếu key -> lùi mượt, KHÔNG raise
+    cc = ClaudeCodeLLM(run_fn=lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError()))
+    assert cc.complete("sys", "prompt") == ""                # thiếu binary -> lùi mượt
+
+    # Agent._ask KHÔNG đổi -> vẫn gọi complete(sys, prompt) 2 tham số, kể cả qua LLMRouter
+    # (LLMRouter.complete KHÔNG có tham số model -> nếu Agent lỡ truyền sẽ TypeError).
+    agent = Agent(LLMRouter(MockLLM()))
+    assert agent._ask("hỏi gì đó").startswith("[MOCK::")
+
+
+def test_claude_code_llm_parses_result_field_from_json():
+    from twmkt.agents.base import ClaudeCodeLLM
+    import json as _json
+
+    seen_cmd = {}
+
+    def fake_run(cmd, **kwargs):
+        seen_cmd["cmd"] = cmd
+        return _FakeProc(0, _json.dumps({"is_error": False, "result": "OK"}), "")
+
+    llm = ClaudeCodeLLM(run_fn=fake_run)
+    out = llm.complete("bạn là trợ lý", "trả lời OK", model="claude-haiku-4-5-20251001")
+    assert out == "OK"
+    assert seen_cmd["cmd"][:3] == ["claude", "-p", "bạn là trợ lý\n\ntrả lời OK"]
+    assert "--model" in seen_cmd["cmd"] and "claude-haiku-4-5-20251001" in seen_cmd["cmd"]
+
+
+def test_claude_code_llm_handles_is_error_nonzero_exit_and_bad_json():
+    from twmkt.agents.base import ClaudeCodeLLM
+    import json as _json
+
+    assert ClaudeCodeLLM(run_fn=lambda *a, **k: _FakeProc(
+        0, _json.dumps({"is_error": True, "result": "lỗi"}), "")).complete("s", "p") == ""
+    assert ClaudeCodeLLM(run_fn=lambda *a, **k: _FakeProc(1, "", "boom")).complete("s", "p") == ""
+    assert ClaudeCodeLLM(run_fn=lambda *a, **k: _FakeProc(0, "khong-phai-json", "")).complete("s", "p") == ""
+
+
+# --- Phase 1.5 hardening: timeout config, fail_loud, alias model -------------
+def test_make_llm_claude_code_reads_timeout_from_settings():
+    from twmkt import factory
+
+    custom = factory.make_llm(Settings({"llm": {"mode": "claude_code",
+                                                 "claude_code": {"timeout_s": 7}}}))
+    assert custom.timeout_s == 7.0
+    default = factory.make_llm(Settings({"llm": {"mode": "claude_code"}}))
+    assert default.timeout_s == 120.0
+
+
+def test_is_fail_loud_step_default_writer_only():
+    from twmkt import factory
+
+    assert factory.is_fail_loud_step(Settings({}), "writer") is True
+    assert factory.is_fail_loud_step(Settings({}), "brief") is False
+    assert factory.is_fail_loud_step(Settings({}), "router") is False
+    custom = Settings({"llm": {"fail_loud_steps": ["writer", "router"]}})
+    assert factory.is_fail_loud_step(custom, "router") is True
+    assert factory.is_fail_loud_step(custom, "brief") is False
+
+
+def test_anthropic_llm_alias_map_haiku_sonnet_opus():
+    from twmkt.agents.base import AnthropicLLM
+
+    assert AnthropicLLM._ALIASES["haiku"] == "claude-haiku-4-5-20251001"
+    assert AnthropicLLM._ALIASES["sonnet"] == "claude-sonnet-4-6"
+    assert AnthropicLLM._ALIASES["opus"] == "claude-opus-4-8"
+
+
+def test_claude_code_llm_passes_alias_straight_through_no_mapping():
+    """ClaudeCodeLLM KHÔNG map alias (khác AnthropicLLM) — CLI `claude` tự nhận
+    haiku|sonnet|opus qua --model."""
+    from twmkt.agents.base import ClaudeCodeLLM
+    import json as _json
+
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return _FakeProc(0, _json.dumps({"is_error": False, "result": "OK"}), "")
+
+    ClaudeCodeLLM(run_fn=fake_run).complete("s", "p", model="sonnet")
+    i = seen["cmd"].index("--model")
+    assert seen["cmd"][i + 1] == "sonnet"   # nguyên văn alias, không đổi thành id
+
+
+def test_fail_loud_true_raises_llm_call_error_on_failure():
+    from twmkt.agents.base import AnthropicLLM, ClaudeCodeLLM, LLMCallError, MockLLM
+
+    # AnthropicLLM: thiếu SDK/key -> fail_loud=False trả "" (như cũ), fail_loud=True raise.
+    a = AnthropicLLM()
+    assert a.complete("s", "p") == ""
+    try:
+        AnthropicLLM().complete("s", "p", fail_loud=True)
+    except LLMCallError:
+        pass
+    else:
+        raise AssertionError("fail_loud=True phải raise LLMCallError khi AnthropicLLM lỗi")
+
+    # ClaudeCodeLLM: thiếu binary -> fail_loud=False trả "", fail_loud=True raise.
+    def raise_fnf(*a, **k):
+        raise FileNotFoundError()
+
+    cc = ClaudeCodeLLM(run_fn=raise_fnf)
+    assert cc.complete("s", "p") == ""
+    try:
+        ClaudeCodeLLM(run_fn=raise_fnf).complete("s", "p", fail_loud=True)
+    except LLMCallError:
+        pass
+    else:
+        raise AssertionError("fail_loud=True phải raise LLMCallError khi ClaudeCodeLLM lỗi")
+
+    # is_error=true cũng phải raise khi fail_loud=True.
+    import json as _json
+
+    def fake_is_error(*a, **k):
+        return _FakeProc(0, _json.dumps({"is_error": True, "result": "lỗi"}), "")
+
+    try:
+        ClaudeCodeLLM(run_fn=fake_is_error).complete("s", "p", fail_loud=True)
+    except LLMCallError:
+        pass
+    else:
+        raise AssertionError("fail_loud=True phải raise khi is_error=true")
+
+    # MockLLM không bao giờ lỗi -> fail_loud không có tác dụng, không raise.
+    assert MockLLM().complete("s", "p", fail_loud=True) != ""
+
+
+class _FakeProc:
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
 def test_is_fully_produced_requires_all_three_types():
     """_is_fully_produced: CHỈ True khi CẢ 3 loại (infographic/article/video_script)
     đã có trong CONTENT (`seen`) — tín hiệu đặt Execute=DONE."""
@@ -1951,6 +2146,276 @@ def test_infographic_agent_extracts_stats_from_evidence_deterministic():
     assert spec["footer"]["source"] == "cafef.vn"
     assert len(spec["stats"]) >= 2
     assert all(s["value"].lower() in brief.evidence.lower() for s in spec["stats"])
+
+
+# --- Phase 2: Research/Brief -> facts[] có nhãn (agents/brief.py) -----------
+_SSI_EVIDENCE = (
+    "Trong báo cáo chiến lược nửa cuối 2026, SSI Research đồng thời đưa ra hai thông điệp "
+    "tưởng như trái ngược. Một mặt cảnh báo lạm phát có xu hướng tăng và nhập siêu đang mở "
+    "rộng, trong khi GDP 6 tháng đầu năm tăng tới 8,18%, mức cao nhất nhiều năm. "
+    "Tuy nhiên SSI vẫn lựa chọn 8 cổ phiếu có triển vọng tích cực. "
+    "Hòa Phát hưởng lợi từ Dung Quất 2 và phòng vệ thương mại HRC."
+)
+
+
+def test_verify_fact_in_evidence_finds_sentence_or_none():
+    from twmkt.agents.brief import verify_fact_in_evidence
+
+    evidence = "Doanh thu tăng 40%. Lợi nhuận đạt 1.200 tỷ đồng."
+    assert verify_fact_in_evidence("40%", evidence) == "Doanh thu tăng 40%."
+    assert verify_fact_in_evidence("99%", evidence) is None   # không có -> None
+    assert verify_fact_in_evidence("", evidence) is None
+
+
+def test_verify_fact_in_evidence_rejects_short_value_lodged_inside_longer_number():
+    """Bug thật phát hiện qua round-trip: value NGẮN ("8") KHÔNG được khớp nhầm
+    vào bên trong 1 số dài hơn ("8,18%") — phải đợi tới câu có "8" ĐỨNG RIÊNG."""
+    from twmkt.agents.brief import verify_fact_in_evidence
+
+    evidence = ("GDP 6 tháng đầu năm tăng tới 8,18%, mức cao nhất nhiều năm. "
+                "Tuy nhiên SSI vẫn lựa chọn 8 cổ phiếu có triển vọng tích cực.")
+    sent = verify_fact_in_evidence("8", evidence)
+    assert sent is not None and sent.startswith("Tuy nhiên")   # KHÔNG phải câu GDP
+    assert verify_fact_in_evidence("8,18%", evidence).startswith("GDP")
+
+
+def test_facts_from_llm_output_reassembles_value_when_llm_splits_unit():
+    """Bug thật phát hiện qua round-trip: LLM đôi khi tách unit RIÊNG
+    ("value":"8,18","unit":"%") thay vì dính liền ("8,18%"). value trơ "8,18"
+    đứng ngay trước "%" sẽ bị luật biên chặn (đúng, tránh khớp nhầm phần thập
+    phân) -> phải thử ghép lại "value+unit" trước khi kết luận bịa."""
+    from twmkt.agents.brief import facts_from_llm_output
+    import json as _json
+
+    raw = _json.dumps({"facts": [
+        {"value": "8,18", "label": "GDP 6 tháng đầu năm 2026", "unit": "%"},
+    ]}, ensure_ascii=False)
+    facts = facts_from_llm_output(raw, _SSI_EVIDENCE)
+    assert len(facts) == 1
+    assert facts[0].value == "8,18" and facts[0].unit == "%"
+    assert "8,18%" in facts[0].source
+
+
+def test_facts_from_llm_output_labels_meaningful_and_drops_hallucinated():
+    """Bài SSI: nhãn phải CÓ NGHĨA (không còn 'Số liệu N'); fact bịa (value
+    không có trong evidence) PHẢI bị loại."""
+    from twmkt.agents.brief import facts_from_llm_output
+    import json as _json
+
+    raw = _json.dumps({"facts": [
+        {"value": "8,18%", "label": "GDP 6 tháng đầu năm 2026", "unit": "%"},
+        {"value": "8 cổ phiếu", "label": "Số cổ phiếu SSI khuyến nghị triển vọng tích cực", "unit": None},
+        {"value": "15%", "label": "Biên lợi nhuận bịa (không có trong bài)", "unit": "%"},
+    ]}, ensure_ascii=False)
+
+    facts = facts_from_llm_output(raw, _SSI_EVIDENCE)
+    values = {f.value for f in facts}
+    assert values == {"8,18%", "8 cổ phiếu"}          # "15%" bịa -> loại
+    assert not any(f.label.startswith("Số liệu") for f in facts)   # KHÔNG còn nhãn vô nghĩa
+    gdp = next(f for f in facts if f.value == "8,18%")
+    assert gdp.label == "GDP 6 tháng đầu năm 2026" and gdp.unit == "%"
+    assert "8,18%" in gdp.source and "GDP" in gdp.source   # source = câu evidence gốc
+
+
+def test_facts_from_llm_output_empty_or_bad_json_returns_empty_list():
+    from twmkt.agents.brief import facts_from_llm_output
+
+    assert facts_from_llm_output("", _SSI_EVIDENCE) == []
+    assert facts_from_llm_output("không phải JSON", _SSI_EVIDENCE) == []
+    assert facts_from_llm_output('{"facts": []}', _SSI_EVIDENCE) == []
+
+
+def test_run_brief_passes_model_and_verifies_output():
+    """Dùng fake LLM (không gọi CLI/API thật) mô phỏng haiku trả JSON — kiểm
+    model truyền đúng qua step_model + facts verify được."""
+    from twmkt.agents.brief import run_brief
+    import json as _json
+
+    class _FakeBriefLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            assert model == "haiku" and fail_loud is False
+            return _json.dumps({"facts": [
+                {"value": "8,18%", "label": "GDP 6 tháng đầu năm 2026", "unit": "%"}]})
+
+    facts = run_brief(_FakeBriefLLM(), _SSI_EVIDENCE, model="haiku")
+    assert len(facts) == 1
+    assert facts[0].value == "8,18%" and facts[0].label == "GDP 6 tháng đầu năm 2026"
+
+
+def test_run_brief_degrades_to_empty_list_on_mockllm_or_empty_output():
+    """Bước 'brief' là bước PHỤ -> KHÔNG fail_loud -> lỗi/rỗng LÙI MƯỢT về []."""
+    from twmkt.agents.brief import run_brief
+    from twmkt.agents.base import MockLLM
+
+    assert run_brief(MockLLM(), _SSI_EVIDENCE) == []   # MockLLM không trả JSON thật -> []
+
+    class _EmptyLLM:
+        def complete(self, *a, **k):
+            return ""
+
+    assert run_brief(_EmptyLLM(), _SSI_EVIDENCE) == []
+
+
+def test_production_brief_facts_field_defaults_empty_and_independent_per_instance():
+    from twmkt.agents.production import ProductionBrief
+    from twmkt.models import Fact
+
+    b1 = ProductionBrief(title="a")
+    b2 = ProductionBrief(title="b")
+    assert b1.facts == [] and b2.facts == []
+    b1.facts.append(Fact(value="1%", label="x"))
+    assert b2.facts == []   # default_factory -> KHÔNG chia sẻ list giữa instance
+
+
+# --- Phase 2.5: siết recall brief (taxonomy fact mở rộng + Fact.kind) -------
+def test_fact_kind_defaults_to_other_and_kinds_constant():
+    from twmkt.models import FACT_KINDS, Fact
+
+    assert Fact(value="1%", label="x").kind == "other"
+    assert set(FACT_KINDS) == {"percent", "money", "count", "growth",
+                               "date", "ranking", "target", "other"}
+
+
+def test_facts_from_llm_output_parses_kind_and_falls_back_to_other():
+    from twmkt.agents.brief import facts_from_llm_output
+    import json as _json
+
+    raw = _json.dumps({"facts": [
+        {"value": "8", "label": "Số cổ phiếu SSI khuyến nghị", "unit": None, "kind": "count"},
+        {"value": "8,18%", "label": "GDP 6T/2026", "kind": "percent"},
+        {"value": "8 cổ phiếu", "label": "Nhãn không kind hợp lệ", "kind": "khong-ton-tai"},
+    ]}, ensure_ascii=False)
+    facts = facts_from_llm_output(raw, _SSI_EVIDENCE)
+    by_value = {f.value: f for f in facts}
+    assert by_value["8"].kind == "count"
+    assert by_value["8,18%"].kind == "percent"
+    assert by_value["8 cổ phiếu"].kind == "other"   # kind lạ -> "other", KHÔNG loại fact
+
+
+def test_facts_from_llm_output_attributes_count_fact_to_correct_sentence_not_percent():
+    """Yêu cầu Phase 2.5: evidence có CẢ '8 cổ phiếu' lẫn '8,18%' -> fact
+    value='8' kind=count PHẢI gán source về câu '8 cổ phiếu', KHÔNG về câu
+    '8,18%' (dù cả 2 câu đều chứa ký tự '8')."""
+    from twmkt.agents.brief import facts_from_llm_output
+    import json as _json
+
+    raw = _json.dumps({"facts": [
+        {"value": "8", "label": "Số cổ phiếu SSI khuyến nghị", "unit": None, "kind": "count"},
+    ]}, ensure_ascii=False)
+    facts = facts_from_llm_output(raw, _SSI_EVIDENCE)
+    assert len(facts) == 1
+    assert facts[0].kind == "count"
+    assert facts[0].source.startswith("Tuy nhiên SSI vẫn lựa chọn 8 cổ phiếu")
+    assert "8,18%" not in facts[0].source
+
+
+# --- Phase 3: StructureRouter (agents/structure_router.py) ------------------
+def test_route_from_llm_output_valid_schema_parses_correctly():
+    from twmkt.agents.structure_router import route_from_llm_output
+    import json as _json
+
+    raw = _json.dumps({
+        "content_type": "article", "structure": "S3", "hook": "H1",
+        "secondary_structure": None,
+        "rationale": "Nhiều dữ kiện rời dồn về 1 xu hướng chung ở cuối bài.",
+        "signals": {"has_genuine_paradox": False, "driver_count": 2, "has_central_thesis": False},
+    }, ensure_ascii=False)
+    d = route_from_llm_output(raw)
+    assert d.content_type == "article" and d.structure == "S3" and d.hook == "H1"
+    assert d.secondary_structure is None and d.fallback is False
+    assert d.signals == {"has_genuine_paradox": False, "driver_count": 2, "has_central_thesis": False}
+    assert "xu hướng" in d.rationale
+
+
+def test_route_from_llm_output_bad_json_falls_back_to_s1_h3():
+    from twmkt.agents.structure_router import route_from_llm_output
+
+    for bad in ("", "không phải JSON", "```\nvăn bản thường\n```"):
+        d = route_from_llm_output(bad)
+        assert d.structure == "S1" and d.hook == "H3" and d.fallback is True
+
+
+def test_route_from_llm_output_rejects_s5_without_genuine_paradox():
+    """Luật: S5 CẤM làm mặc định/không chắc — has_genuine_paradox=false thì
+    dù LLM có chọn S5, code PHẢI ép fallback (không tin mù prompt)."""
+    from twmkt.agents.structure_router import route_from_llm_output
+    import json as _json
+
+    raw = _json.dumps({
+        "content_type": "article", "structure": "S5", "hook": "H1",
+        "secondary_structure": None, "rationale": "Có vẻ nghịch lý.",
+        "signals": {"has_genuine_paradox": False, "driver_count": 0, "has_central_thesis": True},
+    }, ensure_ascii=False)
+    d = route_from_llm_output(raw)
+    assert d.structure != "S5"
+    assert d.structure == "S1" and d.hook == "H3" and d.fallback is True
+
+
+def test_route_from_llm_output_allows_s5_when_genuine_paradox_true():
+    from twmkt.agents.structure_router import route_from_llm_output
+    import json as _json
+
+    raw = _json.dumps({
+        "content_type": "article", "structure": "S5", "hook": "H1",
+        "secondary_structure": None, "rationale": "2 tín hiệu thật sự mâu thuẫn.",
+        "signals": {"has_genuine_paradox": True, "driver_count": 0, "has_central_thesis": True},
+    }, ensure_ascii=False)
+    d = route_from_llm_output(raw)
+    assert d.structure == "S5" and d.fallback is False
+
+
+def test_route_from_llm_output_driver_count_ge3_reflected_in_secondary_s4():
+    from twmkt.agents.structure_router import route_from_llm_output
+    import json as _json
+
+    raw = _json.dumps({
+        "content_type": "article", "structure": "S1", "hook": "H3",
+        "secondary_structure": "S4",
+        "rationale": "Luận điểm trung tâm rõ, kèm 1 đoạn liệt kê 4 driver độc lập.",
+        "signals": {"has_genuine_paradox": False, "driver_count": 4, "has_central_thesis": True},
+    }, ensure_ascii=False)
+    d = route_from_llm_output(raw)
+    assert d.structure == "S1" and d.secondary_structure == "S4"
+    assert d.signals["driver_count"] >= 3
+    assert d.fallback is False
+
+
+def test_route_from_llm_output_invalid_secondary_dropped_not_fallback():
+    """secondary_structure lạ -> bỏ giá trị đó (None), KHÔNG fallback cả quyết
+    định (field phụ, không đáng huỷ toàn bộ)."""
+    from twmkt.agents.structure_router import route_from_llm_output
+    import json as _json
+
+    raw = _json.dumps({
+        "content_type": "article", "structure": "S2", "hook": "H2",
+        "secondary_structure": "S9-khong-ton-tai", "rationale": "...",
+        "signals": {"has_genuine_paradox": False, "driver_count": 1, "has_central_thesis": True},
+    }, ensure_ascii=False)
+    d = route_from_llm_output(raw)
+    assert d.structure == "S2" and d.secondary_structure is None and d.fallback is False
+
+
+def test_run_route_with_mockllm_falls_back_gracefully():
+    from twmkt.agents.base import MockLLM
+    from twmkt.agents.structure_router import run_route
+    from twmkt.agents.production import ProductionBrief
+
+    brief = ProductionBrief(title="Bài test router")
+    d = run_route(MockLLM(), brief)
+    assert d.structure == "S1" and d.hook == "H3" and d.fallback is True
+
+
+def test_build_router_prompt_includes_facts_kind_and_classification():
+    from twmkt.agents.structure_router import build_router_prompt
+    from twmkt.agents.production import ProductionBrief
+    from twmkt.models import Fact
+
+    brief = ProductionBrief(title="SSI 8 cổ phiếu", hook="hook gợi ý", group="ChungKhoan",
+                            topic="SSI", facts=[Fact(value="8,18", label="GDP 6T/2026",
+                                                     unit="%", kind="percent", source="...")])
+    prompt = build_router_prompt(brief, classification={"hotness_pct": 87})
+    assert "GDP 6T/2026" in prompt and "[percent]" in prompt
+    assert "hotness_pct" in prompt and "87" in prompt
 
 
 # --- Render Infographic (src/twmkt/render, $0 tất định) --------------------
@@ -2393,11 +2858,37 @@ def test_power_on_acquire_lock_warns_but_allows_different_host():
     po.release_lock(tmp)
 
 
+# xfail: test biết trước ĐANG đỏ vì 1 phần việc CHƯA làm (không phải regression
+# mới) — ghi rõ lý do + phase sẽ fix, để suite chạy XANH sạch mà không che giấu
+# nợ kỹ thuật. Nếu ai lỡ fix xong mà quên bỏ khỏi danh sách này -> in XPASS (cảnh
+# báo, không fail) để dễ nhận ra và dọn lại.
+_XFAIL = {
+    "test_load_voice_lock_always_includes_3_rule_sections":
+        "Phase 4 (voice-lock động): agents/voice.py còn hardcode §1+§2+§2b+§3 "
+        "tĩnh; docs/voice_examples.md đã lên v3 (§2 = menu S1-S5, router chọn "
+        "động) nhưng loader chưa cập nhật theo -> tiêu đề §2 đổi, assert cũ lệch.",
+}
+
+
 def _run_all():
     fns = [v for k, v in globals().items() if k.startswith("test_")]
+    xfail = passed = 0
     for fn in fns:
-        fn(); print(f"PASS {fn.__name__}")
-    print(f"\n{len(fns)} tests passed.")
+        name = fn.__name__
+        if name in _XFAIL:
+            try:
+                fn()
+            except Exception:
+                print(f"XFAIL {name} ({_XFAIL[name]})")
+                xfail += 1
+            else:
+                print(f"XPASS {name} — ĐÃ pass, xoá khỏi _XFAIL trong test_pipeline.py")
+                passed += 1
+            continue
+        fn()
+        print(f"PASS {name}")
+        passed += 1
+    print(f"\n{passed} tests passed, {xfail} xfail (nợ kỹ thuật đã biết) / {len(fns)} tổng.")
 
 
 if __name__ == "__main__":

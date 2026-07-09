@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .agents.base import AnthropicLLM, LLMClient, MockLLM
+from .agents.base import AnthropicLLM, ClaudeCodeLLM, LLMClient, MockLLM
 from .agents.router import LLMRouter, Tier
 from .approval import sheets_gate
 from .approval.gate import ApprovalGate, AutoApproveGate, ConsoleApprovalGate
@@ -145,6 +145,45 @@ def build_content_llm(settings: Settings, *, offline: bool = False,
     if model_name and isinstance(base, AnthropicLLM):
         base.model = model_name   # ghi đè settings.yaml khi --model chỉ định rõ
     return LLMRouter(base, default_tier=Tier.SMART, budget_usd=_budget(settings))
+
+
+# --- LLM adapter mới (Research/Brief -> StructureRouter -> Writer, xem CLAUDE.md
+# lộ trình v3) — SONG SONG với build_*_llm/LLMRouter/Tier ở trên, KHÔNG thay thế,
+# KHÔNG đụng LLMRouter (đó vẫn là cơ chế đo chi phí cho đường Hook/Producer cũ).
+# Chọn backend theo llm.mode; model theo TỪNG BƯỚC (llm.step_models.<step>) truyền
+# qua complete(..., model=...) mỗi lần gọi, KHÔNG cố định ở constructor.
+def make_llm(settings: Settings) -> LLMClient:
+    """claude_code (CLI `claude -p`, gói Pro/Max hiện có, KHÔNG cần API key riêng)
+    | api (AnthropicLLM, cần ANTHROPIC_API_KEY) | mock ($0). KHÔNG BAO GIỜ crash
+    khi thiếu key/SDK/binary — các backend tự lùi mượt (trả "") ở complete(),
+    KHÔNG kiểm tra tại đây. In banner "LLM backend: <mode>" mỗi lần gọi (không
+    lùi mượt trong im lặng)."""
+    mode = (settings.get("llm.mode", "mock") or "mock").lower()
+    print(f"LLM backend: {mode}")
+    if mode == "mock":
+        return MockLLM()
+    if mode == "claude_code":
+        timeout_s = float(settings.get("llm.claude_code.timeout_s", 120))
+        return ClaudeCodeLLM(timeout_s=timeout_s)
+    if mode == "api":
+        return AnthropicLLM(model=settings.get("llm.content_model", "claude-sonnet-4-6"),
+                            max_tokens=int(settings.get("llm.max_tokens", 1500)))
+    raise ValueError(f"llm.mode không hỗ trợ: {mode} (claude_code|api|mock)")
+
+
+def step_model(settings: Settings, step: str) -> str | None:
+    """ALIAS model (haiku|sonnet|opus) cho 1 BƯỚC (brief|router|writer) theo
+    llm.step_models.<step> — truyền vào complete(..., model=...); mỗi backend tự
+    map alias -> id/cờ thật (xem agents/base.py). Thiếu key -> None (backend tự
+    dùng model mặc định của nó, KHÔNG lỗi)."""
+    return settings.get(f"llm.step_models.{step}") or None
+
+
+def is_fail_loud_step(settings: Settings, step: str) -> bool:
+    """True nếu `step` nằm trong llm.fail_loud_steps (mặc định ["writer"]) —
+    truyền vào complete(..., fail_loud=...). Bước fail-loud: lỗi/timeout raise
+    LLMCallError thay vì lùi mượt trả "" (không được âm thầm sinh nội dung rỗng)."""
+    return step in (settings.get("llm.fail_loud_steps", ["writer"]) or [])
 
 
 # --- Cổng duyệt: console | auto | sheets -----------------------------------

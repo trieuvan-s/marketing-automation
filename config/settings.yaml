@@ -321,6 +321,26 @@ llm:
   max_tokens: 1500
   budget_usd: 1.0                 # hạn mức mềm cho 1 lần chạy (LLMRouter -> BudgetExceeded)
 
+  # --- Adapter mới (factory.make_llm), SONG SONG với provider/*_model + LLMRouter
+  # ở trên (KHÔNG thay thế) — dùng cho pipeline Research/Router/Writer (Brief →
+  # StructureRouter → Voice-lock động). mode chọn backend; step_models chọn model
+  # theo TỪNG BƯỚC (không phải theo agent cũ) — truyền qua complete(..., model=...).
+  mode: "claude_code"              # claude_code (CLI `claude -p`, gói Pro/Max, KHÔNG cần
+                                    # ANTHROPIC_API_KEY riêng) | api (AnthropicLLM) | mock ($0)
+  claude_code:
+    timeout_s: 120                 # timeout 1 lượt `claude -p` (giây)
+  # ALIAS (haiku|sonnet|opus), KHÔNG phải id đầy đủ — mỗi backend tự map alias
+  # -> id/cờ thật (ClaudeCodeLLM: thẳng vào --model; AnthropicLLM: bảng alias
+  # riêng trong agents/base.py). Đổi model chỉ cần sửa Ở ĐÂY.
+  step_models:
+    brief: "haiku"                  # Research/Brief — rẻ, chỉ trích + gắn nhãn
+    router: "haiku"                 # StructureRouter — phân loại/chọn khung, rẻ
+    writer: "sonnet"                # Writer (article/video) — tầng đắt, chất lượng cao
+  # Bước nào PHẢI fail-loud (raise LLMCallError khi lỗi thay vì lùi mượt trả "")
+  # — Writer sinh nội dung thật, KHÔNG được âm thầm ghi CONTENT rỗng. Bước phụ
+  # (hook/enrich/brief-label) KHÔNG liệt ở đây -> giữ lùi mượt như trước.
+  fail_loud_steps: ["writer"]
+
 # --- Sản xuất nội dung ----------------------------------------------
 producers:
   hook: true                      # bước Hook (góc marketing) - mục b/c

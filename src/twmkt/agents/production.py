@@ -47,7 +47,7 @@ from urllib.parse import urlparse
 
 from ._jsonparse import try_json_object
 from ..guardrails import compliance
-from ..models import ContentDraft, ContentFormat
+from ..models import ContentDraft, ContentFormat, Fact
 from .base import Agent, LLMClient
 from .voice import load_voice_lock
 
@@ -75,6 +75,7 @@ class ProductionBrief:
     url: str = ""                                # CONTEXT.Source (bài chính)
     evidence: str = ""                           # thân bài (full-fetch) để LLM bám + chống bịa số
     background: str = ""                         # bối cảnh/tiền lệ research THÊM (Claude Code tự tìm)
+    facts: list[Fact] = field(default_factory=list)  # số liệu đã gắn nhãn (agents/brief.py, Phase 2)
 
 
 def _tickers_line(brief: ProductionBrief) -> str:

@@ -110,6 +110,36 @@ class ResearchBrief:
     created_at: datetime = field(default_factory=_now)
 
 
+# "Infographic-worthy" = MỌI tuyên bố định lượng hoặc mốc có tên đáng lên hình,
+# KHÔNG chỉ %/tiền (xem agents/brief.py _SYSTEM). Phase 5 dùng `kind` để chọn
+# template hiển thị (percent -> vòng tròn %, ranking -> huy hiệu, date -> mốc
+# thời gian trên trục...). "other" = không khớp nhóm nào ở trên (LÙI MƯỢT, vẫn
+# giữ fact — không loại chỉ vì kind lạ).
+FACT_KINDS = ("percent", "money", "count", "growth", "date", "ranking", "target", "other")
+
+
+@dataclass
+class Fact:
+    """1 số liệu/tuyên bố định lượng đã trích + gắn NHÃN NGHĨA từ evidence thô —
+    sinh bởi bước Research/Brief (agents/brief.py, model alias 'brief' = Haiku,
+    xem factory.make_llm/step_model). THAY THẾ nhãn vô nghĩa "Số liệu N" của
+    InfographicSpecAgent cũ (regex mù trên text thô).
+
+    KHÔNG hợp nhất với ResearchBrief (đường Hook/Luồng B RAG giữ nguyên, không
+    đụng) — Fact/facts[] CHỈ dùng cho ProductionBrief (agents/production.py).
+
+    Ràng buộc chống bịa: mỗi Fact PHẢI verify được — `value` xuất hiện NGUYÊN
+    VĂN trong `source` (1 câu evidence thật). Fact nào không verify được bị loại
+    ngay ở agents/brief.facts_from_llm_output(), KHÔNG bao giờ tồn tại instance
+    Fact "bịa".
+    """
+    value: str            # "8,18", "8", "1.200" — nguyên văn số trong evidence (KHÔNG kèm unit)
+    label: str             # "GDP 6T/2026", "LNTT MB" — nhãn CÓ NGHĨA, không phải "Số liệu N"
+    unit: str | None = None    # "%", "tỷ đồng"... None nếu value không đi kèm đơn vị (vd đếm)
+    source: str = ""       # câu evidence gốc chứa value (audit/verify)
+    kind: str = "other"    # xem FACT_KINDS — percent|money|count|growth|date|ranking|target|other
+
+
 @dataclass
 class ContentDraft:
     fmt: ContentFormat
