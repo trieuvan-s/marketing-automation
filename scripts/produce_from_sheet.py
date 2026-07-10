@@ -6,10 +6,12 @@ Luồng:
     • ARTICLE (Phase 4.9 — Brief → route-once (đóng băng) → run_writer_with_retry,
       xem agents/brief.py + agents/route_once.py + agents/writer.py)
     • VideoScriptAgent     (kịch bản video, LLM, schema JSON — đường 3-agent cũ)
-    • InfographicSpecAgent (spec JSON, tất định $0 — số liệu trích thẳng evidence)
+    • InfographicSpecAgent (Phase 4.11 — Composer: LLM Loại B/haiku nén facts[]
+      + RouterDecision thành spec 8 trường, KHÔNG còn tất định/$0 thuần)
   --guardrail-->  compliance (disclaimer/claim cấm) + chặn bịa số (so evidence,
     Mục C: chấp nhận số làm tròn hợp lý khớp facts[].canonical_value)
-  --ghi-->  tab CONTENT (Context|Type|Status|Output) + storage/output/<ngày>/
+  --ghi-->  tab CONTENT (Context|Type|Status|Output) + <data_root>/output/<ngày>/
+    (data_root NGOÀI repo, xem Phase DATA-ROOT / config.data_path())
   --> người duyệt xem & duyệt sản phẩm (cổng 2) --> Publish (giai đoạn sau).
 
 Nguyên tắc: LLM đắt CHỈ chạy ở đây (sau cổng 1). Đã sinh rồi thì bỏ qua (dedup
@@ -44,7 +46,7 @@ HAI CHẾ ĐỘ điền nội dung article/video (infographic luôn tất địn
      để dành cho automation 100% không người trông (tương lai, xem CLAUDE.md).
   2. --draft / --ingest: KHÔNG cần API key riêng — nhờ Claude Code (phiên chat
      đang chạy, dùng gói Pro/Max/Team) viết nội dung. --draft chuẩn bị prompt
-     vào storage.drafts_dir/<ngày>/ (theo NGÀY, như storage/output — dễ nhận
+     vào storage.drafts_dir/<ngày>/ (theo NGÀY, như output — dễ nhận
      biết bản nháp mới/tồn đọng), Claude đọc + viết JSON đúng schema cạnh đó,
      --ingest quét TẤT CẢ thư mục ngày rồi nạp lại qua ĐÚNG guardrail/CONTENT
      như chế độ 1 (không phân biệt "ai viết", không phân biệt "ngày nào").
@@ -76,7 +78,7 @@ ensure_utf8_stdio()
 
 from twmkt import factory  # noqa: E402
 from twmkt.agents.base import MockLLM  # noqa: E402
-from twmkt.agents.brief import run_brief  # noqa: E402
+from twmkt.agents.brief import BriefResult, run_brief  # noqa: E402
 from twmkt.agents.production import (  # noqa: E402
     AnalysisWriterAgent, InfographicSpecAgent, ProductionBrief, VideoScriptAgent,
     all_production_agents, analysis_fields_from_data, apply_guardrails,
@@ -87,7 +89,7 @@ from twmkt.agents.prompts import resolve_prompts  # noqa: E402
 from twmkt.agents.route_once import RouterDecisionStore, get_or_route  # noqa: E402
 from twmkt.agents.voice import assemble_voice  # noqa: E402
 from twmkt.agents.writer import WriterOutcome, run_writer_with_retry  # noqa: E402
-from twmkt.config import load_settings  # noqa: E402
+from twmkt.config import data_path, load_settings  # noqa: E402
 from twmkt.models import ContentDraft, ContentFormat, Source  # noqa: E402
 from twmkt.sheets_board import SheetsBoard, content_row  # noqa: E402
 from twmkt.utils.telegram_notifier import make_notifier  # noqa: E402
@@ -106,8 +108,24 @@ def _writer_notify_adapter(notifier):
 
 def _is_fully_produced(context: str, seen: set[tuple[str, str]]) -> bool:
     """True nếu CẢ 3 loại (infographic/article/video_script) của `context` đã
-    có trong CONTENT (`seen`) — tín hiệu để đặt Execute=DONE (idempotent)."""
+    có trong CONTENT (`seen`) — tín hiệu để đặt Execute=DONE (idempotent).
+    Dùng cho run_draft()/run_ingest() (đường --draft/--ingest, KHÔNG đọc
+    RouterDecision.output_channels — NGOÀI PHẠM VI Phase 4.13, xem run_draft)."""
     return all((context, t) in seen for t in _ALL_TYPES)
+
+
+# Phase 4.13 Mục A: output_channels dùng tên "video" (khớp RouterDecision),
+# CONTENT dùng tên "video_script" (khớp ContentFormat.VIDEO_SCRIPT.value) —
+# 2 vocabulary khác nhau có chủ đích (channels = ý định của router, content
+# type = định dạng sản phẩm), map ở ĐÚNG 1 chỗ để khỏi lẫn lộn rải rác.
+_CHANNEL_TO_TYPE = {"article": "article", "infographic": "infographic", "video": "video_script"}
+
+
+def _is_fully_produced_channels(context: str, seen: set[tuple[str, str]], channels: dict) -> bool:
+    """True nếu MỌI tuyến channels[c]=True của `context` đã có trong CONTENT
+    (`seen`) — tuyến channels[c]=False KHÔNG chặn DONE (chủ động không sinh,
+    KHÔNG phải thiếu). Dùng cho run() (Phase 4.9+, có RouterDecision thật)."""
+    return all((context, _CHANNEL_TO_TYPE[c]) in seen for c, enabled in channels.items() if enabled)
 
 
 def _slug(text: str, n: int = 40) -> str:
@@ -202,7 +220,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
     route_llm = MockLLM() if offline else factory.make_llm(settings)
     writer_llm = MockLLM() if offline else factory.build_writer_llm(settings)
     router_store = RouterDecisionStore(
-        settings.get("router.decisions_path", "storage/router_decisions.json"))
+        data_path(settings.get("router.decisions_path", "state/router_decisions.json"), settings=settings))
 
     # Execute: dòng vừa APPROVE (Execute rỗng) -> tự đặt RUN; rồi xử lý dòng
     # Status=APPROVE VÀ Execute ĐANG "RUN" (mới/đã reset tay) HOẶC "FAILED"
@@ -235,7 +253,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
     html_collector = factory.build_collector_for_source(Source("_", "_", fetch_type="html"), settings)
 
     seen = board.existing_content_keys()   # (Context, Type) đã sinh -> bỏ qua
-    out_dir = Path(settings.get("storage.output_dir", "storage/output")) / _today()
+    out_dir = data_path(settings.get("storage.output_dir", "output"), _today(), settings=settings)
     out_dir.mkdir(parents=True, exist_ok=True)
     approx_tol = float(settings.get("guardrail.approx_tolerance_pct", 5)) / 100
 
@@ -252,23 +270,45 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
         # with-retry. Bỏ qua HOÀN TOÀN nếu đã có trong CONTENT (idempotent,
         # KHÔNG tốn thêm lượt Brief/Router/Writer cho bài đã DONE).
         write_article = (item["context"], "article") not in seen
-        facts = (run_brief(route_llm, evidence, model=factory.step_model(settings, "brief"),
-                           fail_loud=factory.is_fail_loud_step(settings, "brief"))
-                if write_article else [])
+        # Phase 4.12: run_brief() trả BriefResult (facts + no_numeric_content)
+        # — phân biệt facts=[] RỖNG-HỢP-LỆ (Brief chạy trọn vẹn, xác nhận tin
+        # thuần định tính) vs RỖNG-DO-HỎNG (LLM lỗi/timeout — cờ luôn False).
+        brief_result = (run_brief(route_llm, evidence, model=factory.step_model(settings, "brief"),
+                                  fail_loud=factory.is_fail_loud_step(settings, "brief"))
+                       if write_article else BriefResult())
         brief = ProductionBrief(
             title=item["context"], hook=item["hook"], tickers=item["tickers"],
             group=item["group"], topic=item["topic"], url=item["source"],
-            evidence=evidence, facts=facts,
+            evidence=evidence, facts=brief_result.facts,
+            no_numeric_content=brief_result.no_numeric_content,
         )
+
+        # route-once (Mục A): gọi KHÔNG ĐIỀU KIỆN cho MỌI item (kể cả khi
+        # article đã DONE từ trước) — cache-hit tức thời khi đã đóng băng
+        # (KHÔNG tốn lượt LLM), cần thiết để VIDEO/INFOGRAPHIC (Phase 4.10)
+        # cũng đọc ĐÚNG quyết định article của CÙNG chủ đề (nhất quán khung
+        # multi-content, xem báo cáo Phase 4.7 §3).
+        decision = get_or_route(
+            route_llm, brief, store=router_store, key=_slug(item["context"]),
+            model=factory.step_model(settings, "router"),
+            fail_loud=factory.is_fail_loud_step(settings, "router"))
+        # Phase 4.13 Mục A: tuyến nào ĐƯỢC sinh cho chủ đề này — quyết-định-từ-
+        # đầu của router (đóng băng CÙNG decision), THAY nhánh "SKIPPED-vì-rỗng"
+        # phản ứng-sau của Phase 4.12 (xem nhánh infographic bên dưới).
+        channels = decision.output_channels
 
         article_outcome = None
         if not write_article:
             skipped += 1
+        elif not channels.get("article", True):
+            reason = (f"Router quyết định tuyến article không hợp tin này: "
+                     f"{decision.channel_rationale.get('article') or '(router không cho lý do)'}")
+            rows.append(content_row(context=item["context"], type_="article",
+                                    status="SKIPPED", output="", notes=reason))
+            seen.add((item["context"], "article"))
+            skipped += 1
+            notifier.notify("skipped", topic=item["context"], type="article", reason=reason)
         else:
-            decision = get_or_route(
-                route_llm, brief, store=router_store, key=_slug(item["context"]),
-                model=factory.step_model(settings, "router"),
-                fail_loud=factory.is_fail_loud_step(settings, "router"))
             r = run_writer_with_retry(
                 writer_llm, brief, decision, settings=settings,
                 model=factory.step_model(settings, "writer"),
@@ -300,14 +340,81 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                 flagged += 1
                 notifier.notify("error", topic=item["context"], type="article", issues=r.reason)
 
-        # --- VIDEO/INFOGRAPHIC: vẫn qua đường 3-agent Producer cũ (KHÔNG có
-        # RouterDecision — kiến trúc hiện tại, xem báo cáo Phase 4.7 §3, CHỈ
-        # ARTICLE tiêu thụ router).
+        # --- VIDEO/INFOGRAPHIC: VIDEO tiêu thụ CÙNG RouterDecision đã đóng
+        # băng (voice-lock động + §4 chuyển-thể, Phase 4.10, xem VideoScriptAgent
+        # .run) — nhất quán khung với article của CÙNG chủ đề. INFOGRAPHIC
+        # (Phase 4.11 — Composer) CŨNG tiêu thụ decision + facts[], nhưng dùng
+        # LLM RIÊNG (route_llm, alias 'composer'/haiku — Loại B rẻ, KHÔNG dùng
+        # content_llm/Sonnet như video/article) — swap .llm/.model NGAY TRƯỚC
+        # khi gọi run(), giữ nguyên instance đã áp prompt_overrides ở trên.
+        # facts[] rỗng -> spec KHÔNG bịa nhãn, đánh dấu NEEDS_HUMAN (Status=
+        # ERROR ở CONTENT, xem đoạn append issue bên dưới) — KHÔNG đụng Execute
+        # cấp DÒNG (đó vẫn do riêng article_outcome quyết định, phạm vi 4.9).
         for agent in all_production_agents(content_llm, prompt_overrides=prompt_overrides):
             if isinstance(agent, AnalysisWriterAgent):
                 continue   # article đã xử lý ở nhánh route-once+retry trên
-            draft = apply_guardrails(agent.run(brief), brief.evidence, brief.background,
+
+            # Phase 4.13 Mục A: router QUYẾT NGAY TỪ ĐẦU tuyến này không hợp
+            # (channels[ch]=False, đóng băng cùng RouterDecision) -> SKIPPED
+            # HỢP LỆ, KHÔNG gọi agent (khỏi tốn lượt LLM) — THAY nhánh phản
+            # ứng-sau "facts rỗng -> skip" của Phase 4.12 làm cơ chế CHÍNH.
+            ch = ("infographic" if isinstance(agent, InfographicSpecAgent)
+                 else "video" if isinstance(agent, VideoScriptAgent) else None)
+            if ch is not None and not channels.get(ch, True):
+                type_key = _CHANNEL_TO_TYPE[ch]
+                if (item["context"], type_key) in seen:
+                    skipped += 1
+                    continue
+                reason = (f"Router quyết định tuyến {ch} không hợp tin này: "
+                         f"{decision.channel_rationale.get(ch) or '(router không cho lý do)'}")
+                rows.append(content_row(context=item["context"], type_=type_key,
+                                        status="SKIPPED", output="", notes=reason))
+                seen.add((item["context"], type_key))
+                skipped += 1
+                notifier.notify("skipped", topic=item["context"], type=ch, reason=reason)
+                continue
+
+            # Phase 4.12 (thu hẹp phạm vi ở 4.13 — chỉ còn xử lý CA BẤT ĐỒNG):
+            # router chọn infographic:true (đã qua cổng ở trên) NHƯNG Brief xác
+            # nhận no_numeric_content=True (facts=[] hợp lệ, tin thuần định
+            # tính) -> router "tưởng" có số nhưng Brief đọc kỹ hơn thấy không
+            # có -> vẫn SKIP (không có gì để trình bày), NHƯNG log WARN để
+            # tinh chỉnh prompt router (mục 3, "để tinh chỉnh"). facts[] rỗng
+            # mà KHÔNG có cờ (Brief hỏng thật) vẫn giữ nguyên đường NEEDS_HUMAN
+            # cũ bên dưới (Mục B item 3, KHÔNG đổi).
+            if isinstance(agent, InfographicSpecAgent) and not brief.facts and brief.no_numeric_content:
+                if (item["context"], "infographic") in seen:
+                    skipped += 1
+                    continue
+                print(f"[CẢNH BÁO] router/brief bất đồng: router chọn infographic:true "
+                     f"nhưng Brief xác nhận no_numeric_content=true (không có số) cho "
+                     f"'{item['context'][:60]}' -> vẫn SKIP, cần tinh chỉnh prompt router.")
+                reason = ("Router chọn infographic:true nhưng Brief xác nhận không có số "
+                         "liệu (no_numeric_content=true) -> bất đồng router/brief, tạm SKIP")
+                rows.append(content_row(context=item["context"], type_="infographic",
+                                        status="SKIPPED", output="", notes=reason))
+                seen.add((item["context"], "infographic"))
+                skipped += 1
+                notifier.notify("skipped", topic=item["context"], type="infographic", reason=reason)
+                continue
+
+            if isinstance(agent, VideoScriptAgent):
+                raw_draft = agent.run(brief, decision)
+            elif isinstance(agent, InfographicSpecAgent):
+                agent.llm = route_llm
+                agent.model = factory.step_model(settings, "composer")
+                raw_draft = agent.run(brief, decision)
+            else:
+                raw_draft = agent.run(brief)
+            draft = apply_guardrails(raw_draft, brief.evidence, brief.background,
                                      brief.facts, approx_tolerance=approx_tol)
+            if isinstance(agent, InfographicSpecAgent) and not brief.facts:
+                # Tới được đây nghĩa là no_numeric_content=False -> facts rỗng
+                # DO Brief HỎNG THẬT (timeout/lỗi/parse hỏng), KHÔNG phải tin
+                # định tính (nhánh đó đã "continue" ở trên) -> vẫn NEEDS_HUMAN.
+                draft.compliance_issues.append(
+                    "facts[] rỗng (Brief chưa trích được số liệu) -> NEEDS_HUMAN, "
+                    "không bịa nhãn 'Số liệu N'")
             type_ = draft.fmt.value
             if (item["context"], type_) in seen:
                 skipped += 1
@@ -333,12 +440,13 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
 
         # Execute (Phase 4.9): article FAILED/NEEDS_HUMAN quyết định dòng CHƯA
         # xong (dù video/infographic có xong hay không); article DONE (hoặc đã
-        # DONE từ trước, write_article=False) -> xét đủ CẢ 3 loại như cũ.
+        # DONE từ trước, write_article=False) -> xét đủ MỌI tuyến channels[c]=
+        # True (Phase 4.13 — tuyến router chủ động tắt KHÔNG chặn DONE nữa).
         if article_outcome == WriterOutcome.FAILED:
             failed_rows.append(item["row"])
         elif article_outcome == WriterOutcome.NEEDS_HUMAN:
             needs_human_rows.append(item["row"])
-        elif _is_fully_produced(item["context"], seen):
+        elif _is_fully_produced_channels(item["context"], seen, channels):
             done_rows.append(item["row"])
 
     written = board.append_content_rows(rows)
@@ -452,15 +560,14 @@ def run_draft(*, limit: int = 5, setup: bool = False) -> dict:
     sources = board.read_sources() or factory.build_sources(settings)
     html_collector = factory.build_collector_for_source(Source("_", "_", fetch_type="html"), settings)
     seen = board.existing_content_keys()
-    out_dir = Path(settings.get("storage.output_dir", "storage/output")) / _today()
+    out_dir = data_path(settings.get("storage.output_dir", "output"), _today(), settings=settings)
     out_dir.mkdir(parents=True, exist_ok=True)
     # Theo NGÀY (như storage/output/<ngày>) — trước đây ghi phẳng vào drafts_dir,
     # không phân biệt được bản nháp mới/cũ khi tồn đọng (vd chưa --ingest kịp).
     # drafts_base = gốc KHÔNG có ngày (dò bản nháp CŨ còn tồn đọng ở NGÀY TRƯỚC,
     # tránh chuẩn bị trùng); drafts_dir = nơi GHI file MỚI hôm nay.
-    drafts_base = Path(settings.get("storage.drafts_dir", "storage/production_drafts"))
-    drafts_dir = drafts_base / _today()
-    drafts_dir.mkdir(parents=True, exist_ok=True)
+    drafts_base = data_path(settings.get("storage.drafts_dir", "state/production_drafts"), settings=settings)
+    drafts_dir = data_path(settings.get("storage.drafts_dir", "state/production_drafts"), _today(), settings=settings)
 
     rows: list[list[str]] = []
     done_rows: list[int] = []   # dòng CONTEXT (1-based) đã đủ CẢ 3 loại -> Execute=DONE
@@ -474,7 +581,11 @@ def run_draft(*, limit: int = 5, setup: bool = False) -> dict:
         )
         slug = _slug(context)
 
-        # Infographic: tất định, $0 -> sinh NGAY, không cần Claude Code.
+        # Infographic: sinh NGAY (không cần Claude Code) — NGOÀI PHẠM VI Phase
+        # 4.9/4.10/4.11: đường --draft KHÔNG chạy run_brief() nên brief.facts
+        # luôn rỗng ở đây -> InfographicSpecAgent (Phase 4.11 Composer) trả
+        # spec RỖNG có chủ ý (_empty_infographic_spec, KHÔNG bịa), không phải
+        # bug — biết trước, chưa wire facts[]/route-once cho đường thủ công này.
         if (context, "infographic") not in seen:
             approx_tol = float(settings.get("guardrail.approx_tolerance_pct", 5)) / 100
             draft = apply_guardrails(InfographicSpecAgent(None).run(brief), brief.evidence,
@@ -545,14 +656,14 @@ def run_ingest(*, setup: bool = False) -> dict:
     board = _open_board(settings, setup=setup)
     # Quét TẤT CẢ thư mục ngày (storage.drafts_dir/<ngày>/) — bản nháp có thể
     # tồn đọng từ ngày TRƯỚC nếu --ingest chưa chạy kịp, KHÔNG chỉ hôm nay.
-    drafts_dir = Path(settings.get("storage.drafts_dir", "storage/production_drafts"))
+    drafts_dir = data_path(settings.get("storage.drafts_dir", "state/production_drafts"), settings=settings)
     brief_paths = sorted(drafts_dir.glob("*/*.brief.json"))
     if not drafts_dir.exists() or not brief_paths:
         print(f"Không có bản nháp nào chờ ({drafts_dir}/<ngày>/). Chạy --draft trước.")
         return {"ingested": 0, "skipped": 0, "pending": 0}
 
     seen = board.existing_content_keys()
-    out_dir = Path(settings.get("storage.output_dir", "storage/output")) / _today()
+    out_dir = data_path(settings.get("storage.output_dir", "output"), _today(), settings=settings)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     approx_tol = float(settings.get("guardrail.approx_tolerance_pct", 5)) / 100

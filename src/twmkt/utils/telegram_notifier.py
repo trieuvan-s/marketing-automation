@@ -47,6 +47,9 @@ _EMOJI = {
     "needs_human": "🚨",
     # crawl phát hiện + ghi CONTEXT thành công 1 tin MỚI (scripts/review_to_sheet.py)
     "new_topic": "🆕",
+    # Phase 4.12: bỏ qua HỢP LỆ (vd infographic cho tin thuần định tính,
+    # KHÔNG phải lỗi) — tách khỏi "error"/"needs_human" (🚨) để không báo động giả.
+    "skipped": "ℹ️",
 }
 
 _UNEXPANDED_ENV_RE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")

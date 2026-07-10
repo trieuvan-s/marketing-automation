@@ -35,7 +35,7 @@ from pathlib import Path
 
 from .base import LLMClient
 from .production import ProductionBrief
-from .structure_router import RouterDecision, run_route
+from .structure_router import RouterDecision, _CHANNELS, _default_channels, run_route
 
 
 def _decision_to_dict(d: RouterDecision) -> dict:
@@ -43,6 +43,16 @@ def _decision_to_dict(d: RouterDecision) -> dict:
 
 
 def _decision_from_dict(data: dict) -> RouterDecision:
+    # Phase 4.13: output_channels/channel_rationale THIẾU trong entry CŨ (đóng
+    # băng TRƯỚC Phase 4.13) -> mặc định CẢ 3 True (an toàn, tương thích ngược —
+    # KHÔNG hồi tố cắt tuyến cho quyết định đã đóng băng từ trước khi có cơ chế
+    # này, xem docstring structure_router.py).
+    channels_raw = data.get("output_channels")
+    channels = ({c: bool(channels_raw[c]) if c in channels_raw else True for c in _CHANNELS}
+               if isinstance(channels_raw, dict) else _default_channels())
+    rationale_raw = data.get("channel_rationale")
+    channel_rationale = ({c: str(rationale_raw.get(c, "")) for c in _CHANNELS}
+                        if isinstance(rationale_raw, dict) else {})
     return RouterDecision(
         content_type=data.get("content_type", "article"),
         structure=data.get("structure", "S1"),
@@ -51,6 +61,7 @@ def _decision_from_dict(data: dict) -> RouterDecision:
         rationale=data.get("rationale", ""),
         signals=data.get("signals") or {},
         fallback=bool(data.get("fallback", False)),
+        output_channels=channels, channel_rationale=channel_rationale,
     )
 
 
@@ -82,6 +93,29 @@ class RouterDecisionStore:
         data = self._load()
         data[key] = _decision_to_dict(decision)
         self._save(data)
+
+    def set_channel(self, key: str, channel: str, enabled: bool) -> bool:
+        """Owner override 1 TUYẾN (article/infographic/video) của quyết định ĐÃ
+        đóng băng — GIỐNG triết lý reroute (scripts/reroute.py --channel/--set):
+        sửa TRỰC TIẾP output_channels[channel], KHÔNG gọi lại LLM/đổi structure/
+        hook. False nếu `key` chưa từng route (chưa có gì để sửa — dùng --list
+        để xem key thật, giống clear())."""
+        if channel not in _CHANNELS:
+            raise ValueError(f"channel không hợp lệ: {channel!r} (phải là 1 trong {_CHANNELS})")
+        data = self._load()
+        if key not in data:
+            return False
+        entry = data[key]
+        channels = entry.get("output_channels")
+        entry["output_channels"] = (dict(channels) if isinstance(channels, dict)
+                                    else _default_channels())
+        entry["output_channels"][channel] = enabled
+        rationale = entry.get("channel_rationale")
+        entry["channel_rationale"] = dict(rationale) if isinstance(rationale, dict) else {}
+        entry["channel_rationale"][channel] = (
+            f"[owner override] {'bật' if enabled else 'tắt'} tay qua reroute.py")
+        self._save(data)
+        return True
 
     def clear(self, key: str) -> bool:
         """Cửa RE-ROUTE thủ công cho owner (xem scripts/reroute.py) — xoá

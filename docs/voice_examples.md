@@ -44,6 +44,10 @@ khung S1–S5 + hook + anchor). System prompt writer = **phần phổ quát** + 
 6. **Số liệu phải có thật trong evidence.** (Trùng với guardrail — nhắc lại vì giọng này *lấy uy tín
    từ số*, nên số sai là hỏng cả giọng lẫn compliance.)
 7. **Triển khai kịch bản với văn phong kể chuyện, nên sử dụng câu ghép và một câu trên 10 từ.**
+8. **Chọn-và-bỏ, không liệt kê hết (Phase 4.11).** facts/dữ kiện được cung cấp là NGUYÊN LIỆU, không
+   phải danh sách bắt buộc dùng hết. Chắt lọc ĐÚNG số PHỤC VỤ luận điểm/khung đã chọn ở §2; số nào
+   không phục vụ khung thì BỎ, dù có thật. 3-5 số ĐẮT giá trị hơn 10 số liệt kê dàn trải — bài liệt
+   kê mọi con số trong facts[] là bài chưa biên tập, không phải bài đã chọn góc.
 ---
 
 ## 2. Menu khung diễn giải (chọn 1 theo hình dạng thông tin)

@@ -107,6 +107,115 @@ def test_settings_expands_env():
     assert data["sheets"]["spreadsheet_id"] == "SHEET_ABC"
 
 
+# --- Phase DATA-ROOT: gốc dữ liệu runtime DUY NHẤT, tách khỏi repo ----------
+def test_data_root_reads_settings_storage_data_root():
+    from twmkt.config import Settings, data_root
+    import tempfile
+
+    tmp = tempfile.mkdtemp()
+    s = Settings({"storage": {"data_root": tmp}})
+    assert str(data_root(s)) == tmp
+
+
+def test_data_root_env_override_wins_over_settings():
+    """DATA_ROOT (biến môi trường) thắng storage.data_root trong config — CÙNG
+    NẾP với TWMKT_SHEET_ID/TWMKT_SHEETS_CREDS (produce_from_sheet._open_board),
+    dùng cho deploy VPS khác máy dev không cần sửa settings.yaml."""
+    from twmkt.config import Settings, data_root
+    import tempfile
+
+    tmp_env, tmp_cfg = tempfile.mkdtemp(), tempfile.mkdtemp()
+    s = Settings({"storage": {"data_root": tmp_cfg}})
+    os.environ["DATA_ROOT"] = tmp_env
+    try:
+        assert str(data_root(s)) == tmp_env
+    finally:
+        del os.environ["DATA_ROOT"]
+
+
+def test_data_path_directory_target_creates_itself_idempotently():
+    from twmkt.config import Settings, data_path
+    from pathlib import Path
+    import tempfile
+
+    tmp = tempfile.mkdtemp()
+    s = Settings({"storage": {"data_root": tmp}})
+    p = data_path("documents", "2026-07-10", settings=s)
+    assert p == Path(tmp) / "documents" / "2026-07-10"
+    assert p.is_dir()
+    data_path("documents", "2026-07-10", settings=s)   # gọi lại -> idempotent, không lỗi
+
+
+def test_data_path_file_target_creates_parent_not_itself():
+    from twmkt.config import Settings, data_path
+    import tempfile
+
+    tmp = tempfile.mkdtemp()
+    s = Settings({"storage": {"data_root": tmp}})
+    p = data_path("logs", "power_on.lock", settings=s)
+    assert p.parent.is_dir()      # thư mục CHA được tạo
+    assert not p.exists()         # bản thân FILE — chỉ resolve path, chưa ghi gì
+
+
+def test_data_path_no_parts_returns_and_creates_root_itself():
+    from twmkt.config import Settings, data_path
+    from pathlib import Path
+    import tempfile
+
+    parent = tempfile.mkdtemp()
+    tmp = Path(parent) / "chua-ton-tai"
+    s = Settings({"storage": {"data_root": str(tmp)}})
+    p = data_path(settings=s)
+    assert p == tmp and tmp.is_dir()
+
+
+def test_data_path_config_first_swap_data_root_changes_resolved_path():
+    """Đổi storage.data_root sang thư mục KHÁC -> data_path() đi theo NGAY —
+    chứng minh config-first thật (không có gì hard-code)."""
+    from twmkt.config import Settings, data_path
+    import tempfile
+
+    tmp1, tmp2 = tempfile.mkdtemp(), tempfile.mkdtemp()
+    p1 = data_path("output", settings=Settings({"storage": {"data_root": tmp1}}))
+    p2 = data_path("output", settings=Settings({"storage": {"data_root": tmp2}}))
+    assert str(p1).startswith(tmp1) and str(p2).startswith(tmp2)
+    assert p1 != p2
+
+
+def test_build_store_file_resolves_under_data_root_not_hardcoded_storage():
+    from twmkt import factory
+    from twmkt.config import Settings
+    from pathlib import Path
+    import tempfile
+
+    tmp = tempfile.mkdtemp()
+    s = Settings({"storage": {"type": "file", "data_root": tmp, "documents_dir": "documents",
+                              "retention_days": 10, "timezone": "Asia/Ho_Chi_Minh"}})
+    store = factory.build_store(s)
+    assert store.root == Path(tmp) / "documents"
+
+
+def test_power_on_lock_path_resolves_via_data_path_helper():
+    """power_on._lock_path() KHÔNG còn hard-code REPO_ROOT/"storage"/... —
+    monkeypatch data_path (đã import vào namespace power_on) để cô lập khỏi
+    data_root thật trong lúc test."""
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+    import power_on as po
+    from twmkt.config import Settings, data_path as real_data_path
+    import tempfile
+
+    tmp = tempfile.mkdtemp()
+    test_settings = Settings({"storage": {"data_root": tmp}})
+    orig = po.data_path
+    po.data_path = lambda *parts, **kw: real_data_path(*parts, settings=test_settings)
+    try:
+        p = po._lock_path()
+        assert p.parent.name == "logs" and p.name == "power_on.lock"
+        assert str(p).startswith(tmp)
+    finally:
+        po.data_path = orig
+
+
 # --- Curation config: whitelist + mã dễ nhầm theo ngữ cảnh -------------------
 def test_curation_whitelist_and_ambiguous():
     cfg = CurationConfig(
@@ -277,7 +386,7 @@ def test_hook_parses_llm_json():
     from twmkt.models import ResearchBrief
 
     class JsonLLM:
-        def complete(self, system, prompt):
+        def complete(self, system, prompt, **kwargs):
             return ('```json\n{"angle": "Góc sắc", "headlines": ["H1 dẫn số 20%", '
                     '"H2 tò mò?", "H3 tương phản"], "audience": "NĐT cá nhân", '
                     '"emotion": "bất ngờ", "cta": "CTA riêng"}\n```')
@@ -308,7 +417,7 @@ def test_hook_agent_stores_last_prompt_and_raw_for_debug():
     from twmkt.models import ResearchBrief
 
     class RecordingLLM:
-        def complete(self, system, prompt): return "phản hồi không phải JSON"
+        def complete(self, system, prompt, **kwargs): return "phản hồi không phải JSON"
 
     agent = HookAgent(RecordingLLM())
     agent.run(ResearchBrief(topic="t", tickers=["FPT"], thesis="x",
@@ -325,7 +434,7 @@ def test_researcher_prompt_anchors_on_article_titles():
 
     class RecordingLLM:
         def __init__(self): self.prompt = ""
-        def complete(self, system, prompt):
+        def complete(self, system, prompt, **kwargs):
             self.prompt = prompt
             return "Luận điểm cụ thể về FPT."
 
@@ -344,7 +453,7 @@ def test_researcher_empty_llm_falls_back_to_article_title():
     from twmkt.knowledge.rag import Retriever
 
     class EmptyLLM:
-        def complete(self, system, prompt): return "   "
+        def complete(self, system, prompt, **kwargs): return "   "
 
     docs = normalize(MockCollector().collect(Source("x", "http://x")))
     r = Retriever(); r.index(docs)
@@ -1814,7 +1923,7 @@ def test_production_agent_graceful_empty_llm():
     from twmkt.guardrails import compliance
 
     class EmptyLLM:
-        def complete(self, system, prompt): return ""
+        def complete(self, system, prompt, **kwargs): return ""
 
     d = compliance.apply(AnalysisWriterAgent(EmptyLLM()).run(
         ProductionBrief(title="Tiêu đề bài", hook="Hook X", tickers=["HPG"],
@@ -1828,6 +1937,26 @@ def test_domain_of_extracts_netloc():
     assert domain_of("https://cafef.vn/abc-123.chn") == "cafef.vn"
     assert domain_of("https://www.vietstock.vn/x.htm") == "vietstock.vn"
     assert domain_of("") == "" and domain_of("khong-phai-url") == ""
+
+
+def test_soft_truncate_does_not_cut_mid_word():
+    """Phase 4.11 item 6: cắt về giới hạn nhưng lùi về khoảng trắng gần nhất,
+    KHÔNG đứt ngang 1 từ (khác [:N] cứng cũ)."""
+    from twmkt.agents.production import _soft_truncate
+
+    text = "GDP 6 tháng đầu năm tăng 8,18%, mức cao nhất nhiều năm qua"
+    cut = _soft_truncate(text, 40)
+    assert cut.endswith("…")
+    assert len(cut) <= 41   # 40 + dấu "…"
+    core = cut[:-1].rstrip()
+    assert text.startswith(core)                     # phần giữ lại khớp NGUYÊN VĂN prefix của text gốc
+    assert not core or core[-1] != " "                # không để khoảng trắng thừa ngay trước "…"
+    assert all(w for w in core.split(" "))            # không có từ nào bị cắt dở (không token rỗng lạ)
+
+    short = "Câu ngắn."
+    assert _soft_truncate(short, 200) == short   # ngắn hơn limit -> giữ nguyên, KHÔNG thêm "…"
+    assert _soft_truncate("", 100) == ""
+    assert _soft_truncate("khongcokhoangtrangnaoquadai" * 5, 10).endswith("…")   # 1 từ dài -> vẫn cắt được, không crash
 
 
 def test_unsupported_numbers_flags_hallucinated_figures():
@@ -2217,10 +2346,14 @@ class _EmptyRouteLLM:
         return ""
 
 
-def _run_produce_scenario(writer_llm, approved_row: dict):
+def _run_produce_scenario(writer_llm, approved_row: dict, route_llm=None, decisions_path=None):
     """Chạy produce_from_sheet.run() THẬT với board/notifier/route_llm/writer_llm
     giả lập qua monkeypatch — trả (result, board, notifier). Khôi phục mọi
-    monkeypatch trong finally (không rò rỉ sang test khác)."""
+    monkeypatch trong finally (không rò rỉ sang test khác). `route_llm` mặc
+    định _EmptyRouteLLM() (Phase 4.9); Phase 4.12 truyền route_llm riêng để mô
+    phỏng Brief trả no_numeric_content=True. `decisions_path` (Phase (a)-SEAL):
+    truyền CÙNG path ở 2 lần gọi để mô phỏng route-once BỀN qua 2 lần chạy
+    produce() thật (mặc định mỗi lần gọi 1 thư mục tạm RIÊNG — không persist)."""
     import tempfile
     from pathlib import Path
     sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
@@ -2229,11 +2362,13 @@ def _run_produce_scenario(writer_llm, approved_row: dict):
 
     base = real_load_settings()
     data = dict(base.raw)
-    data["router"] = {"decisions_path": str(Path(tempfile.mkdtemp()) / "router_decisions.json")}
+    decisions_path = decisions_path or (Path(tempfile.mkdtemp()) / "router_decisions.json")
+    data["router"] = {"decisions_path": str(decisions_path)}
     test_settings = Settings(data)
 
     board = _FakeProduceBoard([approved_row])
     notifier = _FakeProduceNotifier()
+    route_llm = route_llm if route_llm is not None else _EmptyRouteLLM()
 
     orig = {
         "load_settings": pfs.load_settings, "_open_board": pfs._open_board,
@@ -2243,7 +2378,7 @@ def _run_produce_scenario(writer_llm, approved_row: dict):
     pfs.load_settings = lambda *a, **kw: test_settings
     pfs._open_board = lambda settings, **kw: board
     pfs.make_notifier = lambda settings: notifier
-    pfs.factory.make_llm = lambda settings: _EmptyRouteLLM()
+    pfs.factory.make_llm = lambda settings: route_llm
     pfs.factory.build_writer_llm = lambda settings: writer_llm
     try:
         result = pfs.run(limit=5)
@@ -2278,6 +2413,155 @@ def test_run_article_done_writes_content_marks_execute_done_and_notifies():
     article_events = [e for e, ctx in notifier.events if ctx.get("type") == "article"]
     assert "start" in events and "gate2_done" in events
     assert "draft_changed" in article_events and "error" not in article_events
+
+
+def test_run_infographic_composer_swaps_to_route_llm_and_flags_needs_human_when_facts_empty():
+    """Phase 4.11: chạy run() THẬT — InfographicSpecAgent.llm/.model bị SWAP
+    sang route_llm/alias 'composer' NGAY TRƯỚC khi gọi run() (không crash, dùng
+    ĐÚNG _EmptyRouteLLM của fixture — chứng minh wiring vào vòng thật hoạt
+    động). route_llm rỗng -> brief.facts=[] -> infographic Status=ERROR kèm
+    note 'facts[] rỗng' (KHÔNG bịa nhãn 'Số liệu N')."""
+    class _CleanWriterLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            return _clean_writer_json()
+
+    result, board, notifier = _run_produce_scenario(
+        _CleanWriterLLM(), _approved_row("Bài test 4.11 composer", row=2))
+
+    infographic_rows = [r for r in board.appended_content if r[2] == "infographic"]
+    assert len(infographic_rows) == 1
+    assert infographic_rows[0][3] == "ERROR"          # Status
+    assert "facts[] rỗng" in infographic_rows[0][5]    # Notes
+    assert "Số liệu" not in infographic_rows[0][4]     # Output — KHÔNG bịa nhãn
+
+
+def test_run_infographic_skipped_when_no_numeric_content_true_article_still_produced():
+    """Phase 4.12 Mục B (rỗng-HỢP-LỆ), tái dùng làm ca BẤT ĐỒNG router/brief
+    (Phase 4.13 Mục A item 3): router (rỗng ở test này) fallback -> channels
+    default article/infographic/video=True (channels.infographic=True), NHƯNG
+    Brief tự xác nhận no_numeric_content=true (facts=[] hợp lệ, tin thuần định
+    tính) -> router "tưởng" có số nhưng Brief đọc kỹ hơn thấy không có ->
+    infographic SKIPPED (KHÔNG gọi composer, KHÔNG phải ERROR/NEEDS_HUMAN, Notes
+    nêu lý do bất đồng), article vẫn sinh bình thường (chế độ định tính),
+    Execute vẫn DONE (KHÔNG bị kéo xuống NEEDS_HUMAN chỉ vì tin không có số)."""
+    import json as _json
+
+    class _CleanWriterLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            return _clean_writer_json()
+
+    class _QualitativeBriefRouteLLM:
+        """route_llm giả: Brief (system chứa 'no_numeric_content', đặc trưng
+        brief._SYSTEM) -> facts=[] + no_numeric_content=true; các bước khác
+        (router) trả rỗng -> fallback S1 (không quan trọng ở test này)."""
+
+        def complete(self, system, prompt, *, model=None, fail_loud=False, **kw):
+            if "no_numeric_content" in system:
+                return _json.dumps({"facts": [], "no_numeric_content": True},
+                                   ensure_ascii=False)
+            return ""
+
+    result, board, notifier = _run_produce_scenario(
+        _CleanWriterLLM(), _approved_row("Bài test 4.12 SKIPPED", row=2),
+        route_llm=_QualitativeBriefRouteLLM())
+
+    infographic_rows = [r for r in board.appended_content if r[2] == "infographic"]
+    assert len(infographic_rows) == 1
+    assert infographic_rows[0][3] == "SKIPPED"          # Status
+    assert "no_numeric_content" in infographic_rows[0][5]  # Notes nêu lý do
+
+    article_rows = [r for r in board.appended_content if r[2] == "article"]
+    assert len(article_rows) == 1 and article_rows[0][3] == "DONE"
+
+    assert board.execute_updates.get(2) == "DONE"       # KHÔNG bị kéo xuống NEEDS_HUMAN
+    events = [e for e, _ in notifier.events]
+    assert "skipped" in events                          # emoji ℹ️, không phải error/needs_human
+    skipped_events = [ctx for e, ctx in notifier.events if e == "skipped"]
+    assert any(ctx.get("type") == "infographic" for ctx in skipped_events)
+
+
+def test_run_infographic_skipped_when_router_decides_channel_false_upfront():
+    """Phase 4.13 Mục A: router QUYẾT NGAY TỪ ĐẦU output_channels.infographic=
+    False (tin bảng-số/kém hợp hình, KHÔNG liên quan facts rỗng hay không) ->
+    SKIPPED NGAY TRƯỚC KHI gọi composer (khỏi tốn lượt LLM), Notes chứa ĐÚNG
+    channel_rationale router cho — đây là cơ chế CHÍNH thay nhánh phản ứng-sau
+    của Phase 4.12. article/video (channels=True) vẫn sinh bình thường."""
+    import json as _json
+
+    class _CleanWriterLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            return _clean_writer_json()
+
+    class _ChannelFalseRouteLLM:
+        """route_llm giả: Brief trả facts thật (không rỗng — chứng minh channel
+        gate KHÔNG phụ thuộc facts rỗng/không); router trả output_channels.
+        infographic=False kèm rationale, để composer KHÔNG BAO GIỜ được gọi
+        (PoisonComposer sẽ raise nếu lỡ gọi tới)."""
+
+        def complete(self, system, prompt, *, model=None, fail_loud=False, **kw):
+            if "no_numeric_content" in system:   # Brief system prompt đặc trưng
+                return _json.dumps({
+                    "facts": [{"value": "10", "label": "Số liệu test", "unit": "%",
+                              "kind": "percent", "raw": "10%", "approx": False}],
+                    "no_numeric_content": False,
+                }, ensure_ascii=False)
+            return _json.dumps({
+                "content_type": "article", "structure": "S1", "hook": "H1",
+                "secondary_structure": None, "rationale": "Tin bảng-số thuần.",
+                "signals": {"has_genuine_paradox": False, "drivers": [],
+                           "has_central_thesis": True},
+                "output_channels": {"article": True, "infographic": False, "video": True},
+                "channel_rationale": {"infographic": "Tin bảng-số không đủ dữ liệu trình bày hình"},
+            }, ensure_ascii=False)
+
+    result, board, notifier = _run_produce_scenario(
+        _CleanWriterLLM(), _approved_row("Bài test 4.13 channel-false", row=2),
+        route_llm=_ChannelFalseRouteLLM())
+
+    infographic_rows = [r for r in board.appended_content if r[2] == "infographic"]
+    assert len(infographic_rows) == 1
+    assert infographic_rows[0][3] == "SKIPPED"
+    assert "Tin bảng-số không đủ dữ liệu trình bày hình" in infographic_rows[0][5]
+
+    article_rows = [r for r in board.appended_content if r[2] == "article"]
+    assert len(article_rows) == 1 and article_rows[0][3] == "DONE"
+
+    assert board.execute_updates.get(2) == "DONE"
+    skipped_events = [ctx for e, ctx in notifier.events if e == "skipped"]
+    assert any(ctx.get("type") == "infographic" for ctx in skipped_events)
+
+
+def test_run_article_skipped_when_router_decides_channel_false_upfront():
+    """Phase 4.13 Mục A: router quyết output_channels.article=False (tin quá
+    vụn) -> article SKIPPED (KHÔNG gọi writer_llm — PoisonWriterLLM sẽ raise
+    nếu lỡ gọi), Execute KHÔNG bị kéo NEEDS_HUMAN/FAILED (chỉ SKIPPED hợp lệ)."""
+    import json as _json
+
+    class _PoisonWriterLLM:
+        def complete(self, *a, **kw):
+            raise AssertionError("KHÔNG được gọi writer khi router quyết article:false")
+
+    class _ArticleFalseRouteLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False, **kw):
+            if "no_numeric_content" in system:
+                return _json.dumps({"facts": [], "no_numeric_content": False}, ensure_ascii=False)
+            return _json.dumps({
+                "content_type": "article", "structure": "S1", "hook": "H1",
+                "secondary_structure": None, "rationale": "Tin quá vụn.",
+                "signals": {"has_genuine_paradox": False, "drivers": [],
+                           "has_central_thesis": True},
+                "output_channels": {"article": False, "infographic": True, "video": True},
+                "channel_rationale": {"article": "Tin chỉ 1 câu, không đủ chất liệu viết bài"},
+            }, ensure_ascii=False)
+
+    result, board, notifier = _run_produce_scenario(
+        _PoisonWriterLLM(), _approved_row("Bài test 4.13 article-false", row=2),
+        route_llm=_ArticleFalseRouteLLM())
+
+    article_rows = [r for r in board.appended_content if r[2] == "article"]
+    assert len(article_rows) == 1 and article_rows[0][3] == "SKIPPED"
+    assert "Tin chỉ 1 câu" in article_rows[0][5]
+    assert board.execute_updates.get(2) not in ("FAILED", "NEEDS_HUMAN")
 
 
 def test_run_article_failed_marks_execute_failed_no_content_no_draft_changed():
@@ -2382,6 +2666,270 @@ def test_run_article_idempotent_skips_writer_when_already_in_content():
     assert board.execute_updates.get(2) == "DONE"
 
 
+# =====================================================================
+# PHASE (a)-SEAL — LÁT CẮT DỌC: 1 chủ đề fixture chạy qua TOÀN BỘ chuỗi thật
+# (Brief -> route-once StructureRouter -> voice-lock -> Writer -> guardrail
+# canonical -> produce_from_sheet.run() -> Execute/Notify), MockLLM/fake $0 —
+# KHÔNG gọi claude -p thật. 3 kịch bản (a)(b)(c) dùng CHUNG 1 evidence fixture
+# (thật ra CÓ SỐ, để scenario (a)/(c) test được guardrail; (b) chỉ khác ở
+# output_channels router chọn).
+# =====================================================================
+_SLICE_EVIDENCE = ("Doanh thu quý 2 tăng 45,6% lên 1.200 tỷ đồng, đánh dấu quý "
+                   "tăng trưởng cao nhất 5 năm.")
+
+
+def _slice_brief_json() -> str:
+    import json as _json
+    return _json.dumps({
+        "facts": [
+            {"value": "45,6", "label": "Tăng trưởng doanh thu quý 2", "unit": "%",
+             "kind": "growth", "raw": "tăng 45,6%", "approx": False},
+            {"value": "1.200", "label": "Doanh thu quý 2", "unit": "tỷ đồng",
+             "kind": "money", "raw": "1.200 tỷ đồng", "approx": False},
+        ],
+        "no_numeric_content": False,
+    }, ensure_ascii=False)
+
+
+def _slice_router_json(*, output_channels: dict) -> str:
+    """Router trả has_genuine_paradox=true + residual_tension + 3 drivers ->
+    CODE sẽ ép structure=S5 (RÀNG BUỘC #4) và secondary=S4 (driver_count>=3),
+    BẤT KỂ raw structure="S1"/secondary=None ở đây — chứng minh 2 luật cứng
+    của router hoạt động XUYÊN SUỐT lát cắt, không chỉ ở test cô lập."""
+    import json as _json
+    return _json.dumps({
+        "content_type": "article", "structure": "S1", "hook": "H2",
+        "secondary_structure": None,
+        "rationale": "Tăng trưởng kỷ lục nhưng ban lãnh đạo vẫn thận trọng.",
+        "signals": {
+            "has_genuine_paradox": True,
+            "residual_tension": "Ban lãnh đạo thận trọng dù tăng trưởng kỷ lục — đà này có bền?",
+            "drivers": ["Doanh thu lõi", "Mở rộng thị trường mới", "Cắt giảm chi phí vận hành"],
+            "has_central_thesis": True,
+        },
+        "output_channels": output_channels,
+        "channel_rationale": {"article": "Đủ chất liệu.", "infographic": "Có số dựng hình.",
+                              "video": "Có narrative kể được."},
+    }, ensure_ascii=False)
+
+
+def _slice_composer_json() -> str:
+    import json as _json
+    return _json.dumps({
+        "title": "Doanh thu quý 2 bứt phá", "subtitle": "Tăng 45,6%, đạt 1.200 tỷ đồng",
+        "hero": [{"label": "Tăng trưởng doanh thu quý 2", "value": "+45,6%"},
+                {"label": "Doanh thu quý 2", "value": "1.200 tỷ đồng"}],
+        "market": [], "highlights": ["Quý tăng trưởng cao nhất 5 năm."],
+        "related": [], "priority": {"primary": [], "secondary": [], "minor": []},
+        "source": "test.vn", "render_hint": {"theme": "dark", "palette": "navy-gold", "ratio": "4:5"},
+    }, ensure_ascii=False)
+
+
+class _SliceRouteLLM:
+    """route_llm giả DÙNG CHUNG cho brief/router/composer (3 marker phân biệt
+    theo system prompt) — cùng cơ chế phân biệt đã dùng ở Phase 4.12/4.13 test."""
+
+    def __init__(self, *, output_channels: dict):
+        self.output_channels = output_channels
+        self.router_calls = 0
+
+    def complete(self, system, prompt, *, model=None, fail_loud=False, **kw):
+        if "no_numeric_content" in system:                # Brief
+            return _slice_brief_json()
+        if "Infographic Composer" in system:               # Composer
+            return _slice_composer_json()
+        if "output_channels" in system:                    # StructureRouter
+            self.router_calls += 1
+            return _slice_router_json(output_channels=self.output_channels)
+        return ""
+
+
+class _SliceRouterPoisonLLM:
+    """route_llm giả cho VÒNG 2 (chứng minh route-once bền qua 2 lần produce()
+    THẬT) — brief/composer gọi bình thường (trả rỗng, không quan trọng ở test
+    này), NHƯNG router bị CẤM gọi tuyệt đối."""
+
+    def complete(self, system, prompt, *, model=None, fail_loud=False, **kw):
+        if "output_channels" in system:                    # StructureRouter marker
+            raise AssertionError("KHÔNG được gọi router lần 2 — route-once phải đóng băng")
+        return ""
+
+
+class _SliceCleanWriterLLM:
+    """writer_llm giả — echo lại ĐÚNG số nguyên văn evidence (không tự chế/
+    gộp/rớt đơn vị), CAPTURE `system` để kiểm voice-lock đã ráp đúng khung."""
+
+    def __init__(self):
+        self.captured_system = None
+
+    def complete(self, system, prompt, *, model=None, fail_loud=False):
+        import json as _json
+        self.captured_system = system
+        return _json.dumps({
+            "title": "Doanh thu quý 2 bứt phá", "sapo": "Tăng 45,6% lên 1.200 tỷ đồng.",
+            "sections": [{"heading": "Kết quả", "content": _SLICE_EVIDENCE}],
+            "disclaimer": "Nội dung chỉ mang tính thông tin, không phải khuyến nghị đầu tư. "
+                          "Nhà đầu tư tự chịu trách nhiệm với quyết định của mình.",
+            "sources": [],
+        }, ensure_ascii=False)
+
+
+class _SliceFabricatingWriterLLM:
+    """writer_llm giả — CHẾ 1 số KHÔNG có trong evidence/facts (999 tỷ đồng)
+    để chứng minh guardrail canonical (Mục C) còn nguyên trong lát cắt đầy đủ."""
+
+    def complete(self, system, prompt, *, model=None, fail_loud=False):
+        import json as _json
+        return _json.dumps({
+            "title": "Doanh thu quý 2 bứt phá", "sapo": "Tăng vọt.",
+            "sections": [{"heading": "Kết quả",
+                         "content": "Doanh thu quý 2 đạt 999 tỷ đồng, một con số chưa từng có."}],
+            "disclaimer": "Nội dung chỉ mang tính thông tin, không phải khuyến nghị đầu tư. "
+                          "Nhà đầu tư tự chịu trách nhiệm với quyết định của mình.",
+            "sources": [],
+        }, ensure_ascii=False)
+
+
+def _slice_row(row: int = 2) -> dict:
+    # hook = evidence (source="" -> fetch_full_evidence() lùi mượt về hook NGAY,
+    # $0, không mạng — brief.evidence = evidence fixture, khớp facts.raw phía trên).
+    return {"context": "Doanh thu quý 2 bứt phá", "hook": _SLICE_EVIDENCE, "source": "",
+           "tickers": [], "group": "", "topic": "", "execute": "RUN", "row": row}
+
+
+def test_vertical_slice_a_full_quantitative_topic_three_channels_clean():
+    """PHASE (a)-SEAL kịch bản (a): tin định lượng đủ -> Brief tách đúng
+    facts[]+canonical_value (mắt xích 1, gọi run_brief() THẬT độc lập trước) ->
+    chạy produce_from_sheet.run() THẬT: router ép S5(paradox)+S4(driver>=3),
+    output_channels đủ 3 True đóng băng route-once (vòng 2 dùng PoisonLLM
+    chứng minh KHÔNG gọi lại router), voice-lock ráp đúng khung+anchor vào
+    system Writer THẬT, writer echo số nguyên văn -> guardrail clean -> CẢ 3
+    tuyến DONE, Execute=DONE, notify đúng điểm, path ghi qua data_root."""
+    import tempfile
+    from pathlib import Path
+    from twmkt.agents.brief import run_brief
+    from twmkt.agents.route_once import RouterDecisionStore
+    from twmkt.config import data_root
+
+    # --- Mắt xích 1: Brief (gọi THẬT, độc lập với produce()) ---
+    class _BriefOnlyLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False, **kw):
+            return _slice_brief_json()
+
+    brief_result = run_brief(_BriefOnlyLLM(), _SLICE_EVIDENCE)
+    assert len(brief_result.facts) == 2
+    assert brief_result.no_numeric_content is False   # facts không rỗng -> cờ ép False
+    growth = next(f for f in brief_result.facts if f.kind == "growth")
+    money = next(f for f in brief_result.facts if f.kind == "money")
+    assert growth.canonical_value is not None
+    assert money.canonical_value == 1_200_000_000_000.0   # "1.200 tỷ đồng"
+
+    # --- Chạy TOÀN BỘ pipeline thật, vòng 1 ---
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+    import produce_from_sheet as pfs
+
+    decisions_path = Path(tempfile.mkdtemp()) / "router_decisions.json"
+    route_llm = _SliceRouteLLM(output_channels={"article": True, "infographic": True, "video": True})
+    writer_llm = _SliceCleanWriterLLM()
+    result, board, notifier = _run_produce_scenario(
+        writer_llm, _slice_row(), route_llm=route_llm, decisions_path=decisions_path)
+
+    # --- Mắt xích: produce chỉ sinh tuyến true + outcome DONE ---
+    types_status = {r[2]: r[3] for r in board.appended_content}
+    assert types_status == {"article": "DONE", "video_script": "DONE", "infographic": "DONE"}
+    assert board.execute_updates.get(2) == "DONE"
+    assert route_llm.router_calls == 1
+
+    # --- Mắt xích: RouterDecision đóng băng đầy đủ field ---
+    key = pfs._slug(_slice_row()["context"])
+    decision = RouterDecisionStore(decisions_path).get(key)
+    assert decision is not None
+    assert decision.structure == "S5"                       # ép bởi RÀNG BUỘC #4 (paradox effective)
+    assert decision.secondary_structure == "S4"              # ép bởi driver_count>=3
+    assert decision.hook == "H2"
+    assert decision.signals["residual_tension"] is not None
+    assert decision.output_channels == {"article": True, "infographic": True, "video": True}
+    assert decision.channel_rationale["infographic"]
+    assert decision.fallback is False
+
+    # --- Mắt xích: voice-lock ráp ĐÚNG khung/anchor vào system Writer THẬT ---
+    sysprompt = writer_llm.captured_system
+    assert "## Khung chính đã chọn (S5)" in sysprompt
+    assert "## Khung phụ — dùng cho 1 đoạn trong bài (S4)" in sysprompt
+    assert "### Ví dụ A" in sysprompt   # anchor mặc định S5 (_DEFAULT_ANCHOR_BY_STRUCTURE)
+
+    # --- Mắt xích: guardrail canonical clean (số writer viết khớp evidence) ---
+    article_row = next(r for r in board.appended_content if r[2] == "article")
+    assert article_row[3] == "DONE" and article_row[5] == ""   # Status, Notes rỗng (không compliance issue)
+
+    # --- Mắt xích: Notifier bắn đúng điểm (start 1 lần, draft_changed x3, gate2_done, KHÔNG error) ---
+    events = [e for e, _ in notifier.events]
+    assert events.count("start") == 1
+    assert events.count("draft_changed") == 3
+    assert "gate2_done" in events
+    assert "error" not in events and "needs_human" not in events
+
+    # --- Mắt xích: path ghi qua data_root, KHÔNG rơi vào repo ---
+    root = data_root()
+    try:
+        root.relative_to(REPO_ROOT)
+        inside_repo = True
+    except ValueError:
+        inside_repo = False
+    assert not inside_repo
+
+    # --- Mắt xích: route-once BỀN qua 2 lần produce() THẬT (không chỉ 1 process) ---
+    board2, notifier2 = _FakeProduceBoard([_slice_row(row=2)]), _FakeProduceNotifier()
+    poison_writer = _SliceCleanWriterLLM()
+    result2, board2, notifier2 = _run_produce_scenario(
+        poison_writer, _slice_row(), route_llm=_SliceRouterPoisonLLM(), decisions_path=decisions_path)
+    decision2 = RouterDecisionStore(decisions_path).get(key)
+    assert decision2.structure == "S5" and decision2.hook == "H2"   # ĐÚNG quyết định cũ, không đổi
+
+
+def test_vertical_slice_b_router_disables_one_channel_no_error():
+    """PHASE (a)-SEAL kịch bản (b): router quyết output_channels.infographic=
+    False (quyết-định-từ-đầu, KHÔNG liên quan facts) -> tuyến đó KHÔNG được
+    sinh, Status=SKIPPED (KHÔNG phải ERROR/NEEDS_HUMAN), article/video vẫn
+    DONE bình thường, Execute KHÔNG bị kéo xuống FAILED/NEEDS_HUMAN."""
+    route_llm = _SliceRouteLLM(output_channels={"article": True, "infographic": False, "video": True})
+    writer_llm = _SliceCleanWriterLLM()
+    result, board, notifier = _run_produce_scenario(writer_llm, _slice_row(), route_llm=route_llm)
+
+    types_status = {r[2]: r[3] for r in board.appended_content}
+    assert types_status["article"] == "DONE"
+    assert types_status["video_script"] == "DONE"
+    assert types_status["infographic"] == "SKIPPED"           # KHÔNG phải ERROR
+
+    infographic_row = next(r for r in board.appended_content if r[2] == "infographic")
+    assert infographic_row[4] == ""                            # Output rỗng (không gọi composer)
+    assert "không hợp tin này" in infographic_row[5]           # Notes = rationale router
+
+    assert board.execute_updates.get(2) == "DONE"              # KHÔNG bị SKIPPED cản DONE
+    events = [e for e, _ in notifier.events]
+    assert "skipped" in events and "error" not in events
+
+
+def test_vertical_slice_c_fabricated_number_still_blocked_needs_human():
+    """PHASE (a)-SEAL kịch bản (c): writer CHẾ số không có trong evidence/facts
+    (999 tỷ đồng) -> guardrail canonical (Mục C) VẪN CHẶN trong lát cắt đầy đủ
+    (không bị nới bởi bất kỳ thay đổi Phase 4.12/4.13 nào) -> outcome=
+    NEEDS_HUMAN, Execute=NEEDS_HUMAN, CONTENT article Status=ERROR kèm lý do."""
+    route_llm = _SliceRouteLLM(output_channels={"article": True, "infographic": True, "video": True})
+    writer_llm = _SliceFabricatingWriterLLM()
+    result, board, notifier = _run_produce_scenario(writer_llm, _slice_row(), route_llm=route_llm)
+
+    article_row = next(r for r in board.appended_content if r[2] == "article")
+    assert article_row[3] == "ERROR"
+    assert "999" in article_row[5]                              # Notes nêu đúng số bịa bị chặn
+
+    assert board.execute_updates.get(2) == "NEEDS_HUMAN"
+    events = [e for e, _ in notifier.events]
+    assert "needs_human" in events
+    article_events = [ctx for e, ctx in notifier.events if e == "error" and ctx.get("type") == "article"]
+    assert article_events
+
+
 def test_prompt_md_requires_research_before_writing():
     """_prompt_md: PHẢI yêu cầu research bối cảnh mở rộng (WebSearch) trước khi
     viết, và hướng dẫn ghi vào <slug>.background.txt (theo yêu cầu 'signature')."""
@@ -2401,7 +2949,7 @@ def test_analysis_agent_parses_llm_json_schema():
     import json as _json
 
     class JsonLLM:
-        def complete(self, system, prompt):
+        def complete(self, system, prompt, **kwargs):
             return _json.dumps({
                 "title": "FPT lãi kỷ lục", "sapo": "Tóm tắt ngắn.",
                 "sections": [{"heading": "Bối cảnh", "content": "Doanh thu tăng 40%."}],
@@ -2424,7 +2972,7 @@ def test_video_agent_parses_llm_json_schema():
     import json as _json
 
     class JsonLLM:
-        def complete(self, system, prompt):
+        def complete(self, system, prompt, **kwargs):
             return _json.dumps({
                 "title": "HPG hook", "duration_sec": 45,
                 "scenes": [{"t": "0-3s", "voiceover": "HPG lãi tăng mạnh",
@@ -2438,20 +2986,197 @@ def test_video_agent_parses_llm_json_schema():
     assert "CTA riêng" in d.body
 
 
-def test_infographic_agent_extracts_stats_from_evidence_deterministic():
+def test_video_agent_uses_frozen_router_decision_for_voice_lock():
+    """Phase 4.10: VideoScriptAgent.run(brief, decision) nối voice-lock ĐỘNG
+    (khung §2 khớp decision.structure) + §4 chuyển-thể video (TTS) vào system —
+    CÙNG decision article của chủ đề dùng (route-once, Mục A). decision=None
+    vẫn chạy được (fallback an toàn), không lỗi."""
+    from twmkt.agents.production import VideoScriptAgent, ProductionBrief
+    from twmkt.agents.structure_router import RouterDecision
+    import json as _json
+
+    class _SpyLLM:
+        def __init__(self):
+            self.last_system = ""
+
+        def complete(self, system, prompt, **kwargs):
+            self.last_system = system
+            return _json.dumps({
+                "title": "t", "duration_sec": 45,
+                "scenes": [{"t": "0-3s", "voiceover": "x", "on_screen_text": "", "visual_hint": ""}],
+                "cta": "c", "disclaimer": "d",
+            }, ensure_ascii=False)
+
+    llm = _SpyLLM()
+    brief = ProductionBrief(title="t", hook="h", evidence="Doanh thu tăng 40%.")
+    decision = RouterDecision(content_type="article", structure="S3", hook="H1",
+                              secondary_structure=None, rationale="r",
+                              signals={"has_genuine_paradox": False, "residual_tension": None,
+                                      "drivers": [], "driver_count": 0, "has_central_thesis": False})
+    VideoScriptAgent(llm).run(brief, decision)
+    assert "VOICE-LOCK" in llm.last_system and "S3" in llm.last_system
+    assert "CHUYỂN THỂ VIDEO" in llm.last_system and "TTS" in llm.last_system
+
+    VideoScriptAgent(llm).run(brief, None)   # decision=None -> fallback, KHÔNG lỗi
+    assert "VOICE-LOCK" in llm.last_system
+
+
+def _infographic_test_facts():
+    from twmkt.models import Fact
+    return [
+        Fact(value="40", label="Tăng trưởng doanh thu", unit="%", kind="percent",
+            raw="tăng 40%", canonical_value=40.0),
+        Fact(value="1.200", label="Lợi nhuận kỷ lục", unit="tỷ đồng", kind="money",
+            raw="1.200 tỷ đồng", canonical_value=1200e9),
+    ]
+
+
+def test_infographic_composer_produces_condensed_8_field_spec_from_llm():
+    """Phase 4.11: InfographicSpecAgent giờ là 1 bước LLM (composer, uses_llm=
+    True) — nén facts[] thành spec 8 TRƯỜNG + render_hint TÁCH RIÊNG. Nhãn vẫn
+    lấy từ facts[] (NGHĨA), value do composer TỰ NÉN."""
     from twmkt.agents.production import InfographicSpecAgent, ProductionBrief
     import json as _json
 
-    agent = InfographicSpecAgent(None)   # KHÔNG cần llm -> tất định
-    assert agent.uses_llm is False
-    brief = ProductionBrief(title="t", hook="h", tickers=["FPT"],
+    class _ComposerLLM:
+        def complete(self, system, prompt, *, model=None):
+            return _json.dumps({
+                "title": "FPT lãi kỷ lục", "subtitle": "Tăng trưởng vượt kỳ vọng quý này",
+                "hero": [{"label": "Tăng trưởng doanh thu", "value": "+40%"}],
+                "market": [{"label": "Lợi nhuận kỷ lục", "value": "1,2 nghìn tỷ"}],
+                "highlights": ["Doanh thu và lợi nhuận cùng lập kỷ lục trong quý."],
+                "related": ["FPT"],
+                "priority": {"primary": ["Tăng trưởng doanh thu"],
+                            "secondary": ["Lợi nhuận kỷ lục"], "minor": []},
+                "source": "ignored-code-tinh-lai",
+                "render_hint": {"theme": "dark", "palette": "teal", "ratio": "1:1"},
+            }, ensure_ascii=False)
+
+    agent = InfographicSpecAgent(_ComposerLLM())
+    assert agent.uses_llm is True
+    brief = ProductionBrief(title="Chủ đề thật của bài", hook="h", tickers=["FPT"],
                             url="https://cafef.vn/x.chn",
-                            evidence="Doanh thu tăng 40%, đạt 1.200 tỷ đồng, kỷ lục.")
+                            evidence="Doanh thu tăng 40%, đạt 1.200 tỷ đồng, kỷ lục.",
+                            facts=_infographic_test_facts())
+    spec = _json.loads(agent.run(brief).body)
+
+    assert set(spec.keys()) == {"title", "subtitle", "hero", "market", "highlights",
+                                "related", "priority", "source", "render_hint"}
+    assert spec["title"] == "FPT lãi kỷ lục"
+    assert spec["subtitle"] and spec["subtitle"] != spec["title"]   # KHÔNG lặp headline
+    assert spec["hero"] == [{"label": "Tăng trưởng doanh thu", "value": "+40%"}]
+    assert spec["market"] == [{"label": "Lợi nhuận kỷ lục", "value": "1,2 nghìn tỷ"}]
+    assert not any(s["label"].startswith("Số liệu") for s in spec["hero"] + spec["market"])
+    assert spec["highlights"] == ["Doanh thu và lợi nhuận cùng lập kỷ lục trong quý."]
+    assert spec["priority"]["primary"] == ["Tăng trưởng doanh thu"]
+    assert spec["source"] == "cafef.vn"   # TẤT ĐỊNH từ url, bỏ qua composer tự bịa domain
+    assert spec["render_hint"] == {"theme": "dark", "palette": "teal", "ratio": "1:1"}
+
+
+def test_infographic_composer_empty_facts_returns_empty_spec_no_llm_call():
+    """facts[] rỗng (Brief timeout/lỗi) -> spec RỖNG CÓ CHỦ Ý, KHÔNG gọi LLM
+    (PoisonLLM raise nếu bị gọi), KHÔNG bịa nhãn 'Số liệu N' (caller đánh dấu
+    NEEDS_HUMAN, xem scripts/produce_from_sheet.run)."""
+    from twmkt.agents.production import InfographicSpecAgent, ProductionBrief
+
+    class _PoisonLLM:
+        def complete(self, *a, **kw):
+            raise AssertionError("KHÔNG được gọi composer khi facts[] rỗng")
+
+    agent = InfographicSpecAgent(_PoisonLLM())
+    brief = ProductionBrief(title="t", hook="h", url="https://cafef.vn/x.chn",
+                            evidence="Doanh thu tăng 40%, đạt 1.200 tỷ đồng, kỷ lục.",
+                            facts=[])
     d = agent.run(brief)
-    spec = _json.loads(d.body)
-    assert spec["footer"]["source"] == "cafef.vn"
-    assert len(spec["stats"]) >= 2
-    assert all(s["value"].lower() in brief.evidence.lower() for s in spec["stats"])
+    assert d.body.count('"hero": []') == 1 or '"hero":[]' in d.body.replace(" ", "")
+    assert "Số liệu" not in d.body
+
+
+def test_infographic_composer_falls_back_to_deterministic_spec_when_llm_fails():
+    """LLM composer trả rỗng/không parse được -> LÙI MƯỢT: spec TẤT ĐỊNH từ
+    facts[] trực tiếp (không nén được chữ, nhưng vẫn đúng 8 trường + title !=
+    subtitle + không bịa số)."""
+    from twmkt.agents.production import InfographicSpecAgent, ProductionBrief
+    import json as _json
+
+    class _EmptyLLM:
+        def complete(self, system, prompt, *, model=None):
+            return ""
+
+    agent = InfographicSpecAgent(_EmptyLLM())
+    brief = ProductionBrief(title="Chủ đề thật của bài", hook="", tickers=["FPT"],
+                            url="https://cafef.vn/x.chn",
+                            evidence="Doanh thu tăng 40%, đạt 1.200 tỷ đồng, kỷ lục.",
+                            facts=_infographic_test_facts())
+    spec = _json.loads(agent.run(brief).body)
+    assert spec["title"] != spec["subtitle"] or spec["subtitle"] == ""
+    assert spec["hero"] or spec["market"]   # vẫn có số THẬT, không rỗng
+    all_labels = [s["label"] for s in spec["hero"] + spec["market"]]
+    assert set(all_labels) == {"Tăng trưởng doanh thu", "Lợi nhuận kỷ lục"}
+    assert set(spec.keys()) == {"title", "subtitle", "hero", "market", "highlights",
+                                "related", "priority", "source", "render_hint"}
+
+
+def test_infographic_composer_title_never_equals_subtitle_even_if_llm_repeats():
+    """RÀNG BUỘC CỨNG: composer lỡ lặp subtitle=title -> CODE tự sửa (không tin
+    mù field rời của LLM, cùng triết lý driver_count/has_genuine_paradox)."""
+    from twmkt.agents.production import InfographicSpecAgent, ProductionBrief
+    import json as _json
+
+    class _RepeatingLLM:
+        def complete(self, system, prompt, *, model=None):
+            return _json.dumps({
+                "title": "Chủ đề thật của bài", "subtitle": "Chủ đề thật của bài",
+                "hero": [{"label": "Tăng trưởng doanh thu", "value": "+40%"}],
+                "market": [], "highlights": [], "related": [],
+                "priority": {"primary": [], "secondary": [], "minor": []},
+                "source": "x",
+            }, ensure_ascii=False)
+
+    agent = InfographicSpecAgent(_RepeatingLLM())
+    brief = ProductionBrief(title="Chủ đề thật của bài", hook="", url="https://cafef.vn/x.chn",
+                            facts=_infographic_test_facts())
+    spec = _json.loads(agent.run(brief).body)
+    assert spec["title"] != spec["subtitle"] or spec["subtitle"] == ""
+
+
+def test_infographic_composer_guardrail_canonical_accepts_condensed_recognized_unit():
+    """Item 8: số NÉN dùng ĐÚNG từ đơn vị canonical parser nhận diện được
+    ('nghìn tỷ') vẫn map về canonical_value gốc — tái dùng NGUYÊN unsupported_
+    numbers (Mục C), KHÔNG sửa gì ở đó."""
+    from twmkt.agents.production import unsupported_numbers
+    from twmkt.models import Fact
+
+    facts = [Fact(value="41.200", label="LNTT MB", unit="tỷ đồng", kind="money",
+                  raw="41.200 tỷ đồng", canonical_value=41200e9)]
+    body = '{"hero": [{"label": "LNTT MB", "value": "41,2 nghìn tỷ"}]}'
+    assert unsupported_numbers(body, "", facts) == []
+
+
+def test_infographic_composer_guardrail_canonical_still_blocks_fabricated_number():
+    """Số bịa hoàn toàn trong spec (không khớp evidence lẫn canonical nào) vẫn
+    bị chặn — composer KHÔNG được tự ý đổi giá trị, chỉ nén chữ."""
+    from twmkt.agents.production import unsupported_numbers
+    from twmkt.models import Fact
+
+    facts = [Fact(value="41.200", label="LNTT MB", unit="tỷ đồng", kind="money",
+                  raw="41.200 tỷ đồng", canonical_value=41200e9)]
+    body = '{"hero": [{"label": "LNTT MB", "value": "99,9 nghìn tỷ"}]}'   # bịa, lệch xa canonical
+    bad = unsupported_numbers(body, "", facts)
+    assert any("99,9" in b or "99" in b for b in bad)
+
+
+def test_pick_emphasis_index_prefers_percent_growth_money_over_first():
+    from twmkt.agents.production import _pick_emphasis_index
+    from twmkt.models import Fact
+
+    facts = [Fact(value="8", label="Số dự án", kind="count"),
+            Fact(value="18", label="Số cổ phiếu", kind="count"),
+            Fact(value="8,18", label="GDP", kind="percent")]
+    assert _pick_emphasis_index(facts) == 2   # percent, dù không phải fact đầu
+
+    all_count = [Fact(value="1", label="a", kind="count"), Fact(value="2", label="b", kind="count")]
+    assert _pick_emphasis_index(all_count) == 0   # không có kind ưu tiên -> fact đầu (hành vi cũ)
 
 
 # --- Phase 2: Research/Brief -> facts[] có nhãn (agents/brief.py) -----------
@@ -2496,7 +3221,7 @@ def test_facts_from_llm_output_reassembles_value_when_llm_splits_unit():
     raw = _json.dumps({"facts": [
         {"value": "8,18", "label": "GDP 6 tháng đầu năm 2026", "unit": "%", "raw": "8,18%"},
     ]}, ensure_ascii=False)
-    facts = facts_from_llm_output(raw, _SSI_EVIDENCE)
+    facts = facts_from_llm_output(raw, _SSI_EVIDENCE).facts
     assert len(facts) == 1
     assert facts[0].value == "8,18" and facts[0].unit == "%"
     assert "8,18%" in facts[0].source
@@ -2515,7 +3240,7 @@ def test_facts_from_llm_output_labels_meaningful_and_drops_hallucinated():
         {"value": "15%", "label": "Biên lợi nhuận bịa (không có trong bài)", "unit": "%", "raw": "15%"},
     ]}, ensure_ascii=False)
 
-    facts = facts_from_llm_output(raw, _SSI_EVIDENCE)
+    facts = facts_from_llm_output(raw, _SSI_EVIDENCE).facts
     values = {f.value for f in facts}
     assert values == {"8,18%", "8 cổ phiếu"}          # "15%" bịa -> loại
     assert not any(f.label.startswith("Số liệu") for f in facts)   # KHÔNG còn nhãn vô nghĩa
@@ -2527,9 +3252,9 @@ def test_facts_from_llm_output_labels_meaningful_and_drops_hallucinated():
 def test_facts_from_llm_output_empty_or_bad_json_returns_empty_list():
     from twmkt.agents.brief import facts_from_llm_output
 
-    assert facts_from_llm_output("", _SSI_EVIDENCE) == []
-    assert facts_from_llm_output("không phải JSON", _SSI_EVIDENCE) == []
-    assert facts_from_llm_output('{"facts": []}', _SSI_EVIDENCE) == []
+    assert facts_from_llm_output("", _SSI_EVIDENCE).facts == []
+    assert facts_from_llm_output("không phải JSON", _SSI_EVIDENCE).facts == []
+    assert facts_from_llm_output('{"facts": []}', _SSI_EVIDENCE).facts == []
 
 
 def test_run_brief_passes_model_and_verifies_output():
@@ -2544,23 +3269,26 @@ def test_run_brief_passes_model_and_verifies_output():
             return _json.dumps({"facts": [
                 {"value": "8,18%", "label": "GDP 6 tháng đầu năm 2026", "unit": "%", "raw": "8,18%"}]})
 
-    facts = run_brief(_FakeBriefLLM(), _SSI_EVIDENCE, model="haiku")
+    facts = run_brief(_FakeBriefLLM(), _SSI_EVIDENCE, model="haiku").facts
     assert len(facts) == 1
     assert facts[0].value == "8,18%" and facts[0].label == "GDP 6 tháng đầu năm 2026"
 
 
 def test_run_brief_degrades_to_empty_list_on_mockllm_or_empty_output():
-    """Bước 'brief' là bước PHỤ -> KHÔNG fail_loud -> lỗi/rỗng LÙI MƯỢT về []."""
+    """Bước 'brief' là bước PHỤ -> KHÔNG fail_loud -> lỗi/rỗng LÙI MƯỢT về []
+    (BriefResult rỗng-DO-HỎNG, Phase 4.12: no_numeric_content LUÔN False ở đường này)."""
     from twmkt.agents.brief import run_brief
     from twmkt.agents.base import MockLLM
 
-    assert run_brief(MockLLM(), _SSI_EVIDENCE) == []   # MockLLM không trả JSON thật -> []
+    r = run_brief(MockLLM(), _SSI_EVIDENCE)   # MockLLM không trả JSON thật -> facts=[]
+    assert r.facts == [] and r.no_numeric_content is False
 
     class _EmptyLLM:
         def complete(self, *a, **k):
             return ""
 
-    assert run_brief(_EmptyLLM(), _SSI_EVIDENCE) == []
+    r2 = run_brief(_EmptyLLM(), _SSI_EVIDENCE)
+    assert r2.facts == [] and r2.no_numeric_content is False
 
 
 def test_production_brief_facts_field_defaults_empty_and_independent_per_instance():
@@ -2594,7 +3322,7 @@ def test_facts_from_llm_output_parses_kind_and_falls_back_to_other():
         {"value": "8 cổ phiếu", "label": "Nhãn không kind hợp lệ", "kind": "khong-ton-tai",
          "raw": "8 cổ phiếu"},
     ]}, ensure_ascii=False)
-    facts = facts_from_llm_output(raw, _SSI_EVIDENCE)
+    facts = facts_from_llm_output(raw, _SSI_EVIDENCE).facts
     by_value = {f.value: f for f in facts}
     assert by_value["8"].kind == "count"
     assert by_value["8,18%"].kind == "percent"
@@ -2612,7 +3340,7 @@ def test_facts_from_llm_output_attributes_count_fact_to_correct_sentence_not_per
         {"value": "8", "label": "Số cổ phiếu SSI khuyến nghị", "unit": None, "kind": "count",
          "raw": "8 cổ phiếu"},
     ]}, ensure_ascii=False)
-    facts = facts_from_llm_output(raw, _SSI_EVIDENCE)
+    facts = facts_from_llm_output(raw, _SSI_EVIDENCE).facts
     assert len(facts) == 1
     assert facts[0].kind == "count"
     assert facts[0].source.startswith("Tuy nhiên SSI vẫn lựa chọn 8 cổ phiếu")
@@ -2666,7 +3394,7 @@ def test_facts_from_llm_output_computes_canonical_value_and_approx_flag():
         {"value": "585", "label": "Khối ngoại bán ròng toàn thị trường", "unit": "tỷ đồng",
          "kind": "money", "raw": "585 tỷ đồng", "approx": False},
     ]}, ensure_ascii=False)
-    facts = facts_from_llm_output(raw, evidence)
+    facts = facts_from_llm_output(raw, evidence).facts
     assert len(facts) == 1
     f = facts[0]
     assert f.raw == "585 tỷ đồng"
@@ -2685,7 +3413,7 @@ def test_facts_from_llm_output_drops_fact_when_raw_not_substring_of_evidence():
         {"value": "585", "label": "Khối ngoại bán ròng", "unit": "tỷ đồng",
          "raw": "khoảng 585 tỷ đồng chẵn"},   # cụm bịa, KHÔNG xuất hiện y hệt trong evidence
     ]}, ensure_ascii=False)
-    assert facts_from_llm_output(raw, evidence) == []
+    assert facts_from_llm_output(raw, evidence).facts == []
 
 
 def test_facts_from_llm_output_approx_flag_true_when_raw_has_hedge_word_even_if_ai_forgets():
@@ -2698,7 +3426,7 @@ def test_facts_from_llm_output_approx_flag_true_when_raw_has_hedge_word_even_if_
         {"value": "1", "label": "Phần trăm nhu cầu điện đáp ứng tại Havana", "unit": "%",
          "raw": "khoảng 1%", "approx": False},   # AI QUÊN đánh dấu approx=True
     ]}, ensure_ascii=False)
-    facts = facts_from_llm_output(raw, evidence)
+    facts = facts_from_llm_output(raw, evidence).facts
     assert len(facts) == 1 and facts[0].approx is True   # code tự dò "khoảng" -> ép True
 
 
@@ -2944,6 +3672,60 @@ def test_route_from_llm_output_no_paradox_keeps_llm_chosen_structure_regression(
     }, ensure_ascii=False)
     d = route_from_llm_output(raw)
     assert d.structure == "S4" and d.fallback is False
+
+
+def test_route_from_llm_output_parses_output_channels_and_rationale():
+    """Phase 4.13 Mục A: LLM trả output_channels/channel_rationale hợp lệ ->
+    parse ĐÚNG (không bị ép default), giữ nguyên channel router chọn false."""
+    from twmkt.agents.structure_router import route_from_llm_output
+    import json as _json
+
+    raw = _json.dumps({
+        "content_type": "article", "structure": "S1", "hook": "H1",
+        "secondary_structure": None, "rationale": "Luận điểm rõ.",
+        "signals": {"has_genuine_paradox": False, "drivers": [], "has_central_thesis": True},
+        "output_channels": {"article": True, "infographic": False, "video": True},
+        "channel_rationale": {"article": "Đủ chất liệu", "infographic": "Không có số",
+                              "video": "Có narrative kể được"},
+    }, ensure_ascii=False)
+    d = route_from_llm_output(raw)
+    assert d.output_channels == {"article": True, "infographic": False, "video": True}
+    assert d.channel_rationale["infographic"] == "Không có số"
+
+
+def test_route_from_llm_output_missing_or_malformed_channels_defaults_all_true():
+    """Parse LỎNG (an toàn — KHÔNG tự cắt tuyến khi không chắc): thiếu hẳn
+    output_channels/channel_rationale, hoặc type sai (list thay vì dict), hay
+    thiếu 1 khoá trong dict -> MẶC ĐỊNH True cho khoá đó."""
+    from twmkt.agents.structure_router import route_from_llm_output
+    import json as _json
+
+    base = {"content_type": "article", "structure": "S1", "hook": "H1",
+           "secondary_structure": None, "rationale": "x",
+           "signals": {"has_genuine_paradox": False, "drivers": [], "has_central_thesis": True}}
+
+    d1 = route_from_llm_output(_json.dumps(base, ensure_ascii=False))
+    assert d1.output_channels == {"article": True, "infographic": True, "video": True}
+    assert d1.channel_rationale == {"article": "", "infographic": "", "video": ""}
+
+    bad = dict(base, output_channels=["not", "a", "dict"], channel_rationale="not a dict either")
+    d2 = route_from_llm_output(_json.dumps(bad, ensure_ascii=False))
+    assert d2.output_channels == {"article": True, "infographic": True, "video": True}
+
+    partial = dict(base, output_channels={"infographic": False})   # thiếu article/video
+    d3 = route_from_llm_output(_json.dumps(partial, ensure_ascii=False))
+    assert d3.output_channels == {"article": True, "infographic": False, "video": True}
+
+
+def test_fallback_always_keeps_all_channels_true():
+    """_fallback() (router lỗi/JSON hỏng/S5-vi-phạm) KHÔNG BAO GIỜ tự cắt tuyến
+    — lỗi hạ tầng không phải lý do hợp lệ để suy ra tin không hợp infographic/
+    video. Test qua đường công khai (route_from_llm_output rỗng -> fallback)."""
+    from twmkt.agents.structure_router import route_from_llm_output
+
+    d = route_from_llm_output("")
+    assert d.fallback is True
+    assert d.output_channels == {"article": True, "infographic": True, "video": True}
 
 
 def test_get_or_route_freezes_forced_s5_decision_no_second_llm_call():
@@ -3195,6 +3977,91 @@ def test_router_decision_store_clear_returns_false_when_key_missing():
     assert store.clear("khong-ton-tai") is False
 
 
+def test_router_decision_store_persists_output_channels_across_instances():
+    """Phase 4.13: output_channels/channel_rationale ĐÓNG BĂNG CÙNG quyết định
+    (route-once) -> instance MỚI đọc lại ĐÚNG, không bị mất/reset về default."""
+    from twmkt.agents.route_once import RouterDecisionStore
+    from twmkt.agents.structure_router import RouterDecision
+
+    path = _tmp_decisions_path()
+    decision = RouterDecision(
+        content_type="article", structure="S1", hook="H1", secondary_structure=None,
+        rationale="x", signals={}, fallback=False,
+        output_channels={"article": True, "infographic": False, "video": True},
+        channel_rationale={"article": "", "infographic": "Không có số", "video": ""},
+    )
+    RouterDecisionStore(path).set("k-channels", decision)
+
+    store2 = RouterDecisionStore(path)
+    cached = store2.get("k-channels")
+    assert cached.output_channels == {"article": True, "infographic": False, "video": True}
+    assert cached.channel_rationale["infographic"] == "Không có số"
+
+
+def test_router_decision_store_backward_compat_old_entry_defaults_channels_true():
+    """Entry CŨ (đóng băng TRƯỚC Phase 4.13, KHÔNG có output_channels/
+    channel_rationale trong file JSON) -> load về default CẢ 3 True (KHÔNG hồi
+    tố cắt tuyến cho quyết định đã đóng băng từ trước khi có cơ chế này)."""
+    import json as _json
+    from twmkt.agents.route_once import RouterDecisionStore
+
+    path = _tmp_decisions_path()
+    old_entry = {
+        "content_type": "article", "structure": "S1", "hook": "H1",
+        "secondary_structure": None, "rationale": "x", "signals": {}, "fallback": False,
+    }   # KHÔNG có output_channels/channel_rationale (định dạng CŨ, trước 4.13)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_json.dumps({"k-old": old_entry}, ensure_ascii=False), encoding="utf-8")
+
+    cached = RouterDecisionStore(path).get("k-old")
+    assert cached.output_channels == {"article": True, "infographic": True, "video": True}
+    assert cached.channel_rationale == {}
+
+
+def test_router_decision_store_set_channel_overrides_without_reroute():
+    """(Phase 4.13) Owner override 1 tuyến qua set_channel() — KHÔNG gọi lại
+    LLM, structure/hook giữ NGUYÊN, chỉ output_channels[channel] đổi (giống
+    triết lý reroute nhưng KHÔNG cần route lại cả quyết định)."""
+    from twmkt.agents.route_once import RouterDecisionStore, get_or_route
+    from twmkt.agents.production import ProductionBrief
+
+    store = RouterDecisionStore(_tmp_decisions_path())
+    brief = ProductionBrief(title="Chủ đề owner override")
+    llm = _RouterJsonLLM(structure="S3", hook="H1")
+    get_or_route(llm, brief, store=store, key="k-override")
+    assert llm.calls == 1
+
+    ok = store.set_channel("k-override", "infographic", False)
+    assert ok is True
+
+    cached = store.get("k-override")
+    assert cached.output_channels["infographic"] is False
+    assert cached.output_channels["article"] is True          # tuyến khác KHÔNG đổi
+    assert cached.structure == "S3" and cached.hook == "H1"   # KHÔNG route lại
+    assert "[owner override]" in cached.channel_rationale["infographic"]
+    assert llm.calls == 1   # set_channel KHÔNG gọi LLM
+
+
+def test_router_decision_store_set_channel_returns_false_when_key_missing():
+    from twmkt.agents.route_once import RouterDecisionStore
+
+    store = RouterDecisionStore(_tmp_decisions_path())
+    assert store.set_channel("khong-ton-tai", "video", False) is False
+
+
+def test_router_decision_store_set_channel_invalid_channel_raises():
+    from twmkt.agents.route_once import RouterDecisionStore, get_or_route
+    from twmkt.agents.production import ProductionBrief
+
+    store = RouterDecisionStore(_tmp_decisions_path())
+    get_or_route(_RouterJsonLLM(), ProductionBrief(title="x"), store=store, key="k")
+    try:
+        store.set_channel("k", "podcast", True)
+    except ValueError:
+        return
+    raise AssertionError("phải raise ValueError với channel lạ")
+
+
 # --- Render Infographic (src/twmkt/render, $0 tất định) --------------------
 def test_brand_kit_from_settings_reads_overrides_and_defaults():
     from twmkt.render import brand_kit_from_settings
@@ -3209,15 +4076,56 @@ def test_brand_kit_from_settings_reads_overrides_and_defaults():
     assert kit2["bg"] == "#0B1B2B"   # key không khai -> vẫn dùng mặc định
 
 
+def test_number_discipline_block_present_in_writer_and_composer_system():
+    """Phase 4.13 Mục B: KỶ LUẬT SỐ (cấm tự cộng/gộp số, cấm rớt đơn vị/bậc số,
+    quy ước dấu chấm/phẩy tiếng Việt) PHẢI có mặt ở CẢ 2 nơi sinh nội dung có
+    số — writer (article) và composer (infographic) — tránh trôi giữa 2 agent."""
+    from twmkt.agents.production import AnalysisWriterAgent, InfographicSpecAgent, _NUMBER_DISCIPLINE
+
+    assert _NUMBER_DISCIPLINE in AnalysisWriterAgent.system
+    assert _NUMBER_DISCIPLINE in InfographicSpecAgent.system
+    assert "CỘNG/GỘP" in _NUMBER_DISCIPLINE
+    assert "357.000" in _NUMBER_DISCIPLINE   # ví dụ cụ thể chống rớt bậc số
+
+
+def test_infographic_composer_no_longer_teaches_risky_magnitude_conversion():
+    """Regression (Phase 4.13): trước phase này, composer prompt DẠY ví dụ tự
+    quy đổi bậc số ('41.200 tỷ đồng' -> '41,2 nghìn tỷ') — chính kiểu quy đổi
+    này gây bug rớt '000' phát hiện ở backtest Phase 4.12-B ('357.000 tỷ đồng'
+    -> '357 tỷ', sai 1.000 lần). Ví dụ rủi ro đó phải bị GỠ khỏi prompt."""
+    from twmkt.agents.production import InfographicSpecAgent
+
+    assert "41,2 nghìn tỷ" not in InfographicSpecAgent.system
+
+
+def test_prompts_infographic_v1_file_matches_code_default_no_drift():
+    """Phase 4.13: prompts/infographic.v1.md TỪNG lệch code default (file cũ,
+    tiền-Phase-4.11, nói 'InfographicSpecAgent KHÔNG gọi LLM') trong khi tab
+    PROMPTS Sheet LIVE đang bật infographic=v1 -> composer THẬT âm thầm dùng
+    prompt lỗi thời (không có schema 8 trường, KHÔNG có KỶ LUẬT SỐ mới) — phát
+    hiện khi backtest Phase 4.13. Khoá lại bằng test, giống drift test analysis/
+    video đã có."""
+    from twmkt.agents.production import InfographicSpecAgent
+    from twmkt.agents.prompts import read_prompt_file
+
+    assert read_prompt_file("infographic", "v1", prompts_dir="prompts") == InfographicSpecAgent.system
+
+
 def test_render_infographic_svg_contains_headline_stats_and_disclaimer():
     from twmkt.agents.production import InfographicSpecAgent, ProductionBrief
     from twmkt.render import brand_kit_from_settings, render_infographic_svg
     import json as _json
     import xml.dom.minidom as minidom
 
+    from twmkt.models import Fact
+
     brief = ProductionBrief(title="PNJ tăng 40%", hook="PNJ: kỷ lục doanh thu",
                             tickers=["PNJ"], url="https://cafef.vn/x.chn",
-                            evidence="Doanh thu tăng 40%, đạt 1.200 tỷ đồng, kỷ lục.")
+                            evidence="Doanh thu tăng 40%, đạt 1.200 tỷ đồng, kỷ lục.",
+                            facts=[Fact(value="40", label="Tăng trưởng doanh thu", unit="%",
+                                       kind="percent", raw="tăng 40%", canonical_value=40.0)])
+    # InfographicSpecAgent(None) -> MockLLM (junk, không parse được JSON) ->
+    # LÙI MƯỢT dùng _fallback_infographic_spec (tất định từ facts[]).
     spec = _json.loads(InfographicSpecAgent(None).run(brief).body)
     brand = brand_kit_from_settings(Settings({}))
     svg = render_infographic_svg(spec, brand)
@@ -3225,7 +4133,7 @@ def test_render_infographic_svg_contains_headline_stats_and_disclaimer():
     assert svg.startswith("<svg ")
     minidom.parseString(svg)   # phải là XML hợp lệ, không lỗi parse
     assert "PNJ" in svg
-    assert spec["stats"][0]["value"] in svg
+    assert spec["hero"][0]["value"] in svg
     assert "không phải khuyến nghị đầu tư" in svg
     assert brand["primary"] in svg
 
@@ -3234,7 +4142,7 @@ def test_render_infographic_svg_handles_empty_stats_and_missing_footer():
     from twmkt.render import render_infographic_svg
     import xml.dom.minidom as minidom
 
-    svg = render_infographic_svg({"headline": "Chỉ tiêu đề", "tickers": []})
+    svg = render_infographic_svg({"title": "Chỉ tiêu đề", "related": []})
     minidom.parseString(svg)
     assert "Chỉ tiêu đề" in svg
 
@@ -3248,7 +4156,7 @@ def test_all_production_agents_applies_prompt_overrides_by_name():
     assert by_role["AnalysisWriter"].system == "PROMPT ANALYSIS TÙY CHỈNH"
     # video rỗng -> KHÔNG override (giữ default); infographic không có key -> giữ default
     assert by_role["VideoScripter"].system != ""
-    assert "TẤT ĐỊNH" in by_role["InfographicDesigner"].system
+    assert "Composer" in by_role["InfographicComposer"].system
 
 
 def _voice_settings(**overrides):

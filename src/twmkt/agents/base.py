@@ -184,15 +184,29 @@ class ClaudeCodeLLM(LLMClient):
 
 
 class Agent:
-    """Agent chuyên biệt = vai trò (system prompt) + một LLMClient."""
+    """Agent chuyên biệt = vai trò (system prompt) + một LLMClient.
+
+    PHASE 4.11: `model` (tuỳ chọn, alias haiku|sonnet|opus) — cho phép 1 agent
+    dùng model KHÁC với model mặc định của `llm` (vd InfographicSpecAgent muốn
+    haiku/'Loại B rẻ' dù dùng chung LLMClient instance với agent khác). None
+    (mặc định) -> hành vi CŨ y hệt, LLMClient tự dùng model mặc định của nó."""
 
     role: str = "agent"
     system: str = "You are a helpful assistant."
     uses_llm: bool = True   # False = tất định, 0 token
+    model: str | None = None
 
-    def __init__(self, llm: LLMClient | None = None):
+    def __init__(self, llm: LLMClient | None = None, *, model: str | None = None):
         self.llm = llm or MockLLM()
+        self.model = model
 
     def _ask(self, prompt: str, *, extra_system: str = "") -> str:
         sys = f"{self.role}\n{self.system}{extra_system}"
+        # self.model=None (mặc định) -> gọi complete(sys, prompt) Y HỆT trước
+        # Phase 4.11 (KHÔNG truyền kwarg "model" — tương thích LLMRouter/agents
+        # cũ + mọi fake LLM 2 tham số trong test hiện có). CHỈ agent nào tự đặt
+        # self.model (vd InfographicSpecAgent composer, Phase 4.11) mới truyền
+        # thêm kwarg này.
+        if self.model is not None:
+            return self.llm.complete(sys, prompt, model=self.model)
         return self.llm.complete(sys, prompt)

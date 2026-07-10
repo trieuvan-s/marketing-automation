@@ -12,7 +12,7 @@ Chạy:
     python scripts/ab_voice2.py                       # tự lấy dòng Status=APPROVE đầu tiên trong CONTEXT
     python scripts/ab_voice2.py --slug "co-may-tang-truong-moi-cua-hoa-phat"
 
-Idempotent: ghi ĐÈ cùng 1 file storage/ab/voice_ab2_<slug>.md mỗi lần chạy lại.
+Idempotent: ghi ĐÈ cùng 1 file <data_root>/ab/voice_ab2_<slug>.md mỗi lần chạy lại.
 """
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ from twmkt.agents.production import (  # noqa: E402
     apply_guardrails, build_analysis_prompt, render_analysis,
 )
 from twmkt.agents.voice import _extract_example, _split_top_sections, assemble_voice  # noqa: E402
-from twmkt.config import Settings, load_settings  # noqa: E402
+from twmkt.config import Settings, data_path, load_settings  # noqa: E402
 from twmkt.models import ContentDraft, ContentFormat, Source  # noqa: E402
 
 from ab_voice import pick_context  # noqa: E402  (tái dùng — cùng cách chọn dòng CONTEXT/slug)
@@ -96,8 +96,7 @@ def run(*, slug: str | None = None) -> Path:
     v1 = apply_guardrails(generate_article(brief, llm, voice_text=voice_v1), brief.evidence, brief.background)
     v2 = apply_guardrails(generate_article(brief, llm, voice_text=voice_v2), brief.evidence, brief.background)
 
-    out_dir = REPO_ROOT / "storage" / "ab"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = data_path("ab", settings=settings)
     out_path = out_dir / f"voice_ab2_{item_slug}.md"
 
     text = (

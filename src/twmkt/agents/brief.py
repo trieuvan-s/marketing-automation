@@ -27,15 +27,43 @@ THẬT từ value+unit (agents/_numeric.parse_magnitude_token) — không tin AI
 toán. RÀNG BUỘC CHỐNG TRÔI: "raw" PHẢI là substring THẬT (kiểm bằng `in`, không
 chỉ verify_fact_in_evidence theo câu) của evidence+background -> thiếu/sai thì
 LOẠI fact ngay, KHÔNG lọt xuống writer/guardrail.
+
+PHASE 4.12 — PHÂN BIỆT facts=[] RỖNG-HỢP-LỆ vs RỖNG-DO-HỎNG: trước phase này,
+facts=[] chỉ có 1 nghĩa (Brief lỗi/timeout/parse hỏng) -> caller (scripts/
+produce_from_sheet.run) coi MỌI facts rỗng là NEEDS_HUMAN, kể cả khi tin THẬT
+SỰ không có tuyên bố định lượng nào (vd bình luận/phân tích xu hướng thuần
+định tính) — OAN cho những tin này. `run_brief()`/`facts_from_llm_output()`
+giờ trả `BriefResult` (facts + no_numeric_content: bool):
+  - no_numeric_content=True CHỈ khi Brief CHẠY TRỌN VẸN (LLM trả JSON parse
+    được) VÀ LLM tự XÁC NHẬN CHẮC CHẮN tin không có số — RÀNG BUỘC CỨNG: mọi
+    đường LÙI MƯỢT (LLM rỗng/lỗi, JSON không parse được) LUÔN trả về
+    no_numeric_content=False (mặc định dataclass) — KHÔNG BAO GIỜ tự suy ra
+    "chắc là không có số" từ 1 lỗi hạ tầng. facts KHÔNG rỗng thì cờ này cũng
+    bị ép False (mâu thuẫn logic nếu vừa có facts vừa nói "không có số" —
+    không tin mù field rời của LLM, cùng triết lý driver_count/
+    has_genuine_paradox ở structure_router.py).
+  - Caller (scripts/produce_from_sheet.run) dùng cờ này để quyết định
+    SKIPPED (tin định tính, bỏ qua infographic hợp lệ) hay NEEDS_HUMAN (Brief
+    hỏng thật) khi facts=[] — xem ProductionBrief.no_numeric_content.
 """
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 
 from ._jsonparse import try_json_object
 from ._numeric import has_approx_word, parse_magnitude_token
 from ..models import FACT_KINDS, Fact
 from .base import LLMClient
+
+
+@dataclass
+class BriefResult:
+    """Output run_brief()/facts_from_llm_output() (Phase 4.12) — facts[] +
+    cờ phân biệt "rỗng-hợp-lệ" (tin thuần định tính, Brief xác nhận) vs
+    "rỗng-do-hỏng" (LLM lỗi/timeout/parse thất bại). Xem docstring module."""
+    facts: list[Fact] = field(default_factory=list)
+    no_numeric_content: bool = False
 
 _SENT_SPLIT_RE = re.compile(r"(?<=[.!?\n])\s+")
 
@@ -69,9 +97,15 @@ _SYSTEM = (
     "vd \"gần 600 tỷ đồng\") — PHẢI tìm được y hệt bằng tìm-chuỗi trong văn bản "
     "gốc, TUYỆT ĐỐI KHÔNG diễn giải/viết lại; \"approx\" = true nếu cụm đó có từ "
     "xấp xỉ (gần/khoảng/xấp xỉ/hơn/trên/dưới), false nếu là số chính xác.\n"
+    "Sau khi đọc KỸ toàn bộ văn bản: nếu bạn XÁC NHẬN CHẮC CHẮN không có bất kỳ "
+    "tuyên bố định lượng/mốc có tên nào thuộc 8 nhóm trên (tin THUẦN ĐỊNH TÍNH, "
+    "vd bình luận/phân tích xu hướng/nhận định chính sách không kèm số cụ thể) "
+    "-> trả facts: [] VÀ \"no_numeric_content\": true. CHỈ đặt true khi THẬT SỰ "
+    "chắc chắn đã đọc hết và không sót — còn nghi ngờ/không chắc thì để false "
+    "(mặc định, KHÔNG suy diễn 'chắc là không có').\n"
     'Trả về DUY NHẤT JSON: {"facts": [{"value": str, "label": str, "unit": str hoặc null, '
     '"kind": "percent|money|count|growth|date|ranking|target|other", '
-    '"raw": str, "approx": bool}]}. '
+    '"raw": str, "approx": bool}], "no_numeric_content": bool}. '
     "KHÔNG markdown, KHÔNG lời dẫn."
 )
 
@@ -132,13 +166,15 @@ def _verify_candidates(value: str, unit: str | None, source_text: str) -> str | 
     return None
 
 
-def facts_from_llm_output(raw: str, evidence: str, background: str = "") -> list[Fact]:
-    """Parse output LLM -> facts[] đã LỌC CHỐNG BỊA (value phải verify được
-    trong evidence+background). Hàm THUẦN — dùng chung bởi run_brief() và test
-    (không cần LLM thật)."""
+def facts_from_llm_output(raw: str, evidence: str, background: str = "") -> BriefResult:
+    """Parse output LLM -> BriefResult (facts[] đã LỌC CHỐNG BỊA + cờ
+    no_numeric_content, Phase 4.12). Hàm THUẦN — dùng chung bởi run_brief() và
+    test (không cần LLM thật). JSON không parse được -> BriefResult() rỗng-
+    DO-HỎNG (no_numeric_content=False mặc định, KHÔNG BAO GIỜ True ở đường lùi
+    mượt này)."""
     data = try_json_object(raw) if raw else None
     if not data:
-        return []
+        return BriefResult()
     source_text = f"{evidence}\n{background}"
     out: list[Fact] = []
     seen: set[str] = set()
@@ -175,16 +211,23 @@ def facts_from_llm_output(raw: str, evidence: str, background: str = "") -> list
         out.append(Fact(value=value, label=label, unit=unit, source=sent, kind=kind,
                         raw=raw_phrase, canonical_value=canonical_value, approx=approx))
         seen.add(value)
-    return out
+
+    # Phase 4.12: no_numeric_content=True CHỈ đứng vững khi facts THẬT SỰ rỗng
+    # (facts không rỗng mà LLM lỡ báo true -> mâu thuẫn logic, ép False — không
+    # tin mù field rời của LLM, cùng triết lý driver_count/has_genuine_paradox).
+    no_numeric_content = bool(data.get("no_numeric_content", False)) and not out
+    return BriefResult(facts=out, no_numeric_content=no_numeric_content)
 
 
 def run_brief(llm: LLMClient, evidence: str, background: str = "", *,
-              model: str | None = None, fail_loud: bool = False) -> list[Fact]:
-    """Gọi LLM bước 'brief' -> facts[] đã verify. LÙI MƯỢT mặc định (fail_loud=
-    False): LLM rỗng/lỗi/parse hỏng -> [] (KHÔNG crash). `model`/`fail_loud`
-    truyền thẳng cho complete() (xem factory.step_model/is_fail_loud_step)."""
+              model: str | None = None, fail_loud: bool = False) -> BriefResult:
+    """Gọi LLM bước 'brief' -> BriefResult (facts[] đã verify + no_numeric_content,
+    Phase 4.12). LÙI MƯỢT mặc định (fail_loud=False): LLM rỗng/lỗi/parse hỏng ->
+    BriefResult() rỗng-DO-HỎNG (KHÔNG crash, no_numeric_content luôn False ở
+    đường này). `model`/`fail_loud` truyền thẳng cho complete() (xem
+    factory.step_model/is_fail_loud_step)."""
     raw = llm.complete(_SYSTEM, build_brief_prompt(evidence, background),
                        model=model, fail_loud=fail_loud)
     if not raw:
-        return []
+        return BriefResult()
     return facts_from_llm_output(raw, evidence, background)

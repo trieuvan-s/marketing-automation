@@ -9,18 +9,23 @@ project:
   version: "0.2.0"
 
 paths:
-  data_dir: "data"
-  storage_dir: "storage"          # documents / logs / output
+  data_dir: "data"                # tickers/keywords — dữ liệu THAM CHIẾU, ở TRONG repo (khác storage.data_root, dữ liệu RUNTIME)
 
 # --- Lưu trữ tài liệu sạch (persist / audit) ------------------------
-# Partition theo NGÀY: storage/documents/<YYYY-MM-DD>/<content_hash>.json.
+# PHASE DATA-ROOT: mọi dữ liệu runtime giờ nằm dưới storage.data_root (NGOÀI
+# repo, mặc định "../marketing-automation-database" — override qua biến môi
+# trường DATA_ROOT, xem src/twmkt/config.data_root()). documents_dir/
+# output_dir/drafts_dir bên dưới là đường dẫn CON tính từ data_root (KHÔNG
+# còn tiền tố "storage/" — resolve qua config.data_path(), xem factory.py).
+# Partition theo NGÀY: <data_root>/documents/<YYYY-MM-DD>/<content_hash>.json.
 # Dedup theo NỘI DUNG chéo các ngày còn giữ -> crawl nhiều lần/ngày không tạo
 # bản trùng. Chỉ giữ `retention_days` ngày mới nhất (folder cũ hơn bị xoá).
 storage:
   type: "file"                    # file | memory
-  documents_dir: "storage/documents"
-  output_dir: "storage/output"
-  drafts_dir: "storage/production_drafts"   # hàng chờ --draft/--ingest (Claude Code viết nội dung)
+  data_root: "../marketing-automation-database"   # GỐC DUY NHẤT dữ liệu runtime, NGOÀI repo
+  documents_dir: "documents"
+  output_dir: "output"
+  drafts_dir: "state/production_drafts"   # hàng chờ --draft/--ingest (Claude Code viết nội dung)
   retention_days: 10              # giữ tối đa 10 ngày dữ liệu
   timezone: "Asia/Ho_Chi_Minh"    # mốc chia ngày
 
@@ -328,7 +333,10 @@ llm:
   mode: "claude_code"              # claude_code (CLI `claude -p`, gói Pro/Max, KHÔNG cần
                                     # ANTHROPIC_API_KEY riêng) | api (AnthropicLLM) | mock ($0)
   claude_code:
-    timeout_s: 120                 # timeout 1 lượt `claude -p` (giây)
+    timeout_s: 240                 # timeout 1 lượt `claude -p` (giây) — Phase 4.12-B: 120s
+                                    # không đủ cho bước brief trên 1 số chủ đề (2/2 lần timeout
+                                    # thật trên cùng 1 chủ đề), tăng tạm để backtest có kết quả
+                                    # thật thay vì luôn rơi vào lùi-mượt do hạ tầng chậm.
   # ALIAS (haiku|sonnet|opus), KHÔNG phải id đầy đủ — mỗi backend tự map alias
   # -> id/cờ thật (ClaudeCodeLLM: thẳng vào --model; AnthropicLLM: bảng alias
   # riêng trong agents/base.py). Đổi model chỉ cần sửa Ở ĐÂY.
@@ -336,6 +344,7 @@ llm:
     brief: "haiku"                  # Research/Brief — rẻ, chỉ trích + gắn nhãn
     router: "haiku"                 # StructureRouter — phân loại/chọn khung, rẻ
     writer: "sonnet"                # Writer (article/video) — tầng đắt, chất lượng cao
+    composer: "haiku"               # Infographic Composer (Phase 4.11) — nén facts[] -> spec, LLM Loại B rẻ
   # Bước nào PHẢI fail-loud (raise LLMCallError khi lỗi thay vì lùi mượt trả "")
   # — Writer sinh nội dung thật, KHÔNG được âm thầm ghi CONTENT rỗng. Bước phụ
   # (hook/enrich/brief-label) KHÔNG liệt ở đây -> giữ lùi mượt như trước.
@@ -374,8 +383,9 @@ producers:
 # --- Route-once (Phase 4.8 Mục A, agents/route_once.py) --------------
 # RouterDecision đóng băng theo chủ đề (JSON file, KHÔNG day-partition — trạng
 # thái "đã chốt", owner tự xoá bằng scripts/reroute.py khi cần route lại).
+# Đường dẫn CON tính từ storage.data_root (Phase DATA-ROOT, xem config.data_path()).
 router:
-  decisions_path: "storage/router_decisions.json"
+  decisions_path: "state/router_decisions.json"
 
 # --- Guardrail số canonical (Phase 4.8 Mục C, agents/production.py) --------
 # Số TRONG BÀI khớp với 1 fact.canonical_value trong khoảng dung sai -> KHÔNG

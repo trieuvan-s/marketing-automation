@@ -7,7 +7,7 @@ Chạy:
     python scripts/ab_voice.py                       # tự lấy dòng Status=APPROVE đầu tiên trong CONTEXT
     python scripts/ab_voice.py --slug "co-may-tang-truong-moi-cua-hoa-phat"
 
-Idempotent: ghi ĐÈ cùng 1 file storage/ab/voice_ab_<slug>.md mỗi lần chạy lại
+Idempotent: ghi ĐÈ cùng 1 file <data_root>/ab/voice_ab_<slug>.md mỗi lần chạy lại
 (không tích file rác). KHÔNG đụng power_on.py/CONTENT — chỉ đọc CONTEXT (APPROVE)
 để lấy context/evidence, không ghi gì lên Sheet.
 """
@@ -33,7 +33,7 @@ from twmkt.agents.production import (  # noqa: E402
     apply_guardrails, build_analysis_prompt, render_analysis,
 )
 from twmkt.agents.voice import assemble_voice  # noqa: E402
-from twmkt.config import Settings, load_settings  # noqa: E402
+from twmkt.config import Settings, data_path, load_settings  # noqa: E402
 from twmkt.models import ContentDraft, ContentFormat, Source  # noqa: E402
 from twmkt.sheets_board import SheetsBoard  # noqa: E402
 
@@ -135,8 +135,7 @@ def run(*, slug: str | None = None) -> Path:
         generate_article(brief, llm, voice_settings=_settings_with_voice(settings, enabled=True)),
         brief.evidence, brief.background)
 
-    out_dir = Path(settings.get("storage.output_dir", "storage/output")).parent / "ab"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = data_path("ab", settings=settings)
     out_path = out_dir / f"voice_ab_{item_slug}.md"
 
     notes = "\n".join(_diff_notes(baseline, voicelock))

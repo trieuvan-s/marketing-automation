@@ -1,7 +1,10 @@
 """FileDocumentStore — lưu CleanDocument ra đĩa, PARTITION THEO NGÀY + retention.
 
-Layout: storage/documents/<YYYY-MM-DD>/<content_hash>.json — mỗi ngày 1 folder
-(yêu cầu "data nhiều ngày lưu folder khác nhau").
+Layout: <root>/<YYYY-MM-DD>/<content_hash>.json — mỗi ngày 1 folder (yêu cầu
+"data nhiều ngày lưu folder khác nhau"). `root` do CALLER truyền vào (KHÔNG tự
+biết gì về storage.data_root) — factory.build_store() resolve qua
+config.data_path() (Phase DATA-ROOT), giữ class này thuần/độc lập, tái dùng
+được ở nơi khác (test truyền thẳng thư mục tạm).
 
 Chống trùng ($0):
   • Khoá theo NỘI DUNG (hash của title+markdown), KHÔNG theo url — nên chạy crawl

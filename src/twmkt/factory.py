@@ -20,7 +20,7 @@ from .collectors.crawl4ai_collector import Crawl4aiCollector
 from .collectors.http_collector import HttpFirstCollector
 from .collectors.mock import MockCollector
 from .collectors.rss_collector import RssCollector
-from .config import Settings, load_settings
+from .config import Settings, data_path, load_settings
 from .curation.config import CurationConfig
 from .curation.store import DocumentStore, InMemoryStore
 from .curation.file_store import FileDocumentStore
@@ -284,13 +284,15 @@ def build_retriever(settings: Settings) -> Retriever:
 
 
 def build_store(settings: Settings) -> DocumentStore:
-    """storage.type = file -> FileDocumentStore (persist); mặc định memory."""
+    """storage.type = file -> FileDocumentStore (persist, dưới storage.data_root
+    — Phase DATA-ROOT, xem config.data_path()); mặc định memory."""
     kind = (settings.get("storage.type", "memory") or "memory").lower()
     if kind == "memory":
         return InMemoryStore()
     if kind == "file":
+        root = data_path(settings.get("storage.documents_dir", "documents"), settings=settings)
         return FileDocumentStore(
-            settings.get("storage.documents_dir", "storage/documents"),
+            str(root),
             retention_days=int(settings.get("storage.retention_days", 10)),
             tz=settings.get("storage.timezone", "Asia/Ho_Chi_Minh"),
         )

@@ -63,6 +63,27 @@ lọt qua được):
     CHIỀU của "S5 <=> has_genuine_paradox" đều bị ép ở CODE:
       chiều 1 (Phase 3): S5 mà paradox=false -> fallback (KHÔNG cho S5 giả).
       chiều 2 (4.8-B2):  paradox=true (effective) -> BẮT BUỘC S5 (KHÔNG cho lai).
+
+PHASE 4.13 MỤC A — CONTENT-FIT ROUTER (đóng gap (a) — trước phase này MỌI chủ đề
+APPROVE đều bị ép sinh ĐỦ 3 tuyến article+video+infographic, kể cả khi 1 tuyến
+không hợp bản chất tin, gây SKIPPED/ERROR "oan" phát hiện ở backtest Phase 4.12/
+4.12-B). RouterDecision giờ trả THÊM (ĐÓNG BĂNG CÙNG quyết định qua route-once,
+agents/route_once.py — không route lại riêng cho từng tuyến):
+  - output_channels: {"article": bool, "infographic": bool, "video": bool} —
+    AI PHÁN theo hình dạng THẬT của tin (KHÔNG đếm số cứng ở CODE, luật chỉ nằm
+    trong PROMPT — xem _SYSTEM): infographic hợp khi có dữ liệu định lượng trình
+    bày được bằng hình; video hợp khi có narrative kể được (kém hợp tin bảng-số
+    thuần); article mặc định true trừ khi tin quá vụn/không đủ chất liệu.
+  - channel_rationale: {"article": str, "infographic": str, "video": str} — 1
+    câu/tuyến để AUDIT (vì sao hợp/không hợp), KHÔNG chảy vào system prompt Writer.
+  Parse LỎNG (route_from_llm_output): thiếu/hỏng field hay type sai -> MẶC ĐỊNH
+  CẢ 3 TRUE (an toàn — KHÔNG tự ý cắt tuyến khi không chắc, khác hẳn nguyên tắc
+  "S5 cấm mặc định" ở trên vì hướng rủi ro ngược nhau: sinh thừa 1 tuyến không
+  hợp chỉ tốn thêm ít lượt LLM rẻ + có thể SKIPPED tay sau, còn CẮT NHẦM 1 tuyến
+  hợp làm mất nội dung đáng ra có được — an toàn nghiêng về sinh thừa).
+  Owner override thủ công: agents/route_once.RouterDecisionStore.set_channel()
+  (scripts/reroute.py --channel/--set) — GIỐNG triết lý reroute (Mục A cũ), sửa
+  TRỰC TIẾP quyết định đã đóng băng, KHÔNG gọi lại LLM.
 """
 from __future__ import annotations
 
@@ -133,12 +154,31 @@ _SYSTEM = (
     "sẽ TỰ ÉP secondary_structure=S4 (không cần bạn tự điền, nhưng vẫn nên điền đúng "
     "cho nhất quán).\n"
     "rationale: 1-2 câu VÌ SAO khung này khớp hình dạng dữ kiện (không phải khung khác).\n\n"
+    "output_channels (Phase 4.13 — CHỌN TUYẾN, KHÔNG ép sinh đủ 3 loại cho mọi tin): "
+    "PHÁN theo HÌNH DẠNG THẬT của tin, KHÔNG đếm số cứng:\n"
+    "  - infographic: true CHỈ khi có dữ liệu ĐỊNH LƯỢNG trình bày được bằng hình "
+    "(số/%/mốc/xếp hạng đủ để dựng 1 tấm hình có nghĩa) — tin thuần bình luận/nhận "
+    "định không số cụ thể thì false.\n"
+    "  - video: true khi có NARRATIVE kể được (diễn biến, nhân vật, mâu thuẫn, hệ quả) "
+    "— false nếu tin CHỈ LÀ bảng số/danh sách thuần, không có gì để 'kể'.\n"
+    "  - article: MẶC ĐỊNH true — chỉ false khi tin quá VỤN (1-2 câu, không đủ chất "
+    "liệu viết thành bài phân tích).\n"
+    "channel_rationale: 1 câu/tuyến giải thích NGẮN vì sao hợp/không hợp (dùng để audit).\n\n"
     'Trả về DUY NHẤT JSON: {"content_type": str, "structure": "S1|S2|S3|S4|S5", '
     '"hook": "H1|H2|H3", "secondary_structure": "S1|S2|S3|S4|S5 hoặc null", '
     '"rationale": str, "signals": {"has_genuine_paradox": bool, '
     '"residual_tension": "str hoặc null", "drivers": [str, ...], '
-    '"has_central_thesis": bool}}. KHÔNG markdown, KHÔNG lời dẫn.'
+    '"has_central_thesis": bool}, '
+    '"output_channels": {"article": bool, "infographic": bool, "video": bool}, '
+    '"channel_rationale": {"article": str, "infographic": str, "video": str}}. '
+    "KHÔNG markdown, KHÔNG lời dẫn."
 )
+
+_CHANNELS = ("article", "infographic", "video")
+
+
+def _default_channels() -> dict:
+    return {c: True for c in _CHANNELS}
 
 
 @dataclass
@@ -153,6 +193,10 @@ class RouterDecision:
     rationale: str
     signals: dict = field(default_factory=dict)   # has_genuine_paradox/residual_tension/drivers/driver_count/has_central_thesis
     fallback: bool = False              # True nếu đây là fallback an toàn (audit)
+    # Phase 4.13 Mục A — content-fit router: tuyến nào ĐƯỢC sinh + lý do audit.
+    # Mặc định CẢ 3 True (an toàn, xem docstring module) — KHÔNG suy diễn false.
+    output_channels: dict = field(default_factory=_default_channels)
+    channel_rationale: dict = field(default_factory=dict)
 
 
 def _fallback(reason: str) -> RouterDecision:
@@ -163,6 +207,11 @@ def _fallback(reason: str) -> RouterDecision:
         signals={"has_genuine_paradox": False, "residual_tension": None, "drivers": [],
                 "driver_count": 0, "has_central_thesis": True},
         fallback=True,
+        # Fallback KHÔNG được tự ý cắt tuyến (router hỏng không phải lý do hợp lệ
+        # để suy ra "tin này không hợp infographic/video") -> giữ CẢ 3 True.
+        output_channels=_default_channels(),
+        channel_rationale={c: "Fallback an toàn — giữ nguyên tuyến (không tự cắt khi router lỗi)"
+                           for c in _CHANNELS},
     )
 
 
@@ -248,12 +297,31 @@ def route_from_llm_output(raw: str) -> RouterDecision:
     if signals["driver_count"] >= 3 and structure != "S4":
         secondary = "S4"
 
+    output_channels, channel_rationale = _parse_channels(data)
+
     return RouterDecision(
         content_type=str(data.get("content_type", "")).strip().lower() or "article",
         structure=structure, hook=hook, secondary_structure=secondary,
         rationale=str(data.get("rationale", "")).strip() or "(router không cho rationale)",
         signals=signals, fallback=False,
+        output_channels=output_channels, channel_rationale=channel_rationale,
     )
+
+
+def _parse_channels(data: dict) -> tuple[dict, dict]:
+    """output_channels/channel_rationale (Phase 4.13) — parse LỎNG: field thiếu/
+    sai kiểu/thiếu khoá -> MẶC ĐỊNH True cho khoá đó (an toàn, xem docstring
+    module: KHÔNG tự ý cắt tuyến khi không chắc). Hàm THUẦN, tách riêng để
+    route_from_llm_output không phình to."""
+    channels_raw = data.get("output_channels")
+    channels_raw = channels_raw if isinstance(channels_raw, dict) else {}
+    channels = {c: bool(channels_raw[c]) if c in channels_raw else True for c in _CHANNELS}
+
+    rationale_raw = data.get("channel_rationale")
+    rationale_raw = rationale_raw if isinstance(rationale_raw, dict) else {}
+    rationale = {c: str(rationale_raw.get(c, "")).strip() for c in _CHANNELS}
+
+    return channels, rationale
 
 
 def _log_decision(brief: ProductionBrief, decision: RouterDecision) -> None:
@@ -261,6 +329,11 @@ def _log_decision(brief: ProductionBrief, decision: RouterDecision) -> None:
          f"{'/' + decision.secondary_structure if decision.secondary_structure else ''} "
          f"hook={decision.hook} fallback={decision.fallback} | signals={decision.signals} "
          f"| rationale: {decision.rationale}")
+    # Phase 4.13 Mục A — "Gate hiển thị": in output_channels/channel_rationale ra
+    # log audit (KHÔNG thêm cột Sheet, cùng triết lý route_once.py — file JSON +
+    # log, không đổi schema Sheet).
+    print(f"[router-channels] '{brief.title[:60]}' -> {decision.output_channels} "
+         f"| rationale: {decision.channel_rationale}")
 
 
 def run_route(llm: LLMClient, brief: ProductionBrief, classification: dict | None = None, *,

@@ -82,3 +82,46 @@ def load_settings(path: str | os.PathLike | None = None) -> Settings:
     with open(p, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     return Settings(_expand(data))
+
+
+# =====================================================================
+# PHASE DATA-ROOT — GỐC DUY NHẤT cho mọi dữ liệu runtime (documents/output/
+# state/logs/ab), TÁCH khỏi repo. Trước phase này, mỗi nơi tự ghép chuỗi
+# "storage/..." rải rác (factory.py, file_store.py, produce_from_sheet.py,
+# power_on.py...) -> dữ liệu nằm LẪN trong repo (rủi ro commit nhầm, khó tách
+# khi deploy VPS). Từ đây, TẤT CẢ đường dẫn dữ liệu PHẢI đi qua data_path().
+# =====================================================================
+_DEFAULT_DATA_ROOT = "../marketing-automation-database"
+
+
+def data_root(settings: Settings | None = None) -> Path:
+    """Gốc dữ liệu runtime — ưu tiên biến môi trường DATA_ROOT (đặt khi deploy
+    máy khác/VPS, CÙNG NẾP với TWMKT_SHEET_ID/TWMKT_CONFIG đã dùng ở nơi khác
+    trong repo này — os.environ.get(...) or settings.get(...), KHÔNG dùng cú
+    pháp ${VAR} trong YAML vì đó là quy ước dành riêng cho BÍ MẬT, xem docstring
+    module), không có thì đọc `storage.data_root` trong settings.yaml (mặc
+    định "../marketing-automation-database" — NGOÀI repo). Đường dẫn TƯƠNG ĐỐI
+    tính theo THƯ MỤC LÀM VIỆC lúc chạy — cùng quy ước với load_settings() tự
+    tìm config/settings.yaml theo CWD (mọi script trong repo LUÔN được chạy từ
+    repo root, xem README/CLAUDE.md)."""
+    settings = settings or load_settings()
+    raw = os.environ.get("DATA_ROOT") or settings.get("storage.data_root", _DEFAULT_DATA_ROOT)
+    return Path(str(raw))
+
+
+def data_path(*parts: str, settings: Settings | None = None) -> Path:
+    """Resolve 1 đường dẫn con trong data_root(settings) -> Path TUYỆT ĐỐI/
+    tương đối-theo-CWD nhất quán, TỰ TẠO thư mục cần thiết (idempotent, mkdir
+    parents=True/exist_ok=True) — mọi nơi đọc/ghi dữ liệu runtime PHẢI gọi hàm
+    này thay vì tự Path("storage/...") rải rác (adapter ở điểm nối ổ đĩa, cùng
+    triết lý CLAUDE.md áp cho collector/publisher/LLM).
+
+    Phần tử CUỐI có dấu "." (vd "router_decisions.json", "power_on.lock") ->
+    coi là FILE, tạo thư mục CHA; không có dấu "." (vd "documents",
+    "2026-07-10") -> coi là THƯ MỤC, tự tạo CHÍNH nó. Không truyền `parts` ->
+    trả về chính data_root (đã tạo nếu chưa có)."""
+    root = data_root(settings)
+    p = root.joinpath(*parts) if parts else root
+    target_dir = p.parent if "." in p.name else p
+    target_dir.mkdir(parents=True, exist_ok=True)
+    return p

@@ -6,7 +6,8 @@ lưu bằng FileDocumentStore. Tất định: normalize/relevance/hook đều $0
 LLM giữ ở MockLLM (KHÔNG gọi LLM thật, provider=mock).
 
 Dừng TRƯỚC cổng duyệt 1: chỉ sản xuất brief + hook để người duyệt xem, chưa sinh
-nội dung đắt. Kết quả lưu ra storage/output/ (JSON + Markdown, UTF-8).
+nội dung đắt. Kết quả lưu ra <data_root>/output/ (JSON + Markdown, UTF-8) —
+data_root NGOÀI repo, xem Phase DATA-ROOT / config.data_path().
 
 Chạy:
     python scripts/run_pipeline.py                 # crawl thật (engine theo config)
@@ -34,7 +35,7 @@ ensure_utf8_stdio()
 
 from twmkt.agents.hook import HookAgent  # noqa: E402
 from twmkt.agents.researcher import ResearcherAgent  # noqa: E402
-from twmkt.config import load_settings  # noqa: E402
+from twmkt.config import data_path, load_settings  # noqa: E402
 from twmkt.curation import normalize  # noqa: E402
 from twmkt.curation.config import CurationConfig  # noqa: E402
 from twmkt.factory import (  # noqa: E402
@@ -144,8 +145,7 @@ def run(topic: str | None = None, *, offline: bool = False, limit: int | None = 
     usage["cost_per_article_usd"] = round(usage["cost_usd"] / kept, 6) if kept else 0.0
 
     # --- Lưu output (JSON + Markdown, UTF-8) ---------------------------------
-    out_dir = Path(settings.get("storage.output_dir", "storage/output"))
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = data_path(settings.get("storage.output_dir", "output"), settings=settings)
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     stem = f"{ts}-{_safe_slug(topic)}"
 

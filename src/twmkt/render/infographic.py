@@ -7,8 +7,19 @@ khi cần đăng MXH. Brand kit (màu/font/kích thước) đọc từ config/se
 code (adapter/config-first như CLAUDE.md yêu cầu).
 
 Bố cục cố định (template đơn), từ trên xuống:
-  wordmark + tickers -> headline -> subhead -> thẻ số liệu (tối đa 5, thẻ đầu
-  emphasis) -> takeaway -> footer (disclaimer + nguồn).
+  wordmark + related (mã) -> title -> subtitle -> thẻ số liệu (hero+market gộp,
+  tối đa 5, thẻ hero được nhấn) -> highlights -> footer (disclaimer + nguồn).
+
+PHASE 4.11: schema spec đổi từ headline/subhead/tickers/stats/takeaway/footer
+(Phase 4.10, InfographicSpecAgent trích thẳng facts[]) sang 8 TRƯỜNG composer
+(title/subtitle/hero/market/highlights/related/priority/source) + render_hint
+riêng — disclaimer KHÔNG còn trong spec (thuộc RENDER, xem agents/production.py
+docstring InfographicSpecAgent) nên module này tự giữ hằng số disclaimer
+riêng, KHÔNG phụ thuộc ngược vào agents/production (giữ decoupled).
+`render_hint` (theme/palette/ratio) hiện là gợi ý MỀM, CHƯA áp dụng vào layout
+(vẫn dùng brand_kit cố định) — để ngỏ cho việc tinh chỉnh sau, không thuộc yêu
+cầu Phase 4.11.
+
 Bọc chữ (word-wrap) bằng ước lượng ký tự/dòng theo font-size — KHÔNG đo font
 thật (không có engine đo chữ trong stdlib) nên với tiêu đề rất dài, dòng có thể
 lệch nhẹ; đủ dùng cho MVP xem trước, chưa phải render pixel-perfect.
@@ -28,6 +39,14 @@ _DEFAULT_BRAND = {
     "text_muted": "#9FB3C8",
     "font_family": "Arial, 'Segoe UI', sans-serif",
 }
+
+# Phase 4.11: disclaimer KHÔNG còn trong spec (data/style tách bạch) -> render
+# tự gắn hằng số này (trùng nội dung agents/production._DISCLAIMER, KHÔNG
+# import ngược để giữ module render độc lập với agents).
+_RENDER_DISCLAIMER = (
+    "Nội dung chỉ mang tính thông tin, không phải khuyến nghị đầu tư. "
+    "Nhà đầu tư tự chịu trách nhiệm với quyết định của mình."
+)
 
 
 def brand_kit_from_settings(settings) -> dict:
@@ -62,25 +81,32 @@ def _tspans(lines: list[str], *, x: int, dy_first: int, line_height: int) -> str
 
 
 def render_infographic_svg(spec: dict, brand: dict | None = None) -> str:
-    """`spec` = dict đúng schema InfographicSpecAgent.run() (xem agents/production.py):
-    headline, subhead, tickers, stats[{label,value,emphasis}], takeaway, footer.
-    Trả về chuỗi SVG hoàn chỉnh (chuẩn XML, có khai báo header)."""
+    """`spec` = dict đúng schema Composer (Phase 4.11, xem agents/production.py
+    InfographicSpecAgent/infographic_spec_from_data): title, subtitle, hero[],
+    market[] ({label,value} mỗi item), highlights[], related[], priority,
+    source. `render_hint` (nếu có) hiện CHƯA áp dụng vào layout (gợi ý mềm,
+    xem docstring module). Trả về chuỗi SVG hoàn chỉnh (chuẩn XML, có khai báo
+    header)."""
     b = {**_DEFAULT_BRAND, **(brand or {})}
     w, h = b["width"], b["height"]
     pad = int(w * 0.07)
     cw = w - 2 * pad   # content width
 
-    tickers = spec.get("tickers") or []
-    ticker_txt = " · ".join(str(t) for t in tickers)
+    related = spec.get("related") or []
+    ticker_txt = " · ".join(str(t) for t in related)
 
-    headline_lines = _wrap(spec.get("headline", ""), max_chars=18)[:4]
-    subhead_lines = _wrap(spec.get("subhead", ""), max_chars=42)[:2]
-    takeaway_lines = _wrap(spec.get("takeaway", ""), max_chars=48)[:5]
+    headline_lines = _wrap(spec.get("title", ""), max_chars=18)[:4]
+    subhead_lines = _wrap(spec.get("subtitle", ""), max_chars=42)[:2]
+    # highlights[] (Phase 4.11, thay takeaway đoạn văn cắt cụt cũ) -> gộp
+    # thành các dòng ngắn, mỗi highlight 1 câu TRỌN VẸN (không char-slice).
+    takeaway_lines = [line for h in (spec.get("highlights") or [])
+                      for line in _wrap(str(h), max_chars=48)][:5]
 
-    stats = (spec.get("stats") or [])[:5]
-    footer = spec.get("footer") or {}
-    disclaimer_lines = _wrap(footer.get("disclaimer", ""), max_chars=70)[:3]
-    source = footer.get("source", "")
+    hero = [{**s, "emphasis": True} for s in (spec.get("hero") or [])]
+    market = [{**s, "emphasis": False} for s in (spec.get("market") or [])]
+    stats = (hero + market)[:5]
+    disclaimer_lines = _wrap(_RENDER_DISCLAIMER, max_chars=70)[:3]
+    source = spec.get("source", "")
 
     parts: list[str] = []
     parts.append(

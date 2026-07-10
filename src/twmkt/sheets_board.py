@@ -795,7 +795,7 @@ def _tab_requests(t: TabMeta) -> list[dict]:
     if t.name == "CONTENT" and "status" in low:  # -> dropdown (kết quả sản xuất, tất định)
         c = low.index("status")
         out.append(_set_validation(sid, 1, fmt_rows, c,
-                                   _one_of_list(["PENDING", "RUNNING", "DONE", "ERROR"])))
+                                   _one_of_list(["PENDING", "RUNNING", "DONE", "ERROR", "SKIPPED"])))
     if t.name == "CONTENT" and "approve(gate 2)" in low:  # -> dropdown quy trình duyệt (cổng 2)
         c = low.index("approve(gate 2)")
         out.append(_set_validation(sid, 1, fmt_rows, c,

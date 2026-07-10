@@ -14,7 +14,8 @@ Lịch nào `<section>.enabled=false` trong config thì KHÔNG khởi động (i
 do), không lỗi. Nếu KHÔNG lịch nào bật, in hướng dẫn rồi thoát ngay (không treo
 tiến trình).
 
-LOCK FILE (storage/logs/power_on.lock, ghi "hostname:pid"): tự CHẶN 2 tiến trình
+LOCK FILE (<data_root>/logs/power_on.lock, ghi "hostname:pid" — data_root NGOÀI
+repo, xem Phase DATA-ROOT / config.data_path()): tự CHẶN 2 tiến trình
 power_on.py chạy CÙNG LÚC trên CÙNG máy (2 tiến trình cùng gọi Sheets API dễ
 vượt quota 429 gấp đôi). Máy KHÁC ghi lock trước -> chỉ CẢNH BÁO (1 file cục bộ
 không thể chặn liên-máy) — tự kiểm tra máy đó nếu dùng CHUNG service account.
@@ -37,10 +38,15 @@ from twmkt._encoding import ensure_utf8_stdio  # noqa: E402
 ensure_utf8_stdio()
 
 from twmkt import factory  # noqa: E402
-from twmkt.config import load_settings  # noqa: E402
+from twmkt.config import data_path, load_settings  # noqa: E402
 from twmkt.schedule import ScheduleConfig, Scheduler  # noqa: E402
 
-LOCK_PATH = REPO_ROOT / "storage" / "logs" / "power_on.lock"
+
+def _lock_path() -> Path:
+    """Phase DATA-ROOT: lock file giờ nằm dưới data_root (NGOÀI repo), KHÔNG
+    còn hard-code REPO_ROOT/"storage"/... — resolve LAZY (không phải hằng số
+    module-level) để tránh đọc settings.yaml ngay lúc import."""
+    return data_path("logs", "power_on.lock")
 
 
 # --- Lock file (thuần, test được: parse/pid-alive không cần chạm đĩa/mạng) ---
@@ -78,10 +84,12 @@ def _read_lock(path: Path) -> tuple[str, int] | None:
         return None
 
 
-def acquire_lock(path: Path = LOCK_PATH) -> None:
+def acquire_lock(path: Path | None = None) -> None:
     """Tự chặn 2 tiến trình power_on.py CÙNG LÚC trên CÙNG máy. Máy KHÁC (khác
     hostname) đang giữ lock -> chỉ CẢNH BÁO rồi tiếp tục (không có cách chặn
-    liên-máy từ 1 file cục bộ) — gợi ý user tự kiểm tra tránh đụng quota chung."""
+    liên-máy từ 1 file cục bộ) — gợi ý user tự kiểm tra tránh đụng quota chung.
+    `path=None` -> tự resolve qua _lock_path() (data_root, Phase DATA-ROOT)."""
+    path = path or _lock_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     hostname = socket.gethostname()
     pid = os.getpid()
@@ -108,9 +116,11 @@ def acquire_lock(path: Path = LOCK_PATH) -> None:
     atexit.register(release_lock, path)
 
 
-def release_lock(path: Path = LOCK_PATH) -> None:
+def release_lock(path: Path | None = None) -> None:
     """Xoá lock NẾU vẫn còn là của tiến trình này (tránh xoá lock tiến trình
-    khác đã ghi đè sau khi mình dọn chậm)."""
+    khác đã ghi đè sau khi mình dọn chậm). `path=None` -> tự resolve qua
+    _lock_path() (data_root, Phase DATA-ROOT)."""
+    path = path or _lock_path()
     try:
         if _read_lock(path) == (socket.gethostname(), os.getpid()):
             path.unlink()

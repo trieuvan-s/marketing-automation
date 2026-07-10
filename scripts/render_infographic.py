@@ -3,7 +3,7 @@
 Chạy:
     python scripts/render_infographic.py                    # render TẤT CẢ *-infographic.json hôm nay
     python scripts/render_infographic.py --date 2026-07-05  # render 1 ngày cụ thể
-    python scripts/render_infographic.py --file storage/output/2026-07-05/x-infographic.json
+    python scripts/render_infographic.py --file <data_root>/output/2026-07-05/x-infographic.json
 
 Ghi .svg CẠNH file .json nguồn (cùng slug, đổi đuôi .svg) — không cần cấu hình
 thư mục riêng. Không LLM, không mạng.
@@ -22,7 +22,7 @@ from twmkt._encoding import ensure_utf8_stdio  # noqa: E402
 
 ensure_utf8_stdio()
 
-from twmkt.config import load_settings  # noqa: E402
+from twmkt.config import data_path, load_settings  # noqa: E402
 from twmkt.render import brand_kit_from_settings, render_infographic_svg  # noqa: E402
 
 
@@ -45,7 +45,7 @@ def run(*, file: str | None = None, date: str | None = None) -> dict:
     if file:
         targets = [Path(file)]
     else:
-        out_dir = Path(settings.get("storage.output_dir", "storage/output"))
+        out_dir = data_path(settings.get("storage.output_dir", "output"), settings=settings)
         day_dir = out_dir / (date or _today(settings))
         targets = sorted(day_dir.glob("*-infographic.json"))
 
