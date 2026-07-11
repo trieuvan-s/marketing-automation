@@ -48,6 +48,7 @@ from twmkt.agents.hook import HookAgent, _try_json  # noqa: E402
 from twmkt.config import load_settings  # noqa: E402
 from twmkt.curation import normalize  # noqa: E402
 from twmkt.curation.config import CurationConfig, _load_lines  # noqa: E402
+from twmkt.curation.keys import assign_topic_key  # noqa: E402
 from twmkt.curation.enrich import (  # noqa: E402
     classify, cluster_by_event, groups_from_settings, hotness_pct, marketing_score,
 )
@@ -235,10 +236,18 @@ def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False
             key_points=[c.title], evidence=[c.markdown[:400]]))
         if debug and i == 0:
             _print_hook_debug(hook_agent)
+        # Phase 1R.2 — WRITE-ONCE: dòng CONTEXT ở đây LUÔN LÀ MỚI (upsert_context_
+        # rows bỏ qua hoàn toàn url đã có, xem SheetsBoard.upsert_context_rows)
+        # nên existing_key luôn rỗng ("") — assign_topic_key() tính từ
+        # canonical_url (đã kiểm định — xem HttpFirstCollector.extract_canonical_
+        # url) hoặc lùi về c.url; KHÔNG có URL hợp lệ -> gán SURROGATE uuid4
+        # NGAY (KHÔNG còn để lại "" chờ backfill). Source (cột Sheet) VẪN ghi
+        # c.url (url thật đã fetch, KHÔNG phải canonical) — TopicKey là danh
+        # tính, Source là bằng chứng nguồn.
         scored_rows.append((hot, context_row(
             title=c.title, hook_line=hook.headlines[0], source_url=c.url, score=score,
             hot_pct=hot, topic=topic, group=group, other_sources=other_urls,
-            tickers=c.tickers)))
+            tickers=c.tickers, topic_key=assign_topic_key("", url=c.canonical_url or c.url))))
 
     scored_rows.sort(key=lambda x: x[0], reverse=True)   # thứ tự chèn (thứ tự cuối do sort_context_by_hot)
     # UPSERT theo url: dòng ĐÃ CÓ giữ nguyên (không đụng Status/Execute/Hook/Notes

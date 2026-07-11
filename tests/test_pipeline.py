@@ -794,15 +794,19 @@ def test_sheets_sources_from_rows_filters_enable():
 
 def test_sheets_context_row_column_order():
     """context_row header MỚI: Timestamp ĐẦU TIÊN, KHÔNG còn cột Use, Execute
-    NGAY SAU Status. Source gộp báo khác; Status=PENDING, Execute rỗng mặc định."""
+    NGAY SAU Status. Source gộp báo khác; Status=PENDING, Execute rỗng mặc định.
+    TopicKey (Lớp 5 Phase 1) — APPEND CUỐI (không chen giữa, xem sheets_board.py
+    comment CONTEXT_HEADER: tránh lệch vị trí mọi cột hiện có)."""
     from twmkt.sheets_board import context_row, CONTEXT_HEADER
 
     assert CONTEXT_HEADER == ["Timestamp", "Hot%", "Score", "Group", "Topic", "Context",
-                             "Hook", "Source", "Status", "Execute", "tickers", "Notes"]
+                             "Hook", "Source", "Status", "Execute", "tickers", "Notes",
+                             "TopicKey"]
     row = context_row(title="Tiêu đề bài", hook_line="FPT: hook hấp dẫn",
                       source_url="http://u", score=5, hot_pct=42.5, topic="CoPhieu",
                       group="CoPhieu, ChinhSach", other_sources=["http://u2", "http://u3"],
-                      tickers=["FPT", "HPG"], ts="2026-07-02T00:00:00+00:00")
+                      tickers=["FPT", "HPG"], ts="2026-07-02T00:00:00+00:00",
+                      topic_key="abc123")
     assert len(row) == len(CONTEXT_HEADER)
     d = dict(zip(CONTEXT_HEADER, row))
     assert d["Timestamp"] == "2026-07-02T00:00:00+00:00"
@@ -819,11 +823,13 @@ def test_sheets_context_row_column_order():
     assert d["Execute"] == ""             # rỗng mặc định (tự chuyển RUN khi APPROVE)
     assert d["tickers"] == "FPT, HPG"
     assert d["Notes"] == ""
+    assert d["TopicKey"] == "abc123"
 
     row2 = context_row(title="T2", hook_line="H2", source_url="http://v", score=1,
                        hot_pct=1.0, status="APPROVE", execute="RUN")
     d2 = dict(zip(CONTEXT_HEADER, row2))
     assert d2["Status"] == "APPROVE" and d2["Execute"] == "RUN"
+    assert d2["TopicKey"] == ""   # mặc định rỗng nếu caller chưa truyền
 
 
 def test_context_row_and_content_row_default_timestamp_is_ddmmyyyy_no_time():
@@ -1374,6 +1380,7 @@ def test_http_collector_fetch_and_extract_reuses_extract_article():
     class _FakeResp:
         status_code = 200
         text = html
+        url = "https://cafef.vn/bai-that-123456.chn"   # httpx.Response.url (không redirect ở test này)
 
     class _FakeClient:
         def get(self, url): return _FakeResp()
@@ -1385,8 +1392,120 @@ def test_http_collector_fetch_and_extract_reuses_extract_article():
     assert doc is not None
     assert doc.title == "Tiêu đề bài"
     assert doc.markdown == "Nội dung đầy đủ."
-    assert doc.url == "https://cafef.vn/bai-that-123456.chn"
+    assert doc.url == "https://cafef.vn/bai-that-123456.chn"   # KHÔNG có canonical -> dùng final_url
     assert doc.source == "CafeF - RSS X"
+
+
+def test_extract_canonical_url_parses_link_rel_canonical():
+    """extract_canonical_url: trích href của <link rel="canonical">, resolve
+    tương đối qua base_url; None nếu không có thẻ/href rỗng. Hàm THUẦN."""
+    from twmkt.collectors.http_collector import extract_canonical_url
+
+    html_abs = ('<html><head><link rel="canonical" href="https://cafef.vn/goc.chn">'
+               '</head><body></body></html>')
+    assert extract_canonical_url(html_abs, "https://cafef.vn/khac.chn") == "https://cafef.vn/goc.chn"
+
+    html_rel = '<html><head><link rel="canonical" href="/goc.chn"></head></html>'
+    assert extract_canonical_url(html_rel, "https://cafef.vn/khac.chn") == "https://cafef.vn/goc.chn"
+
+    html_none = "<html><head></head><body>Không có canonical.</body></html>"
+    assert extract_canonical_url(html_none, "https://cafef.vn/khac.chn") is None
+
+    html_empty_href = '<html><head><link rel="canonical" href=""></head></html>'
+    assert extract_canonical_url(html_empty_href, "https://cafef.vn/khac.chn") is None
+
+
+def test_extract_canonical_url_rejects_different_host():
+    """LỚP 5 Phase 1R (bổ sung) — canonical trỏ KHÁC HOST với url đã fetch ->
+    KHÔNG tin (chống collision nếu site cấu hình canonical sai/trỏ CDN lạ)."""
+    from twmkt.collectors.http_collector import extract_canonical_url
+
+    html = ('<html><head><link rel="canonical" href="https://site-la.com/bai.chn">'
+           '</head></html>')
+    assert extract_canonical_url(html, "https://cafef.vn/bai-that.chn") is None
+    # www. KHÔNG tính là khác host
+    html_www = '<html><head><link rel="canonical" href="https://www.cafef.vn/goc.chn"></head></html>'
+    assert extract_canonical_url(html_www, "https://cafef.vn/khac.chn") == "https://www.cafef.vn/goc.chn"
+
+
+def test_extract_canonical_url_rejects_root_when_article_path_is_deep():
+    """LỚP 5 Phase 1R (bổ sung) — canonical="/" (hoặc rỗng) trong khi bài có
+    path SÂU -> nghi cấu hình sai (trỏ chung trang chủ cho mọi bài, sẽ gây va
+    chạm khoá hàng loạt) -> KHÔNG tin."""
+    from twmkt.collectors.http_collector import extract_canonical_url
+
+    html_slash = '<html><head><link rel="canonical" href="/"></head></html>'
+    assert extract_canonical_url(html_slash, "https://cafef.vn/tin-tuc/bai-viet-abc-123456.chn") is None
+
+    html_root_abs = '<html><head><link rel="canonical" href="https://cafef.vn"></head></html>'
+    assert extract_canonical_url(html_root_abs, "https://cafef.vn/tin-tuc/bai-viet-abc-123456.chn") is None
+
+    # canonical là TIỀN TỐ (chuyên mục) của path bài -> cũng nghi ngờ, không tin
+    html_prefix = '<html><head><link rel="canonical" href="/tin-tuc"></head></html>'
+    assert extract_canonical_url(html_prefix, "https://cafef.vn/tin-tuc/bai-viet-abc-123456.chn") is None
+
+    # Đối chứng: canonical KHÁC HẲN (không phải prefix, vd bản AMP -> bản gốc) -> VẪN chấp nhận
+    html_amp_to_real = '<html><head><link rel="canonical" href="/bai-goc-that.chn"></head></html>'
+    assert (extract_canonical_url(html_amp_to_real, "https://cafef.vn/tin-tuc/bai-amp-123456.chn")
+           == "https://cafef.vn/bai-goc-that.chn")
+
+
+def test_http_collector_fetch_and_extract_keeps_fetched_url_adds_canonical_url_separately():
+    """LỚP 5 Phase 1R (bổ sung Phương án 1) — RawDocument.url LUÔN là URL THẬT
+    đã fetch (final_url, sau redirect) — KHÔNG BAO GIỜ bị ghi đè bởi canonical.
+    `canonical_url` (field RIÊNG) mang canonical ĐÃ kiểm định. Không mạng thật
+    (fake client)."""
+    from twmkt.collectors.http_collector import HttpFirstCollector, SourceSpec
+    from twmkt.models import Source, SourceType
+    import re
+
+    html = ('<html><head><link rel="canonical" href="https://cafef.vn/bai-goc-that.chn">'
+           '</head><body><h1>Tiêu đề</h1>'
+           '<div class="detail-content afcbc-body"><p>Nội dung.</p></div>'
+           '</body></html>')
+
+    class _FakeResp:
+        status_code = 200
+        text = html
+        url = "https://cafef.vn/bai-that-123456-amp.chn"   # URL sau redirect (khác url thô)
+
+    class _FakeClient:
+        def get(self, url): return _FakeResp()
+
+    spec = SourceSpec(article_url_re=re.compile(r".chn$"))
+    c = HttpFirstCollector(specs={"https://cafef.vn/x.rss": spec}, respect_robots=False)
+    src = Source("CafeF - RSS X", "https://cafef.vn/x.rss", SourceType.NEWS, fetch_type="rss")
+    doc = c._fetch_and_extract(_FakeClient(), src, spec, "https://cafef.vn/bai-that-123456.chn")
+    assert doc is not None
+    assert doc.url == "https://cafef.vn/bai-that-123456-amp.chn"        # GIỮ NGUYÊN final_url, KHÔNG bị ghi đè
+    assert doc.canonical_url == "https://cafef.vn/bai-goc-that.chn"     # canonical ở field RIÊNG
+
+
+def test_http_collector_fetch_and_extract_falls_back_to_final_redirect_url_no_canonical():
+    """Không có canonical -> url = final_url (SAU redirect), canonical_url rỗng."""
+    from twmkt.collectors.http_collector import HttpFirstCollector, SourceSpec
+    from twmkt.models import Source, SourceType
+    import re
+
+    html = ('<html><body><h1>Tiêu đề</h1>'
+           '<div class="detail-content afcbc-body"><p>Nội dung.</p></div>'
+           '</body></html>')
+
+    class _FakeResp:
+        status_code = 200
+        text = html
+        url = "https://cafef.vn/bai-sau-redirect.chn"
+
+    class _FakeClient:
+        def get(self, url): return _FakeResp()
+
+    spec = SourceSpec(article_url_re=re.compile(r".chn$"))
+    c = HttpFirstCollector(specs={"https://cafef.vn/x.rss": spec}, respect_robots=False)
+    src = Source("CafeF - RSS X", "https://cafef.vn/x.rss", SourceType.NEWS, fetch_type="rss")
+    doc = c._fetch_and_extract(_FakeClient(), src, spec, "https://cafef.vn/bai-truoc-redirect.chn")
+    assert doc is not None
+    assert doc.canonical_url == ""
+    assert doc.url == "https://cafef.vn/bai-sau-redirect.chn"   # final_url, KHÔNG phải url thô
 
 
 def test_enrich_cluster_by_event_keeps_highest_priority():
@@ -1602,6 +1721,247 @@ def test_migrate_rows_preserves_data_across_header_change():
     # Không truyền defaults -> cột mới rỗng "" (an toàn, không KeyError).
     [new_row2] = migrate_rows(old_header, new_header, [old_row])
     assert dict(zip(new_header, new_row2))["Execute"] == ""
+
+
+# --- Lớp 5 Phase 1 — TopicKey (curation/keys.py) --------------------------
+def test_compute_topic_key_stable_across_url_variants():
+    """Cùng bài (khác query-string/tracking, khác hoa/thường host, có/không
+    www./dấu '/' cuối) -> CÙNG khoá; bài KHÁC -> khoá KHÁC. Khoá ổn định qua
+    2 lần gọi riêng biệt (tất định, không random/thời gian)."""
+    from twmkt.curation.keys import compute_topic_key
+
+    base = compute_topic_key(url="https://cafef.vn/bai-viet-a.chn")
+    variants = [
+        compute_topic_key(url="https://cafef.vn/bai-viet-a.chn?utm_source=fb&utm_medium=social"),
+        compute_topic_key(url="https://WWW.CafeF.vn/bai-viet-a.chn/"),
+        compute_topic_key(url="https://cafef.vn/bai-viet-a.chn#binh-luan"),
+        compute_topic_key(url="HTTPS://cafef.vn/bai-viet-a.chn"),
+    ]
+    for v in variants:
+        assert v == base and v != ""
+
+    other = compute_topic_key(url="https://cafef.vn/bai-viet-b.chn")
+    assert other != base
+
+    # Tất định qua nhiều lần gọi (không phụ thuộc random/thời gian).
+    assert compute_topic_key(url="https://cafef.vn/bai-viet-a.chn") == base
+
+
+def test_compute_topic_key_returns_none_when_no_valid_url():
+    """Phase 1R: url rỗng/không hợp lệ (tương đối, thiếu scheme/host) -> trả
+    None (KHÔNG còn lùi về title-hash — 2 tin trùng tiêu đề vẫn là 2 tin KHÁC
+    NHAU). `title` CHỈ để log, KHÔNG ảnh hưởng kết quả."""
+    from twmkt.curation.keys import compute_topic_key
+
+    assert compute_topic_key("") is None
+    assert compute_topic_key("", title="Tin không có URL") is None
+    assert compute_topic_key("/duong-dan-tuong-doi") is None   # thiếu scheme/host
+    assert compute_topic_key("not a url at all") is None
+
+
+def test_normalize_url_strips_tracking_query_fragment_www_trailing_slash():
+    """Phase 1R: CHỈ bỏ tracking param (denylist) + fragment + www./slash cuối;
+    scheme LUÔN ép về https. Query KHÔNG trong denylist (vd 'id') GIỮ NGUYÊN
+    (test riêng ở test_normalize_url_keeps_identifying_query_param)."""
+    from twmkt.curation.keys import normalize_url
+
+    assert (normalize_url("https://WWW.cafef.vn/bai.chn/?utm_source=fb#top")
+           == "https://cafef.vn/bai.chn")
+    assert normalize_url("http://cafef.vn/") == "https://cafef.vn"   # scheme ép https
+    assert normalize_url("") == ""
+    assert normalize_url("   ") == ""
+
+
+def test_normalize_url_keeps_identifying_query_param():
+    """Query KHÔNG trong denylist tracking (vd '?id=') PHẢI giữ nguyên — nhiều
+    site dùng query làm định danh bài thật, bỏ hết sẽ gây va chạm khoá."""
+    from twmkt.curation.keys import normalize_url
+
+    assert normalize_url("https://x.vn/bai?id=123") == "https://x.vn/bai?id=123"
+    assert (normalize_url("https://x.vn/bai?id=123") !=
+           normalize_url("https://x.vn/bai?id=456"))
+    # thứ tự query khác nhau -> vẫn CÙNG kết quả (đã sort)
+    assert normalize_url("https://x.vn/bai?b=2&a=1") == normalize_url("https://x.vn/bai?a=1&b=2")
+    # trộn tracking + định danh: chỉ bỏ tracking, giữ định danh
+    assert (normalize_url("https://x.vn/bai?id=1&utm_source=fb")
+           == normalize_url("https://x.vn/bai?id=1"))
+
+
+def test_backfill_context_topic_keys_idempotent_and_preserves_existing():
+    """backfill_context_topic_keys (force=False, WRITE-ONCE mặc định): điền
+    khoá RỖNG (qua assign_topic_key — URL hợp lệ -> compute_topic_key, không
+    URL -> surrogate uuid4), GIỮ NGUYÊN dòng đã có khoá (kể cả khoá đó KHÔNG
+    khớp khoá sẽ tính lại — idempotent nghĩa là KHÔNG đụng vào, không phải
+    "sửa cho đúng"). Chạy 2 lần -> kết quả y hệt (không đổi thêm)."""
+    from twmkt.sheets_board import CONTEXT_HEADER, backfill_context_topic_keys, context_row
+
+    rows = [
+        context_row(title="A", hook_line="h", source_url="https://x.com/a", score=1, hot_pct=1.0,
+                   topic_key="MANUAL-OVERRIDE"),   # đã có khoá -> GIỮ NGUYÊN dù không khớp hash thật
+        context_row(title="B", hook_line="h", source_url="https://x.com/b?utm=1", score=1, hot_pct=1.0),
+        context_row(title="C-khong-url", hook_line="h", source_url="", score=1, hot_pct=1.0),
+    ]
+    out1 = backfill_context_topic_keys(CONTEXT_HEADER, rows)
+    ik = CONTEXT_HEADER.index("TopicKey")
+    assert out1[0][ik] == "MANUAL-OVERRIDE"        # KHÔNG bị ghi đè
+    assert out1[1][ik] != "" and out1[1][ik] != "MANUAL-OVERRIDE"
+    assert out1[2][ik].startswith("sur-")           # url rỗng -> surrogate (Phase 1R.2, KHÔNG còn "")
+
+    out2 = backfill_context_topic_keys(CONTEXT_HEADER, out1)
+    assert out2 == out1   # idempotent — chạy lại không đổi gì thêm (kể cả surrogate GIỮ NGUYÊN)
+
+
+# --- Lớp 5 Phase 1R.2 — write-once + surrogate uuid4 + re-key một lần -------
+def test_assign_topic_key_surrogate_unique_no_collision_between_rows():
+    """2 dòng KHÔNG-URL -> 2 surrogate KHÁC NHAU (uuid4 ngẫu nhiên, không suy
+    từ nội dung nên không va chạm) — thay dứt điểm khoá rỗng \"\"."""
+    from twmkt.curation.keys import assign_topic_key
+
+    k1 = assign_topic_key("", url="")
+    k2 = assign_topic_key("", url="")
+    assert k1 and k2 and k1 != k2
+    assert k1.startswith("sur-") and k2.startswith("sur-")
+    assert k1 != "" and k2 != ""
+
+
+def test_assign_topic_key_surrogate_stable_on_recrawl():
+    """Dòng không-URL ĐÃ có surrogate -> re-crawl/gọi lại VẪN giữ NGUYÊN
+    surrogate cũ (write-once áp dụng cho surrogate y hệt khoá URL-based)."""
+    from twmkt.curation.keys import assign_topic_key
+
+    first = assign_topic_key("", url="")
+    again = assign_topic_key(first, url="")           # re-crawl: existing_key=first
+    again2 = assign_topic_key(first, url="https://khac-han.vn/bai")  # dù kèm url mới cũng KHÔNG đổi
+    assert again == first
+    assert again2 == first
+
+
+def test_assign_topic_key_write_once_never_recomputes_even_if_normalize_changes():
+    """WRITE-ONCE thật sự: dòng ĐÃ có khoá -> assign_topic_key() KHÔNG ĐƯỢC
+    GỌI compute_topic_key() (nên KHÔNG chạm normalize_url dù nó có đổi hành vi
+    ở version sau) — mô phỏng bằng cách THAY compute_topic_key() bằng 1 hàm
+    'độc' (raise nếu bị gọi), chứng minh assign_topic_key() short-circuit
+    TRƯỚC KHI đụng tới nó, không chỉ tình cờ ra cùng giá trị."""
+    import twmkt.curation.keys as keys_mod
+
+    def poison(*a, **kw):
+        raise AssertionError("assign_topic_key KHÔNG được gọi compute_topic_key "
+                             "khi existing_key đã có (vi phạm write-once)")
+
+    original = keys_mod.compute_topic_key
+    keys_mod.compute_topic_key = poison
+    try:
+        result = keys_mod.assign_topic_key("existing-key-123", url="https://bat-ky-url-nao.vn/x")
+    finally:
+        keys_mod.compute_topic_key = original
+    assert result == "existing-key-123"
+
+
+def test_rekey_context_topic_keys_force_overwrites_url_based_keys_idempotent():
+    """force=True (Phase 1R.2, NGOẠI LỆ re-key một lần): khoá CŨ (giả lập khoá
+    SAI tính bởi normalize_url Phase 1 gốc) bị GHI ĐÈ bằng compute_topic_key()
+    MỚI cho dòng CÓ url. Chạy force=True LẦN 2 -> ra ĐÚNG kết quả y hệt lần 1
+    (idempotent, vì compute_topic_key là hàm thuần/tất định trên cùng URL)."""
+    from twmkt.sheets_board import CONTEXT_HEADER, backfill_context_topic_keys, context_row
+    from twmkt.curation.keys import compute_topic_key
+
+    old_buggy_key = "OLD-BUGGY-STRIPPED-QUERY-KEY"
+    url = "https://x.vn/bai?id=1&utm_source=fb"
+    rows = [context_row(title="A", hook_line="h", source_url=url, score=1, hot_pct=1.0,
+                        topic_key=old_buggy_key)]
+
+    out1 = backfill_context_topic_keys(CONTEXT_HEADER, rows, force=True)
+    ik = CONTEXT_HEADER.index("TopicKey")
+    assert out1[0][ik] != old_buggy_key           # khoá CŨ bị ghi đè (bypass write-once có chủ đích)
+    assert out1[0][ik] == compute_topic_key(url)   # khớp khoá MỚI (canonical, giữ ?id=)
+
+    out2 = backfill_context_topic_keys(CONTEXT_HEADER, out1, force=True)
+    assert out2 == out1   # idempotent — force=True chạy lần 2 không đổi thêm
+
+
+def test_rekey_context_topic_keys_force_preserves_surrogate_for_url_less_rows():
+    """force=True KHÔNG đụng surrogate của dòng không-URL (surrogate không bị
+    ảnh hưởng bởi bug normalize_url — chỉ khoá URL-based mới cần sửa)."""
+    from twmkt.sheets_board import CONTEXT_HEADER, backfill_context_topic_keys, context_row
+
+    surrogate = "sur-deadbeefcafe123"
+    rows = [context_row(title="Tin không URL", hook_line="h", source_url="", score=1, hot_pct=1.0,
+                        topic_key=surrogate)]
+    out = backfill_context_topic_keys(CONTEXT_HEADER, rows, force=True)
+    ik = CONTEXT_HEADER.index("TopicKey")
+    assert out[0][ik] == surrogate   # GIỮ NGUYÊN, force=True không đụng vì không có url
+
+
+def test_rekey_content_topic_keys_force_resyncs_to_new_context_keys():
+    """backfill_content_topic_keys(force=True): GHI ĐÈ TopicKey CONTENT theo
+    ánh xạ title->key MỚI NHẤT từ CONTEXT (đã rekey) — kể cả dòng CONTENT ĐÃ
+    có khoá CŨ (khớp khoá SAI trước migration) cũng phải được đồng bộ lại."""
+    from twmkt.sheets_board import (
+        CONTENT_HEADER, CONTEXT_HEADER, backfill_content_topic_keys,
+        backfill_context_topic_keys, content_row, context_row,
+    )
+
+    url = "https://x.vn/bai-y?id=9"
+    ctx_rows = backfill_context_topic_keys(CONTEXT_HEADER, [
+        context_row(title="Bài Y", hook_line="h", source_url=url, score=1, hot_pct=1.0,
+                   topic_key="OLD-BUGGY-KEY"),
+    ], force=True)
+    new_key = ctx_rows[0][CONTEXT_HEADER.index("TopicKey")]
+    assert new_key != "OLD-BUGGY-KEY"
+
+    content_rows = [content_row(context="Bài Y", type_="article", status="DONE", output="a",
+                                topic_key="OLD-BUGGY-KEY")]   # CONTENT vẫn giữ khoá CŨ trước rekey
+    out, warnings = backfill_content_topic_keys(
+        CONTEXT_HEADER, ctx_rows, CONTENT_HEADER, content_rows, force=True)
+    ik = CONTENT_HEADER.index("TopicKey")
+    assert out[0][ik] == new_key   # đồng bộ lại khớp CONTEXT vừa rekey
+    assert warnings == []
+
+
+def test_backfill_content_topic_keys_carry_forward_through_merge_blank_rows():
+    """backfill_content_topic_keys: dòng CONTENT có Context BLANK (mô phỏng
+    Sheets mergeCells đã xoá — xem curation/keys.py) PHẢI carry-forward khoá từ
+    dòng Context KHÔNG-RỖNG gần nhất phía TRÊN, KHÔNG rơi vào nhóm 'không tra
+    được'. Dòng đã có TopicKey GIỮ NGUYÊN. Idempotent qua 2 lần chạy."""
+    from twmkt.sheets_board import (
+        CONTENT_HEADER, CONTEXT_HEADER, backfill_content_topic_keys,
+        backfill_context_topic_keys, content_row, context_row,
+    )
+
+    ctx_rows = backfill_context_topic_keys(CONTEXT_HEADER, [
+        context_row(title="Bài X", hook_line="h", source_url="https://x.com/x", score=1, hot_pct=1.0),
+    ])
+    expected_key = ctx_rows[0][CONTEXT_HEADER.index("TopicKey")]
+    assert expected_key
+
+    content_rows = [
+        content_row(context="Bài X", type_="article", status="DONE", output="a"),
+        content_row(context="", type_="video_script", status="DONE", output="b"),      # merge-blank
+        content_row(context="", type_="infographic", status="DONE", output="c",
+                    topic_key="ALREADY-SET"),                                          # đã có -> giữ
+    ]
+    out1, warnings1 = backfill_content_topic_keys(CONTEXT_HEADER, ctx_rows, CONTENT_HEADER, content_rows)
+    ik = CONTENT_HEADER.index("TopicKey")
+    assert out1[0][ik] == expected_key
+    assert out1[1][ik] == expected_key      # carry-forward từ dòng phía trên
+    assert out1[2][ik] == "ALREADY-SET"     # KHÔNG bị ghi đè
+    assert warnings1 == []
+
+    out2, warnings2 = backfill_content_topic_keys(CONTEXT_HEADER, ctx_rows, CONTENT_HEADER, out1)
+    assert out2 == out1 and warnings2 == []   # idempotent
+
+
+def test_backfill_content_topic_keys_warns_when_context_not_found():
+    """Context text không khớp dòng CONTEXT nào (đã bị xoá khỏi CONTEXT, hoặc
+    CONTEXT dòng đó CŨNG chưa có TopicKey) -> KHÔNG bịa khoá, đưa vào danh sách
+    cảnh báo để caller xử lý/log, TopicKey của dòng đó giữ rỗng."""
+    from twmkt.sheets_board import CONTENT_HEADER, CONTEXT_HEADER, backfill_content_topic_keys, content_row
+
+    content_rows = [content_row(context="Bài đã bị xoá khỏi CONTEXT", type_="article",
+                                status="DONE", output="a")]
+    out, warnings = backfill_content_topic_keys(CONTEXT_HEADER, [], CONTENT_HEADER, content_rows)
+    assert out[0][CONTENT_HEADER.index("TopicKey")] == ""
+    assert warnings == ["Bài đã bị xoá khỏi CONTEXT"]
 
 
 def test_group_content_rows_groups_by_context_preserves_order():
@@ -2292,6 +2652,7 @@ class _FakeProduceBoard:
     def __init__(self, approved_rows):
         self._approved = approved_rows
         self.execute_updates: dict[int, str] = {}
+        self.topic_key_updates: dict[int, str] = {}   # Phase 1R.2
         self.appended_content: list[list[str]] = []
         self.merged_called = False
 
@@ -2319,6 +2680,9 @@ class _FakeProduceBoard:
 
     def set_execute_values(self, status_by_row):
         self.execute_updates.update(status_by_row)
+
+    def set_topic_key_values(self, key_by_row):
+        self.topic_key_updates.update(key_by_row)
 
     def mark_execute_done(self, rows):
         self.set_execute_values({r: "DONE" for r in rows})
@@ -4590,7 +4954,8 @@ def test_approved_context_from_rows_filters_and_maps():
 
     r1 = context_row(title="Bài A", hook_line="Hook A", source_url="http://a", score=5,
                      hot_pct=50.0, topic="CoPhieu", group="CoPhieu, ChinhSach",
-                     other_sources=["http://a2"], tickers=["FPT", "HPG"], status="APPROVE")
+                     other_sources=["http://a2"], tickers=["FPT", "HPG"], status="APPROVE",
+                     topic_key="key-a")
     r2 = context_row(title="Bài B", hook_line="Hook B", source_url="http://b", score=1,
                      hot_pct=10.0, status="PENDING")
     got = approved_context_from_rows([CONTEXT_HEADER, r1, r2])
@@ -4599,22 +4964,27 @@ def test_approved_context_from_rows_filters_and_maps():
     assert a["context"] == "Bài A" and a["hook"] == "Hook A"
     assert a["source"] == "http://a"                     # url chính (dòng đầu ô Source gộp)
     assert a["tickers"] == ["FPT", "HPG"] and a["topic"] == "CoPhieu"
+    assert a["topic_key"] == "key-a"                     # Lớp 5 Phase 1
     assert approved_context_from_rows([CONTEXT_HEADER]) == []   # 0 approved
 
 
 def test_content_row_shape():
+    """TopicKey (Lớp 5 Phase 1) — APPEND CUỐI (không chen giữa Context/Type),
+    khớp comment CONTENT_HEADER trong sheets_board.py."""
     from twmkt.sheets_board import content_row, CONTENT_HEADER
     assert CONTENT_HEADER == ["Timestamp", "Context", "Type", "Status", "Output",
-                             "Notes", "Approve(gate 2)"]
+                             "Notes", "Approve(gate 2)", "TopicKey"]
     row = content_row(context="Bài A", type_="article", status="DONE",
-                      output="nội dung", notes="ok", ts="ts")
+                      output="nội dung", notes="ok", ts="ts", topic_key="key-a")
     d = dict(zip(CONTENT_HEADER, row))
     assert d == {"Timestamp": "ts", "Context": "Bài A", "Type": "article", "Status": "DONE",
-                 "Output": "nội dung", "Notes": "ok", "Approve(gate 2)": "PENDING"}
+                 "Output": "nội dung", "Notes": "ok", "Approve(gate 2)": "PENDING",
+                 "TopicKey": "key-a"}
     row2 = content_row(context="Bài B", type_="video_script", status="ERROR",
                        output="x", approve="APPROVE", ts="ts2")
     d2 = dict(zip(CONTENT_HEADER, row2))
     assert d2["Approve(gate 2)"] == "APPROVE"
+    assert d2["TopicKey"] == ""   # mặc định rỗng nếu caller chưa truyền
 
 
 def test_build_content_llm_sonnet_router():

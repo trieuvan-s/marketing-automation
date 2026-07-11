@@ -147,6 +147,46 @@ def _collapse_ws(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
 
+def extract_canonical_url(html: str, base_url: str) -> str | None:
+    """LỚP 5 Phase 1R (bổ sung Phương án 1) — trích `<link rel="canonical"
+    href="...">` trong HTML, resolve href TƯƠNG ĐỐI qua `base_url` (url ĐÃ
+    fetch, sau redirect), rồi KIỂM ĐỊNH trước khi tin (chống collision hàng
+    loạt nếu site cấu hình canonical sai — trỏ chung 1 URL cho nhiều/mọi bài):
+      - Không có thẻ/href rỗng -> None.
+      - Resolve xong KHÔNG có scheme/host hợp lệ -> None.
+      - KHÁC HOST với `base_url` (bỏ `www.` trước khi so) -> None (canonical
+        trỏ sang site/CDN khác — không đáng tin cho danh tính bài NÀY).
+      - Path canonical RỖNG/chỉ "/" (trỏ về trang chủ) -> None.
+      - Path canonical là TIỀN TỐ THẬT SỰ của path `base_url` (vd base=
+        "/tin-tuc/bai-abc-123.chn", canonical="/tin-tuc" — dấu hiệu canonical
+        cấu hình sai ở mức chuyên mục, không phải bài) -> None. Canonical trỏ
+        sang MỘT BÀI KHÁC hẳn (vd bản AMP -> bản gốc, khác path hoàn toàn,
+        KHÔNG phải prefix) vẫn được CHẤP NHẬN — đây là ca hợp lệ phổ biến.
+    Hàm THUẦN (không mạng). Trả None ở BẤT KỲ bước kiểm định nào thất bại ->
+    caller (_fetch_and_extract) lùi về final_url, KHÔNG bỏ cả bài."""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+    tag = soup.find("link", attrs={"rel": "canonical"})
+    href = (tag.get("href") or "").strip() if tag else ""
+    if not href:
+        return None
+    absolute = urljoin(base_url, href)
+    canon = urlparse(absolute)
+    base = urlparse(base_url)
+    if not canon.scheme or not canon.netloc:
+        return None
+    if canon.netloc.lower().removeprefix("www.") != base.netloc.lower().removeprefix("www."):
+        return None   # khác host -> không tin (canonical sai/site lạ)
+    canon_path = canon.path.rstrip("/")
+    base_path = base.path.rstrip("/")
+    if not canon_path:
+        return None   # trỏ về root/trang chủ -> không tin
+    if base_path and canon_path != base_path and base_path.startswith(canon_path + "/"):
+        return None   # canonical là tiền tố của path bài -> nghi cấu hình sai
+    return absolute
+
+
 # =====================================================================
 # Collector (adapter) — cùng giao diện với MockCollector/Crawl4aiCollector.
 # =====================================================================
@@ -231,10 +271,11 @@ class HttpFirstCollector(Collector):
             if not self._allowed(client, source.url):
                 print(f"[CẢNH BÁO] robots.txt chặn trang mục: {source.url}")
                 return []
-            listing = self._fetch(client, source.url)
-            if listing is None:
+            fetched = self._fetch(client, source.url)
+            if fetched is None:
                 print(f"[CẢNH BÁO] Không tải được trang mục: {source.url}")
                 return []
+            listing, _ = fetched
 
             urls = extract_links(listing, source.url, spec.article_url_re)[:limit]
             docs: list[RawDocument] = []
@@ -265,13 +306,22 @@ class HttpFirstCollector(Collector):
     def _fetch_and_extract(self, client, source: Source, spec: SourceSpec,
                            url: str) -> RawDocument | None:
         """Fetch 1 URL bài + trích tiêu đề/thân bài theo `spec`. Dùng chung bởi
-        collect() (vòng lặp listing) và fetch_one() (1 URL biết trước)."""
+        collect() (vòng lặp listing) và fetch_one() (1 URL biết trước).
+
+        LỚP 5 Phase 1R (bổ sung Phương án 1) — `url` KHÔNG BAO GIỜ bị ghi đè:
+        RawDocument.url = URL THẬT đã fetch (`final_url`, sau redirect — httpx
+        tự theo, KHÔNG thêm request mới). `canonical_url` (field RIÊNG) =
+        `<link rel="canonical">` ĐÃ KIỂM ĐỊNH (cùng host, không trỏ root/prefix
+        — xem extract_canonical_url), "" nếu không có/không qua kiểm định. Nơi
+        cần danh tính bài (TopicKey, xem review_to_sheet.py) tự chọn
+        `canonical_url or url` — collector KHÔNG quyết thay caller."""
         if not self._allowed(client, url):
             print(f"[CẢNH BÁO] robots.txt chặn bài: {url}")
             return None
-        html = self._fetch(client, url)
-        if html is None:
+        fetched = self._fetch(client, url)
+        if fetched is None:
             return None
+        html, final_url = fetched
         title, body = extract_article(
             html,
             title_selector=spec.title_selector,
@@ -283,14 +333,20 @@ class HttpFirstCollector(Collector):
             return None
         return RawDocument(
             source=source.name,
-            url=url,
+            url=final_url,
+            canonical_url=extract_canonical_url(html, final_url) or "",
             title=title or source.name,
             markdown=body,
             source_type=source.source_type,
         )
 
     # --- Hạ tầng mạng (có retry + backoff) ----------------------------------
-    def _fetch(self, client, url: str) -> str | None:
+    def _fetch(self, client, url: str) -> tuple[str, str] | None:
+        """Trả (html, final_url) — `final_url` = `response.url` SAU khi httpx tự
+        theo redirect (follow_redirects=True ở __init__) — LỚP 5 Phase 1R.1:
+        đây là URL "cuối sau redirect", ưu tiên #2 khi resolve danh tính bài
+        (sau canonical, xem _fetch_and_extract) — KHÔNG thêm HTTP request nào
+        mới, chỉ giữ lại thứ httpx đã có sẵn."""
         import httpx
 
         for attempt in range(1, self.max_retries + 1):
@@ -302,7 +358,7 @@ class HttpFirstCollector(Collector):
                     return None
             else:
                 if r.status_code == 200:
-                    return r.text
+                    return r.text, str(r.url)
                 if r.status_code < 500:  # 4xx: lỗi cố định, không thử lại
                     print(f"[CẢNH BÁO] HTTP {r.status_code} bỏ qua: {url}")
                     return None

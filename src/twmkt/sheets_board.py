@@ -156,8 +156,16 @@ PROMPTS_HEADER = ["Name", "Version", "Enable"]
 #   NEEDS_HUMAN  guardrail reject VĨNH VIỄN — produce_from_sheet BỎ QUA dòng này
 #                ở các lượt sau cho tới khi người CHỦ ĐỘNG đổi Execute về RUN
 #                (móc cho nút MANUAL của Phase 5, chưa có UI riêng ở phase này).
+# LỚP 5 (Phase 1) — TopicKey CUỐI CÙNG (append, giống cách Execute/Approve(gate 2)
+# đã thêm ở các phase trước): danh tính BỀN của chủ đề (sha256 URL chuẩn hoá,
+# xem curation.keys.compute_topic_key) — KHÔNG đổi khi Sheet insert/delete/sort/
+# merge (khác Context text, vốn có thể bị Sheets API mergeCells XOÁ THẬT ở phía
+# CONTENT — xem curation/keys.py docstring). Đặt CUỐI (không chen giữa) để
+# KHÔNG lệch số cột của MỌI code/test hiện có đang truy cập theo VỊ TRÍ (vd
+# `row[3]` = Status ở CONTENT) — bài học từ chính lần soát Phase 1 này. CONTENT
+# tra cứu chủ đề qua cột này TỪ PHASE 2 trở đi (Phase 1 chỉ thêm cột + backfill).
 CONTEXT_HEADER = ["Timestamp", "Hot%", "Score", "Group", "Topic", "Context", "Hook",
-                  "Source", "Status", "Execute", "tickers", "Notes"]
+                  "Source", "Status", "Execute", "tickers", "Notes", "TopicKey"]
 # "engine" TẠM (haiku|sonnet|mock) — đối chiếu model NÀO thực sự chạy cho mỗi
 # dòng log, xem factory.model_engine_label(). Rỗng nếu dòng log không gắn LLM.
 LOG_HEADER = ["timestamp", "level", "message", "engine"]
@@ -167,7 +175,14 @@ README_HEADER = ["Turtle Wealth — Bảng duyệt nội dung (Sheets là UI, th
 # quả sản xuất — dropdown do format_board đặt). "Approve(gate 2)" = CỔNG DUYỆT
 # NỘI DUNG (PENDING|APPROVE|REJECT, dropdown) — THAY cho tab ContentReview cũ
 # (đã xoá); người duyệt chọn ngay trên dòng sản phẩm, không cần tab riêng.
-CONTENT_HEADER = ["Timestamp", "Context", "Type", "Status", "Output", "Notes", "Approve(gate 2)"]
+# LỚP 5 (Phase 1) — TopicKey CUỐI CÙNG (append, KHÔNG chen giữa — xem lý do ở
+# comment CONTEXT_HEADER phía trên: giữ nguyên vị trí cột hiện có, tránh lệch
+# mọi code/test truy cập theo index, vd `row[3]` = Status). BẮT BUỘC KHÔNG được
+# liệt vào SheetsBoard._CONTENT_MERGE_COLS (chỉ "timestamp"/"context" bị
+# merge-xoá) — đây là cột SỐNG SÓT qua merge, neo lại danh tính chủ đề cho dòng
+# con dù Context/Timestamp của nó đã bị mergeCells xoá rỗng.
+CONTENT_HEADER = ["Timestamp", "Context", "Type", "Status", "Output", "Notes",
+                  "Approve(gate 2)", "TopicKey"]
 
 # 8 tab dựng lần đầu (tên : header). Thứ tự = thứ tự tab hiển thị. ResearchReview/
 # ContentReview đã GỘP vào CONTEXT.Status / CONTENT."Approve(gate 2)" -> xoá khỏi
@@ -190,9 +205,12 @@ _LEGACY_TABS = {"Sheet1", "ResearchReview", "ContentReview"}
 
 # Giá trị mặc định cho cột MỚI khi migrate_rows() gặp header cũ chưa có cột đó
 # (vd Execute mới thêm vào CONTEXT). Tab không liệt kê ở đây -> cột mới rỗng "".
+# TopicKey (Phase 1) -> "" khi migrate (dòng CŨ chưa có khoá) — CHỦ Ý: backfill
+# tính khoá THẬT là bước RIÊNG (backfill_context_topic_keys/backfill_content_
+# topic_keys), migrate_rows() chỉ lo dịch chuyển SCHEMA, không tính khoá.
 _MIGRATE_DEFAULTS: dict[str, dict[str, str]] = {
-    "CONTEXT": {"Execute": ""},
-    "CONTENT": {"Approve(gate 2)": "PENDING"},
+    "CONTEXT": {"Execute": "", "TopicKey": ""},
+    "CONTENT": {"Approve(gate 2)": "PENDING", "TopicKey": ""},
 }
 
 _README_ROWS = [
@@ -410,7 +428,7 @@ def _source_cell(source_url: str, other_sources: list[str] | None) -> str:
 def context_row(*, title: str, hook_line: str, source_url: str, score: int, hot_pct: float,
                 topic: str = "", group: str = "", other_sources: list[str] | None = None,
                 tickers: list[str] | None = None, status: str = "PENDING",
-                execute: str = "", ts: str | None = None) -> list[str]:
+                execute: str = "", topic_key: str = "", ts: str | None = None) -> list[str]:
     """Một hàng CONTEXT ĐÚNG thứ tự CONTEXT_HEADER (Timestamp đầu tiên).
 
     Status mặc định PENDING, Execute mặc định rỗng (tự chuyển RUN khi Status=
@@ -418,6 +436,11 @@ def context_row(*, title: str, hook_line: str, source_url: str, score: int, hot_
     curation.enrich tính; Group/Topic từ classify (nhóm marketing). Source gộp
     url bài chính + các báo khác đưa cùng tin (dedup chéo nguồn, xem review_to_sheet).
     Publisher/Field KHÔNG ghi ra sheet (chỉ dùng nội bộ cho cluster/tiebreak).
+    `topic_key` (Lớp 5 Phase 1) — CALLER tự tính (curation.keys.compute_topic_key)
+    rồi truyền vào, hàm này KHÔNG tự tính (giữ context_row() thuần/không phụ
+    thuộc curation, giống triết lý các tham số khác ở đây); rỗng nếu caller
+    chưa wire (vd đường --draft cũ) — backfill xử lý sau. Đặt CUỐI danh sách
+    (khớp CONTEXT_HEADER append, KHÔNG lệch vị trí các cột hiện có).
     """
     return [
         ts or _now_ddmmyyyy(),                            # Timestamp (DD/MM/YYYY, không giờ)
@@ -428,20 +451,24 @@ def context_row(*, title: str, hook_line: str, source_url: str, score: int, hot_
         title,                                                  # Context
         hook_line,                                               # Hook
         _source_cell(source_url, other_sources),                  # Source (gộp báo khác)
-        status,                                                    # Status
-        execute,                                                    # Execute
-        ", ".join(tickers or []),                                   # tickers
-        "",                                                          # Notes
+        status,                                                     # Status
+        execute,                                                     # Execute
+        ", ".join(tickers or []),                                    # tickers
+        "",                                                           # Notes
+        topic_key,                                                     # TopicKey (Lớp 5, cuối)
     ]
 
 
 def content_row(*, context: str, type_: str, status: str, output: str,
-                notes: str = "", approve: str = "PENDING", ts: str | None = None) -> list[str]:
+                notes: str = "", approve: str = "PENDING", topic_key: str = "",
+                ts: str | None = None) -> list[str]:
     """1 hàng CONTENT ĐÚNG thứ tự CONTENT_HEADER (Timestamp|Context|Type|Status|
-    Output|Notes|Approve(gate 2)). Status: DONE (sạch)|ERROR (lỗi/compliance) —
-    kết quả sản xuất, tất định. Approve(gate 2): cổng NGƯỜI duyệt nội dung
-    (PENDING mặc định, thay tab ContentReview cũ)."""
-    return [ts or _now_ddmmyyyy(), context, type_, status, output, notes, approve]
+    Output|Notes|Approve(gate 2)|TopicKey). Status: DONE (sạch)|ERROR (lỗi/
+    compliance) — kết quả sản xuất, tất định. Approve(gate 2): cổng NGƯỜI duyệt
+    nội dung (PENDING mặc định, thay tab ContentReview cũ). `topic_key` (Lớp 5
+    Phase 1) — caller tự tính (curation.keys.compute_topic_key) + truyền vào,
+    giống context_row(); rỗng nếu chưa wire. Đặt CUỐI (khớp CONTENT_HEADER append)."""
+    return [ts or _now_ddmmyyyy(), context, type_, status, output, notes, approve, topic_key]
 
 
 _FULL_TYPES = frozenset({"article", "video_script", "infographic"})
@@ -523,11 +550,115 @@ def content_merge_ranges(header: list[str], rows: list[list[str]]) -> list[tuple
     return ranges
 
 
+# =====================================================================
+# LỚP 5 Phase 1/1R.2 — Backfill/Re-key TopicKey (curation/keys.py). Hàm THUẦN.
+# Mặc định (force=False): WRITE-ONCE — dòng ĐÃ có TopicKey GIỮ NGUYÊN, không
+# tính lại (an toàn chạy nhiều lần, dùng cho steady-state). force=True: NGOẠI
+# LỆ RE-KEY MỘT LẦN (Phase 1R.2, xem curation/keys.py docstring) — ghi ĐÈ khoá
+# URL-based bằng compute_topic_key() MỚI (sửa khoá SAI tính bởi normalize_url
+# Phase 1 gốc, bỏ hết query); surrogate (dòng không-URL) KHÔNG bị đụng (không
+# liên quan bug đó) trừ khi đang rỗng thật. Idempotent CẢ 2 chế độ: force=True
+# chạy 2 lần vẫn ra CÙNG kết quả vì compute_topic_key là hàm thuần/tất định.
+# Xem SheetsBoard.backfill_topic_keys() cho bản chạy live (đọc/ghi Sheet thật).
+# =====================================================================
+def backfill_context_topic_keys(header: list[str], rows: list[list[str]],
+                                *, force: bool = False) -> list[list[str]]:
+    """`force=False` (mặc định, WRITE-ONCE): điền TopicKey RỖNG cho các dòng
+    CONTEXT — tính/gán qua `curation.keys.assign_topic_key()` (URL hợp lệ ->
+    compute_topic_key; không có URL -> surrogate uuid4, KHÔNG BAO GIỜ để lại
+    ""). Dòng ĐÃ có TopicKey GIỮ NGUYÊN TUYỆT ĐỐI.
+    `force=True` (NGOẠI LỆ re-key một lần, Phase 1R.2): dòng CÓ url hợp lệ ->
+    TÍNH LẠI + GHI ĐÈ bằng compute_topic_key() MỚI bất kể đã có khoá gì (bypass
+    write-once có chủ đích — sửa khoá SAI từ normalize_url Phase 1 gốc). Dòng
+    KHÔNG có url -> XỬ LÝ NHƯ force=False (giữ nguyên nếu có, chỉ gán surrogate
+    khi đang rỗng — surrogate không liên quan bug cần sửa).
+    Trả `rows` MỚI (không sửa in-place); thiếu cột Source/TopicKey -> trả
+    nguyên `rows` (no-op an toàn)."""
+    from .curation.keys import assign_topic_key, compute_topic_key   # lazy: tránh vòng import
+
+    low = [h.strip().lower() for h in header]
+    if "source" not in low or "topickey" not in low:
+        return list(rows)
+    i_src, i_key = low.index("source"), low.index("topickey")
+
+    out: list[list[str]] = []
+    for row in rows:
+        row = list(row)
+        while len(row) <= max(i_src, i_key):
+            row.append("")
+        primary_url = row[i_src].splitlines()[0].strip() if row[i_src] else ""
+        existing = row[i_key].strip()
+        if force and primary_url:
+            new_key = compute_topic_key(primary_url)
+            row[i_key] = new_key if new_key else assign_topic_key(existing, url=primary_url)
+        elif not existing:
+            row[i_key] = assign_topic_key(existing, url=primary_url)
+        # else: existing khác rỗng và (không force HOẶC force nhưng không có
+        # url) -> GIỮ NGUYÊN (write-once).
+        out.append(row)
+    return out
+
+
+def backfill_content_topic_keys(
+    context_header: list[str], context_rows: list[list[str]],
+    content_header: list[str], content_rows: list[list[str]],
+    *, force: bool = False,
+) -> tuple[list[list[str]], list[str]]:
+    """`force=False` (mặc định, WRITE-ONCE): điền TopicKey RỖNG cho các dòng
+    CONTENT — tra chủ đề qua Context text rồi map sang TopicKey ĐÃ CÓ ở CONTEXT
+    (`context_rows` nên là kết quả SAU backfill_context_topic_keys, để có khoá
+    tra). CARRY-FORWARD cho dòng Context bị BLANK (Sheets API mergeCells XOÁ
+    giá trị mọi ô trừ ô đầu dải merge — xem curation/keys.py docstring): dùng
+    Context KHÔNG-RỖNG gần nhất PHÍA TRÊN làm chủ đề hiệu lực. Dòng ĐÃ có
+    TopicKey GIỮ NGUYÊN (idempotent).
+    `force=True` (NGOẠI LỆ re-key một lần, Phase 1R.2): GHI ĐÈ TopicKey của
+    MỌI dòng CONTENT theo ánh xạ title->key MỚI NHẤT từ CONTEXT (context_rows
+    nên là kết quả SAU rekey CONTEXT với force=True) — đồng bộ lại CONTENT
+    khớp CONTEXT vừa re-key.
+    Trả (rows MỚI, list Context KHÔNG tra được khoá — vd đã bị xoá khỏi
+    CONTEXT, hoặc CONTEXT dòng đó cũng chưa có TopicKey — để caller log cảnh
+    báo, KHÔNG tự bịa khoá)."""
+    clow = [h.strip().lower() for h in context_header]
+    low = [h.strip().lower() for h in content_header]
+    if "context" not in clow or "topickey" not in clow or "context" not in low or "topickey" not in low:
+        return list(content_rows), []
+    ic_ctx, ic_key = clow.index("context"), clow.index("topickey")
+    title_to_key: dict[str, str] = {}
+    for r in context_rows:
+        title = r[ic_ctx].strip() if ic_ctx < len(r) else ""
+        key = r[ic_key].strip() if ic_key < len(r) else ""
+        if title and key:
+            title_to_key[title] = key
+
+    ic, ik = low.index("context"), low.index("topickey")
+    out: list[list[str]] = []
+    warnings: list[str] = []
+    last_context = ""
+    for row in content_rows:
+        row = list(row)
+        while len(row) <= max(ic, ik):
+            row.append("")
+        ctx = row[ic].strip()
+        if ctx:
+            last_context = ctx
+        effective_ctx = ctx or last_context   # carry-forward qua merge-blank
+        if force or not row[ik].strip():
+            key = title_to_key.get(effective_ctx, "")
+            if key:
+                row[ik] = key
+            elif effective_ctx and not row[ik].strip():
+                warnings.append(effective_ctx)
+        out.append(row)
+    return out, warnings
+
+
 def approved_context_from_rows(rows: list[list[str]]) -> list[dict]:
     """Các dòng CONTEXT có Status=APPROVE -> list dict (ánh xạ theo TÊN cột):
     context (tiêu đề), hook, source (url chính), tickers, group, topic, execute
     (RUN/DONE/rỗng), row (số dòng 1-based TRÊN SHEET — dùng để ghi lại
-    Execute=DONE sau khi sản xuất xong, xem SheetsBoard.mark_execute_done)."""
+    Execute=DONE sau khi sản xuất xong, xem SheetsBoard.mark_execute_done),
+    topic_key (Lớp 5 Phase 1 — cột TopicKey đã backfill/ghi sẵn; rỗng nếu dòng
+    chưa có, vd trước khi chạy backfill — caller tự quyết định lùi mượt)."""
     if not rows:
         return []
     header = [c.strip().lower() for c in rows[0]]
@@ -537,7 +668,7 @@ def approved_context_from_rows(rows: list[list[str]]) -> list[dict]:
 
     i_ctx, i_hook, i_src = idx("context"), idx("hook"), idx("source")
     i_tk, i_grp, i_tp, i_st = idx("tickers"), idx("group"), idx("topic"), idx("status")
-    i_ex = idx("execute")
+    i_ex, i_key = idx("execute"), idx("topickey")
     if i_ctx is None or i_st is None:
         return []
 
@@ -556,7 +687,8 @@ def approved_context_from_rows(rows: list[list[str]]) -> list[dict]:
         tickers = [t.strip() for t in cell(row, i_tk).split(",") if t.strip()]
         out.append({"context": ctx, "hook": cell(row, i_hook), "source": src,
                     "tickers": tickers, "group": cell(row, i_grp), "topic": cell(row, i_tp),
-                    "execute": cell(row, i_ex).upper(), "row": row_i})
+                    "execute": cell(row, i_ex).upper(), "row": row_i,
+                    "topic_key": cell(row, i_key)})
     return out
 
 
@@ -1115,6 +1247,63 @@ class SheetsBoard:
         self._spreadsheet().batch_update({"requests": reqs})
         return len(ranges)
 
+    def backfill_topic_keys(self, *, force: bool = False) -> dict:
+        """LỚP 5 Phase 1/1R.2 — điền TopicKey rỗng cho CONTEXT rồi CONTENT
+        (THEO THỨ TỰ NÀY — CONTENT cần tra title->key đã có ở CONTEXT).
+        `force=False` (mặc định, WRITE-ONCE): chỉ điền dòng RỖNG, GIỮ NGUYÊN
+        dòng đã có khoá — an toàn chạy nhiều lần/theo lịch.
+        `force=True` (NGOẠI LỆ RE-KEY MỘT LẦN, Phase 1R.2 — xem docs/
+        CHANGELOG.md): GHI ĐÈ mọi khoá URL-based bằng compute_topic_key() MỚI
+        (canonical, giữ query định danh) — sửa khoá SAI tính bởi normalize_url
+        Phase 1 gốc (bỏ hết query, có thể đã va chạm). Surrogate (dòng không
+        URL) KHÔNG bị đụng. CHỈ dùng ĐÚNG 1 LẦN khi migrate — sau đó luôn gọi
+        force=False (mặc định) để write-once có hiệu lực. Idempotent CẢ 2 chế
+        độ (chạy lại không đổi thêm — chỉ ghi lại range khi THẬT SỰ có dòng
+        thay đổi, tránh gọi Sheets API vô ích). Trả {"context": số dòng CONTEXT
+        vừa đổi, "content": số dòng CONTENT vừa đổi, "warnings": [Context text
+        không tra được khoá]}."""
+        ctx_ws = self._tab("CONTEXT")
+        ctx_values = ctx_ws.get_all_values()
+        if len(ctx_values) < 2:
+            return {"context": 0, "content": 0, "warnings": []}
+        ctx_header, ctx_rows = ctx_values[0], ctx_values[1:]
+        new_ctx_rows = backfill_context_topic_keys(ctx_header, ctx_rows, force=force)
+        n_ctx = sum(1 for old, new in zip(ctx_rows, new_ctx_rows) if old != new)
+        if n_ctx:
+            ctx_ws.update("A2", new_ctx_rows, value_input_option="RAW")
+
+        content_ws = self._tab("CONTENT")
+        content_values = content_ws.get_all_values()
+        n_content = 0
+        warnings: list[str] = []
+        if len(content_values) >= 2:
+            content_header, content_rows = content_values[0], content_values[1:]
+            new_content_rows, warnings = backfill_content_topic_keys(
+                ctx_header, new_ctx_rows, content_header, content_rows, force=force)
+            n_content = sum(1 for old, new in zip(content_rows, new_content_rows) if old != new)
+            if n_content:
+                content_ws.update("A2", new_content_rows, value_input_option="RAW")
+        return {"context": n_ctx, "content": n_content, "warnings": warnings}
+
+    def set_topic_key_values(self, key_by_row: dict[int, str]) -> None:
+        """LỚP 5 Phase 1R.2 — ghi TopicKey cho NHIỀU dòng CONTEXT (số dòng
+        1-based) — dùng khi produce_from_sheet.py PHÁT HIỆN dòng CONTEXT CHƯA
+        có TopicKey (backfill/rekey chưa chạy tới, hoặc dòng --draft cũ) và
+        `curation.keys.assign_topic_key()` vừa gán khoá MỚI (URL-based hoặc
+        surrogate) — PHẢI ghi lại NGAY để lần sau write-once có hiệu lực (đọc
+        lại đúng khoá cũ, KHÔNG tính lại/KHÔNG đổi surrogate). Cùng khuôn mẫu
+        với set_execute_values(). No-op nếu `key_by_row` rỗng hoặc thiếu cột
+        TopicKey."""
+        if not key_by_row:
+            return
+        ws = self._tab("CONTEXT")
+        header = [h.strip().lower() for h in ws.row_values(1)]
+        if "topickey" not in header:
+            return
+        col_letter = _col_a1(header.index("topickey") + 1)
+        ws.batch_update([{"range": f"{col_letter}{r}", "values": [[v]]}
+                         for r, v in key_by_row.items()], value_input_option="RAW")
+
     def read_prompt_versions(self) -> dict[str, str]:
         """Đọc LIVE tab PROMPTS (Name|Version|Enable) -> {name: version} (chỉ hàng
         Enable bật). Rỗng/thiếu tab -> {} (agent dùng default nội bộ)."""
@@ -1136,20 +1325,21 @@ class SheetsBoard:
     def write_context(self, *, title: str, hook_line: str, url: str, score: int,
                       hot_pct: float = 0.0, topic: str = "", group: str = "",
                       other_sources: list[str] | None = None,
-                      tickers: list[str] | None = None) -> bool:
+                      tickers: list[str] | None = None, topic_key: str = "") -> bool:
         """Ghi 1 dòng chờ duyệt (PENDING, Execute rỗng) vào tab CONTEXT.
 
         BỎ TRÙNG theo url (cột Source): nếu url đã có ở tab CONTEXT thì KHÔNG ghi
         lại — GIỮ NGUYÊN dòng cũ (Status/Execute/Hook/Notes...), idempotent
         across-run. Trả True nếu đã ghi, False nếu bỏ qua vì trùng. Ghi NHIỀU
-        dòng 1 lượt -> dùng upsert_context_rows (rẻ hơn, 2 lệnh gọi thay vì N)."""
+        dòng 1 lượt -> dùng upsert_context_rows (rẻ hơn, 2 lệnh gọi thay vì N).
+        `topic_key` (Lớp 5 Phase 1) — caller tự tính, rỗng nếu chưa wire."""
         ws = self._tab("CONTEXT")
         if url and url.strip() in self._context_urls(ws):
             return False
         ws.append_row(
             context_row(title=title, hook_line=hook_line, source_url=url, score=score,
                        hot_pct=hot_pct, topic=topic, group=group,
-                       other_sources=other_sources, tickers=tickers),
+                       other_sources=other_sources, tickers=tickers, topic_key=topic_key),
             value_input_option="RAW",
         )
         return True

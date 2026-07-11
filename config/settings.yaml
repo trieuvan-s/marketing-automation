@@ -421,6 +421,30 @@ sheets:
   poll_interval_s: 15
   timeout_s: 86400
   on_timeout: "reject"
+  # LỚP 5 (Phase 1) — TopicKey (curation.keys.compute_topic_key): danh tính bền
+  # của 1 chủ đề, neo CONTENT vào CONTEXT KHÔNG theo vị trí dòng (xem
+  # src/twmkt/curation/keys.py). column_name CHỈ để tham chiếu tài liệu (tên cột
+  # thật là hằng số CONTEXT_HEADER/CONTENT_HEADER trong sheets_board.py — đổi
+  # tên cột là đổi schema, không phải tham số vận hành, xem báo cáo Phase 1).
+  topic_key:
+    column_name: "TopicKey"
+    key_length: 16   # CẢNH BÁO: đổi SAU khi đã có dữ liệu sẽ làm khoá cũ/mới lệch nhau
+    # PHASE 1R — denylist tham số query KHÔNG định danh nội dung (tracking) —
+    # bị BỎ khi chuẩn hoá URL; MỌI tham số khác (vd ?id=, ?p=) được GIỮ NGUYÊN
+    # vì nhiều site dùng query làm định danh bài thật (xem curation/keys.py).
+    tracking_params:
+      - utm_source
+      - utm_medium
+      - utm_campaign
+      - utm_term
+      - utm_content
+      - gclid
+      - fbclid
+      - ref
+      - cmpid
+      - igshid
+      - mc_cid
+      - mc_eid
 
 # --- Phân phối ------------------------------------------------------
 publishers:

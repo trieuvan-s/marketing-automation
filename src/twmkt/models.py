@@ -72,6 +72,13 @@ class RawDocument:
     source_type: SourceType = SourceType.NEWS
     fetched_at: datetime = field(default_factory=_now)
     category_hint: str = ""   # gợi ý Field từ <category> RSS (rss_collector) — rỗng nếu nguồn html
+    # LỚP 5 Phase 1R (bổ sung Phương án 1) — `url` LUÔN là URL THẬT đã fetch
+    # (sau redirect, KHÔNG BAO GIỜ bị ghi đè bởi canonical — giữ nguyên nguồn
+    # gốc để audit/tái fetch). `canonical_url` = <link rel="canonical"> đã
+    # KIỂM ĐỊNH (cùng host, không trỏ root/prefix — xem collectors/
+    # http_collector.extract_canonical_url), "" nếu không có/không qua kiểm
+    # định. Nơi cần danh tính bài (vd TopicKey) tự chọn `canonical_url or url`.
+    canonical_url: str = ""
 
     @property
     def content_hash(self) -> str:
@@ -91,6 +98,7 @@ class CleanDocument:
     source_type: SourceType = SourceType.NEWS
     fetched_at: datetime = field(default_factory=_now)
     category_hint: str = ""   # kế thừa từ RawDocument.category_hint (xem curation/normalize.py)
+    canonical_url: str = ""   # kế thừa từ RawDocument.canonical_url (xem RawDocument docstring)
 
 
 @dataclass

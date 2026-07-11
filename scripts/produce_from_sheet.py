@@ -90,6 +90,7 @@ from twmkt.agents.route_once import RouterDecisionStore, get_or_route  # noqa: E
 from twmkt.agents.voice import assemble_voice  # noqa: E402
 from twmkt.agents.writer import WriterOutcome, run_writer_with_retry  # noqa: E402
 from twmkt.config import data_path, load_settings  # noqa: E402
+from twmkt.curation.keys import assign_topic_key  # noqa: E402
 from twmkt.models import ContentDraft, ContentFormat, Source  # noqa: E402
 from twmkt.sheets_board import SheetsBoard, content_row  # noqa: E402
 from twmkt.utils.telegram_notifier import make_notifier  # noqa: E402
@@ -261,10 +262,23 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
     done_rows: list[int] = []          # đủ CẢ 3 loại -> Execute=DONE
     failed_rows: list[int] = []        # Phase 4.9: article FAILED (lỗi tạm thời) -> Execute=FAILED
     needs_human_rows: list[int] = []   # Phase 4.9: article NEEDS_HUMAN (guardrail reject) -> chờ người
+    topic_key_updates: dict[int, str] = {}   # Phase 1R.2: dòng CONTEXT vừa được GÁN khoá mới -> ghi lại NGAY
     produced = skipped = flagged = 0
     for item in approved:
         notifier.notify("start", topic=item["context"], row=item["row"], actor=_DEFAULT_ACTOR)
         evidence = fetch_full_evidence(html_collector, sources, item["source"], item["hook"])
+        # Lớp 5 Phase 1R.2 — WRITE-ONCE: assign_topic_key() trả NGUYÊN khoá đã
+        # có ở CONTEXT (item["topic_key"], có thể rỗng nếu dòng CHƯA từng gán)
+        # — KHÔNG bao giờ tính lại 1 dòng ĐÃ có khoá, kể cả khi Source url đổi.
+        # Dòng CHƯA có khoá -> tính từ Source url, hoặc gán SURROGATE uuid4 nếu
+        # không có url hợp lệ (KHÔNG BAO GIỜ còn để lại ""). Khoá MỚI gán phải
+        # ghi NGAY xuống CONTEXT (topic_key_updates, ghi 1 lượt cuối hàm) để
+        # lần chạy SAU đọc lại ĐÚNG khoá này — write-once chỉ có hiệu lực khi
+        # đã persist.
+        existing_key = item.get("topic_key", "")
+        topic_key = assign_topic_key(existing_key, url=item["source"])
+        if topic_key != existing_key:
+            topic_key_updates[item["row"]] = topic_key
 
         # --- ARTICLE (Phase 4.9): Brief -> route-once (đóng băng) -> Writer-
         # with-retry. Bỏ qua HOÀN TOÀN nếu đã có trong CONTENT (idempotent,
@@ -304,7 +318,8 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
             reason = (f"Router quyết định tuyến article không hợp tin này: "
                      f"{decision.channel_rationale.get('article') or '(router không cho lý do)'}")
             rows.append(content_row(context=item["context"], type_="article",
-                                    status="SKIPPED", output="", notes=reason))
+                                    status="SKIPPED", output="", notes=reason,
+                                    topic_key=topic_key))
             seen.add((item["context"], "article"))
             skipped += 1
             notifier.notify("skipped", topic=item["context"], type="article", reason=reason)
@@ -320,7 +335,8 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                 preview = r.draft.body if len(r.draft.body) <= _OUTPUT_PREVIEW else \
                     r.draft.body[:_OUTPUT_PREVIEW] + f"\n…(xem {fn.name})"
                 rows.append(content_row(context=item["context"], type_="article",
-                                        status="DONE", output=preview, notes=""))
+                                        status="DONE", output=preview, notes="",
+                                        topic_key=topic_key))
                 seen.add((item["context"], "article"))
                 produced += 1
                 notifier.notify("draft_changed", topic=item["context"], type="article", status="DONE")
@@ -333,7 +349,8 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                 preview = r.draft.body if len(r.draft.body) <= _OUTPUT_PREVIEW else \
                     r.draft.body[:_OUTPUT_PREVIEW] + f"\n…(xem {fn.name})"
                 rows.append(content_row(context=item["context"], type_="article",
-                                        status="ERROR", output=preview, notes=note))
+                                        status="ERROR", output=preview, notes=note,
+                                        topic_key=topic_key))
                 flagged += 1
                 notifier.notify("error", topic=item["context"], type="article", issues=note)
             else:   # FAILED — hết retry (lỗi hạ tầng gọi LLM), KHÔNG có draft -> KHÔNG ghi CONTENT rác
@@ -368,7 +385,8 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                 reason = (f"Router quyết định tuyến {ch} không hợp tin này: "
                          f"{decision.channel_rationale.get(ch) or '(router không cho lý do)'}")
                 rows.append(content_row(context=item["context"], type_=type_key,
-                                        status="SKIPPED", output="", notes=reason))
+                                        status="SKIPPED", output="", notes=reason,
+                                        topic_key=topic_key))
                 seen.add((item["context"], type_key))
                 skipped += 1
                 notifier.notify("skipped", topic=item["context"], type=ch, reason=reason)
@@ -392,7 +410,8 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                 reason = ("Router chọn infographic:true nhưng Brief xác nhận không có số "
                          "liệu (no_numeric_content=true) -> bất đồng router/brief, tạm SKIP")
                 rows.append(content_row(context=item["context"], type_="infographic",
-                                        status="SKIPPED", output="", notes=reason))
+                                        status="SKIPPED", output="", notes=reason,
+                                        topic_key=topic_key))
                 seen.add((item["context"], "infographic"))
                 skipped += 1
                 notifier.notify("skipped", topic=item["context"], type="infographic", reason=reason)
@@ -429,7 +448,8 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
             preview = draft.body if len(draft.body) <= _OUTPUT_PREVIEW else \
                 draft.body[:_OUTPUT_PREVIEW] + f"\n…(xem {fn.name})"
             rows.append(content_row(context=item["context"], type_=type_,
-                                    status=status, output=preview, notes=note))
+                                    status=status, output=preview, notes=note,
+                                    topic_key=topic_key))
             seen.add((item["context"], type_))
             produced += 1
             if draft.is_clean:
@@ -457,6 +477,9 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
     execute_updates.update({r: "FAILED" for r in failed_rows})
     execute_updates.update({r: "NEEDS_HUMAN" for r in needs_human_rows})
     board.set_execute_values(execute_updates)   # idempotent: chạy lại lọc theo execute ở trên
+    # Phase 1R.2 — persist khoá MỚI gán (write-once chỉ có hiệu lực SAU khi ghi
+    # xuống Sheet; lần chạy sau đọc lại đúng khoá này qua item["topic_key"]).
+    board.set_topic_key_values(topic_key_updates)
     if written:
         board.regroup_and_merge_content()   # merge dọc Timestamp+Context khi >= 2 loại
         notifier.notify("gate2_done", written=written, approved=len(approved))
@@ -571,6 +594,7 @@ def run_draft(*, limit: int = 5, setup: bool = False) -> dict:
 
     rows: list[list[str]] = []
     done_rows: list[int] = []   # dòng CONTEXT (1-based) đã đủ CẢ 3 loại -> Execute=DONE
+    topic_key_updates: dict[int, str] = {}   # Phase 1R.2: ghi lại khoá MỚI gán
     prepared = infographic_done = 0
     for item in approved:
         context = item["context"]
@@ -580,6 +604,11 @@ def run_draft(*, limit: int = 5, setup: bool = False) -> dict:
             group=item["group"], topic=item["topic"], url=item["source"], evidence=evidence,
         )
         slug = _slug(context)
+        # Phase 1R.2 — WRITE-ONCE (xem run() cho giải thích đầy đủ).
+        existing_key = item.get("topic_key", "")
+        topic_key = assign_topic_key(existing_key, url=item["source"])
+        if topic_key != existing_key:
+            topic_key_updates[item["row"]] = topic_key
 
         # Infographic: sinh NGAY (không cần Claude Code) — NGOÀI PHẠM VI Phase
         # 4.9/4.10/4.11: đường --draft KHÔNG chạy run_brief() nên brief.facts
@@ -595,7 +624,8 @@ def run_draft(*, limit: int = 5, setup: bool = False) -> dict:
             rows.append(content_row(context=context, type_="infographic",
                                     status="DONE" if draft.is_clean else "ERROR",
                                     output=draft.body[:_OUTPUT_PREVIEW],
-                                    notes="; ".join(draft.compliance_issues)))
+                                    notes="; ".join(draft.compliance_issues),
+                                    topic_key=topic_key))
             seen.add((context, "infographic"))
             infographic_done += 1
 
@@ -635,6 +665,7 @@ def run_draft(*, limit: int = 5, setup: bool = False) -> dict:
 
     written = board.append_content_rows(rows)
     board.mark_execute_done(done_rows)
+    board.set_topic_key_values(topic_key_updates)   # Phase 1R.2: persist khoá MỚI gán
     if written:
         board.regroup_and_merge_content()   # merge dọc Timestamp+Context khi >= 2 loại
     print(f"[draft] infographic sinh ngay: {infographic_done} | "
@@ -686,6 +717,15 @@ def run_ingest(*, setup: bool = False) -> dict:
         background_path = day_dir / f"{slug}.background.txt"
         if background_path.exists():
             brief.background = background_path.read_text(encoding="utf-8").strip()
+        # Phase 1R.2: run_ingest() KHÔNG đọc lại CONTEXT.TopicKey hiện có (đọc
+        # từ file *.brief.json đã lưu, không phải dòng CONTEXT sống) — NGOÀI
+        # PHẠM VI đồng bộ write-once đầy đủ ở đây (đường --draft/--ingest cũ,
+        # đã ghi nhận ở các phase trước). assign_topic_key("", ...) đảm bảo
+        # KHÔNG còn để lại "" (URL hợp lệ -> khoá tất định khớp CONTEXT nếu
+        # CONTEXT cũng chưa có; không URL -> surrogate MỚI, có thể lệch
+        # CONTEXT nếu CONTEXT đã có surrogate khác — chấp nhận được vì đường
+        # này hiếm khi chạy cho chủ đề không-URL).
+        topic_key = assign_topic_key("", url=brief.url)
 
         remaining = False
         for type_, ctype in (("article", "article"), ("video", "video_script")):
@@ -708,7 +748,8 @@ def run_ingest(*, setup: bool = False) -> dict:
                 draft.body[:_OUTPUT_PREVIEW] + f"\n…(xem {fn.name})"
             rows.append(content_row(context=context, type_=ctype,
                                     status="DONE" if draft.is_clean else "ERROR",
-                                    output=preview, notes="; ".join(draft.compliance_issues)))
+                                    output=preview, notes="; ".join(draft.compliance_issues),
+                                    topic_key=topic_key))
             seen.add((context, ctype))
             ingested += 1
             flagged += 0 if draft.is_clean else 1

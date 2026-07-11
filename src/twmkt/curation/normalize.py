@@ -126,6 +126,7 @@ def normalize(raw_docs: list[RawDocument],
                 source_type=d.source_type,
                 fetched_at=d.fetched_at,
                 category_hint=d.category_hint,
+                canonical_url=d.canonical_url,
             )
         )
     return clean
