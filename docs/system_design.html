@@ -2,7 +2,7 @@
 <html lang="vi">
 <head>
 <meta charset="UTF-8">
-<title>Sơ đồ hệ thống — Marketing Automation (FVA Capital)</title>
+<title>Sơ đồ hệ thống — Marketing Automation (FVA Capital) v2</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root{
@@ -14,7 +14,7 @@
     --t0:#3fc088; --t0-soft:#123c28;
     --t1:#9788f5; --t1-soft:#2c2554;
     --t2:#ee6fa0; --t2-soft:#442032;
-    --edge:#5c6890; --edge-planned:#6d7599;
+    --edge:#5c6890; --edge-planned:#6d7599; --edge-support:#3d4763;
     --shadow: 0 8px 28px rgba(0,0,0,.45);
   }
   :root[data-theme="light"]{
@@ -26,7 +26,7 @@
     --t0:#1f8a5c; --t0-soft:#e2f6ec;
     --t1:#6653d6; --t1-soft:#ece8fb;
     --t2:#c23e73; --t2-soft:#fbe6ee;
-    --edge:#b7c0d8; --edge-planned:#c7cee0;
+    --edge:#b7c0d8; --edge-planned:#c7cee0; --edge-support:#d7deec;
     --shadow: 0 8px 24px rgba(30,40,70,.12);
   }
   @media (prefers-color-scheme: light){
@@ -39,7 +39,7 @@
       --t0:#1f8a5c; --t0-soft:#e2f6ec;
       --t1:#6653d6; --t1-soft:#ece8fb;
       --t2:#c23e73; --t2-soft:#fbe6ee;
-      --edge:#b7c0d8; --edge-planned:#c7cee0;
+      --edge:#b7c0d8; --edge-planned:#c7cee0; --edge-support:#d7deec;
       --shadow: 0 8px 24px rgba(30,40,70,.12);
     }
   }
@@ -93,10 +93,18 @@
   .node.planned .label{fill:var(--planned);}
   .gateicon{font-size:15px;}
 
+  .node,.edge{transition:opacity .18s ease;}
+  .node.dim,.edge.dim{opacity:.15;}
+  .node.hl rect.card{stroke:var(--accent);stroke-width:2.6;}
+  .edge.hl path{stroke:var(--accent) !important;stroke-width:3 !important;opacity:1 !important;}
+  .edge.hl .arrow{fill:var(--accent) !important;}
+
   .edge path{fill:none;stroke:var(--edge);stroke-width:2;}
   .edge.planned path{stroke:var(--edge-planned);stroke-dasharray:6 5;}
+  .edge.support path{stroke:var(--edge-support);stroke-width:1.4;stroke-dasharray:2 4;opacity:.75;}
   .edge .arrow{fill:var(--edge);}
   .edge.planned .arrow{fill:var(--edge-planned);}
+  .edge.support .arrow{fill:var(--edge-support);}
   .edge text{fill:var(--text-faint);font-size:10px;font-family:"SFMono-Regular",Consolas,Menlo,monospace;}
   .edge .bizlabel{fill:var(--text-dim);font-size:10.5px;font-weight:600;
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}
@@ -108,7 +116,7 @@
   /* legend */
   #legend{position:absolute;left:18px;bottom:18px;z-index:10;background:var(--panel);
     border:1px solid var(--panel-border);border-radius:14px;padding:14px 16px;box-shadow:var(--shadow);
-    font-size:12px;max-width:250px;}
+    font-size:12px;max-width:260px;}
   #legend h3{margin:0 0 8px;font-size:12px;color:var(--text-dim);letter-spacing:.4px;text-transform:uppercase;}
   .legend-row{display:flex;align-items:center;gap:8px;margin:5px 0;color:var(--text-dim);}
   .swatch{width:16px;height:16px;border-radius:5px;flex:none;}
@@ -119,6 +127,7 @@
   .swatch.t2{background:var(--t2-soft);border:1.5px solid var(--t2);}
   .lineswatch{width:20px;height:2px;background:var(--edge);flex:none;}
   .lineswatch.planned{background:none;border-top:2px dashed var(--edge-planned);}
+  .lineswatch.support{background:none;border-top:2px dotted var(--edge-support);}
   #legend.collapsed .legend-body{display:none;}
   #legend .lhead{display:flex;justify-content:space-between;align-items:center;cursor:pointer;}
   #legend .lhead span{font-size:11px;color:var(--text-faint);}
@@ -173,8 +182,8 @@
 <div id="app">
   <header>
     <div class="title">
-      <h1>Sơ đồ hệ thống — Marketing Automation</h1>
-      <p>Kéo để di chuyển · Cuộn để phóng to/thu nhỏ · Bấm vào 1 khối để xem chi tiết</p>
+      <h1>Sơ đồ hệ thống — Marketing Automation (v2)</h1>
+      <p>Kéo để di chuyển · Cuộn để phóng to/thu nhỏ · Di chuột qua khối/đường nối để làm nổi bật · Bấm để xem chi tiết</p>
     </div>
     <div class="toolbar">
       <div class="seg" id="viewToggle">
@@ -186,12 +195,15 @@
     </div>
   </header>
 
-  <svg id="canvas" viewBox="0 0 2360 1180" preserveAspectRatio="xMidYMid meet">
+  <svg id="canvas" viewBox="0 0 2400 1000" preserveAspectRatio="xMidYMid meet">
     <defs>
       <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
         <path d="M0,0 L10,5 L0,10 z" class="arrow"></path>
       </marker>
       <marker id="arrow-planned" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" class="arrow"></path>
+      </marker>
+      <marker id="arrow-support" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
         <path d="M0,0 L10,5 L0,10 z" class="arrow"></path>
       </marker>
     </defs>
@@ -211,7 +223,8 @@
       <div class="legend-row"><span class="swatch t1"></span> Tầng 1 — AI rẻ (haiku)</div>
       <div class="legend-row"><span class="swatch t2"></span> Tầng 2 — AI đắt (sonnet)</div>
       <div class="legend-row"><span class="lineswatch"></span> Luồng dữ liệu chính</div>
-      <div class="legend-row"><span class="lineswatch planned"></span> Luồng kế hoạch / phụ trợ</div>
+      <div class="legend-row"><span class="lineswatch planned"></span> Luồng kế hoạch</div>
+      <div class="legend-row"><span class="lineswatch support"></span> Quan hệ hỗ trợ (hạ tầng)</div>
     </div>
   </div>
 
@@ -238,197 +251,253 @@
 
 <script>
 /* =====================================================================
-   DỮ LIỆU SƠ ĐỒ — dựng từ khảo sát code thật (Phase A), không phải khung
-   cố định. Mỗi node có nhãn/mô tả RIÊNG cho 2 chế độ xem (biz = nghiệp vụ,
-   tech = kỹ thuật). "layers" = các bước bên trong, hiện khi bấm vào node.
+   DỮ LIỆU SƠ ĐỒ v2 — dựng lại từ khảo sát code thật (Phase A v2).
+   Trục chính (spine, 7 mốc theo thứ tự trái→phải):
+     Thu thập & Board (đã có) → [nhánh] Story Clustering (KẾ HOẠCH)
+     → Gate 1 (đã có) → Content Factory · Milestone (a) (đã có)
+     → Gate 2 (đã có) → Production Factory (KẾ HOẠCH, MỚI)
+     → Gate 3 · Duyệt Public (KẾ HOẠCH) → Social/Phân phối (KẾ HOẠCH, MỚI)
+   Cross-cutting (1 lane riêng bên dưới, nối bằng cạnh "hỗ trợ" chấm mảnh):
+     Config, Corpus, Control Plane/Sheets, LLM Adapter, Notifier, Orchestration.
    ===================================================================== */
 const TIER = {T0:'t0', T1:'t1', T2:'t2'};
 
 const NODES = [
-  // ---- Cấu hình ----
-  {id:'config', x:40, y:40, w:190, h:76, kind:'infra',
-   biz:'Cấu hình hệ thống', tech:'Config',
-   file:'config/settings.yaml · src/twmkt/config.py',
-   descBiz:'Nơi chỉnh mọi tham số vận hành — nguồn tin lấy ở đâu, mô hình AI nào viết bài, tần suất chạy tự động... — mà KHÔNG cần sửa code.',
-   descTech:'load_settings() đọc YAML, expand ${ENV} (bí mật KHÔNG hard-code, nạp secrets/.env qua python-dotenv). data_root()/data_path() (Phase DATA-ROOT) trỏ MỌI dữ liệu runtime (crawl/output/state/log) RA NGOÀI repo — mặc định ../marketing-automation-database.',
-   layers:[]},
-
-  // ---- Ingestion ----
-  {id:'ingestion', x:60, y:360, w:220, h:110, kind:'module', tier:TIER.T0,
-   biz:'Thu thập tin tức', tech:'Ingestion / Collectors',
-   file:'src/twmkt/collectors/*.py',
-   descBiz:'Robot tự động ghé các trang báo/nguồn tin đã đăng ký, tải bài mới về — thay việc một người phải tự vào từng trang báo đọc và copy bài.',
-   descTech:'HttpFirstCollector (httpx+BeautifulSoup, mặc định) | RssCollector (phát hiện nhẹ, tầng 1) | Crawl4aiCollector (fallback khi trang cần JS render). Output: RawDocument{url, canonical_url, title, markdown}.',
+  // ================= SPINE (7 mốc) =================
+  {id:'collect_board', row:'spine', w:280, h:150, kind:'module', tier:TIER.T0,
+   biz:'Thu thập & Ghi bảng chờ duyệt', tech:'Thu thập & Board',
+   file:'collectors/*.py · curation/{normalize,enrich,keys}.py · sheets_board.py (CONTEXT)',
+   descBiz:'Tin mới từ các trang báo/nguồn tin được tải về, lọc bỏ trùng lặp và không liên quan, chấm điểm mức độ đáng chú ý, gắn "chứng minh thư" bền vững cho từng chủ đề, rồi ghi thành danh sách chờ người duyệt trên Google Sheet.',
+   descTech:'Collectors (HttpFirst/Rss/Crawl4ai) → normalize() dedup content-hash + lọc liên quan → enrich (classify/score/cluster_by_event chéo nguồn) → curation/keys.assign_topic_key() (Lớp 5) → SheetsBoard.upsert_context_rows() (UPSERT theo url, KHÔNG xoá dòng cũ).',
    layers:[
      {biz:'Phát hiện tin mới', desc_biz:'Quét trang mục/RSS xem có bài nào mới chưa từng thấy.',
-      tech:'Tầng 1', desc_tech:"Source.fetch_type='rss' (nhẹ, chỉ title+summary) hoặc 'html' (tải full ngay). engine_for() suy loại nguồn từ URL nếu không khai rõ."},
-     {biz:'Tải toàn văn bài viết', desc_biz:'Với các tin chỉ mới thấy tiêu đề (từ RSS), tải về nội dung đầy đủ.',
-      tech:'Tầng 3 — full-fetch', desc_tech:'fetch_one() gọi CHỈ cho đại diện gốc RSS (chưa có full body); nguồn html đã có full body sẵn từ Tầng 1. Có retry+backoff, tôn trọng robots.txt.'},
-     {biz:'Xác định đúng bài GỐC', desc_biz:'Nếu trang có "bản rút gọn AMP" hay đổi đường dẫn, hệ thống tự tìm về đúng URL gốc chính thức của bài — tránh 2 tên gọi cho cùng 1 tin.',
-      tech:'extract_canonical_url() — Lớp 5 Phase 1R', desc_tech:'Đọc <link rel="canonical">, KIỂM ĐỊNH trước khi tin: phải CÙNG HOST, KHÔNG được trỏ về trang chủ hoặc trang chuyên mục (tiền tố của path bài) — chống canonical cấu hình sai gây va chạm khoá hàng loạt. RawDocument.url LUÔN là URL thật đã tải (không bị ghi đè); canonical_url là field riêng.'},
+      tech:'Tầng 1 — Collectors', desc_tech:"Source.fetch_type='rss' (nhẹ) hoặc 'html' (tải full ngay). engine_for() suy loại nguồn từ URL nếu không khai rõ."},
+     {biz:'Tải toàn văn & xác định đúng bài GỐC', desc_biz:'Tải nội dung đầy đủ, và nếu trang có "bản rút gọn" hay đổi đường dẫn, tự tìm về đúng URL gốc chính thức — tránh 2 tên gọi cho cùng 1 tin.',
+      tech:'fetch_one() + extract_canonical_url() (Lớp 5 Phase 1R)', desc_tech:'Đọc <link rel="canonical">, KIỂM ĐỊNH trước khi tin (cùng host, không phải trang chủ/chuyên mục). RawDocument.url LUÔN là URL thật đã tải; canonical_url là field riêng, KHÔNG ghi đè.'},
+     {biz:'Loại bài trùng lặp', desc_biz:'Nếu robot lỡ tải cùng 1 bài nhiều lần, chỉ giữ lại 1 bản.',
+      tech:'normalize() — dedup content-hash', desc_tech:'content_hash = sha256(markdown chuẩn hoá) — khoá NỘI DUNG cho kho lưu trữ (xem node Corpus), KHÁC hệ TopicKey.'},
+     {biz:'Lọc & chấm điểm & phân nhóm', desc_biz:'Bỏ tin không liên quan mã CK/kinh tế vĩ mô theo dõi, gắn nhãn chủ đề, tính điểm mức độ đáng chú ý.',
+      tech:'is_relevant()+classify()+marketing_score()+hotness_pct()', desc_tech:'Trọng số đọc từ curation.score.* (config-first).'},
+     {biz:'Gộp tin trùng từ nhiều báo', desc_biz:'3 báo cùng đưa 1 tin → chỉ hiện 1 dòng (ưu tiên báo uy tín nhất).',
+      tech:'cluster_by_event(threshold=0.6)', desc_tech:'So khớp tiêu đề CHÉO NGUỒN cùng lượt crawl — giữ đại diện Source.priority cao nhất.'},
+     {biz:'Gắn "chứng minh thư" & ghi vào bảng', desc_biz:'Gắn mã định danh bền cho mỗi tin (không đổi dù bảng bị sắp xếp/gộp dòng), rồi ghi thành 1 dòng chờ duyệt.',
+      tech:'assign_topic_key() (write-once) + upsert_context_rows()', desc_tech:'TopicKey = sha256(URL canonical, giữ query định danh). Cột riêng, KHÔNG nằm trong vùng bị Sheets mergeCells xoá.'},
    ]},
 
-  {id:'story_clustering', x:340, y:220, w:230, h:90, kind:'planned',
+  {id:'gate1', row:'spine', w:190, h:110, kind:'gate',
+   biz:'CỔNG 1 — Duyệt Context', tech:'Gate 1 — CONTEXT.Status',
+   file:'CONTEXT.Status (dropdown)',
+   descBiz:'Một người xem qua danh sách tin, chọn APPROVE cho tin đáng viết bài, hoặc REJECT để bỏ qua. NGƯỜI THẬT quyết định — máy không tự ý sản xuất nội dung khi chưa được cho phép.',
+   descTech:"CONTEXT.Status: PENDING → APPROVE/REJECT. APPROVE → CONTEXT.Execute tự chuyển rỗng→RUN (sync_approve_execute_flags). REJECT không kích hoạt gì.",
+   layers:[]},
+
+  {id:'content_factory', row:'spine', w:300, h:190, kind:'module', tier:TIER.T2,
+   biz:'Content Factory · Milestone (a)', tech:'Content Factory · Milestone (a)',
+   file:'src/twmkt/agents/{brief,structure_router,route_once,voice,writer,production}.py',
+   descBiz:'Sau khi chủ đề được duyệt, AI viết bài phân tích, kịch bản video, và đặc tả nội dung cho infographic — có kiểm tra chéo để KHÔNG bịa số liệu. LƯU Ý: đầu ra là VĂN BẢN/ĐẶC TẢ hoàn chỉnh (bài markdown, kịch bản, JSON spec ảnh) — CHƯA phải ảnh/video hoàn thiện (việc đó thuộc Production Factory, đang ở giai đoạn kế hoạch).',
+   descTech:'Brief(haiku)→Structure Router(haiku,route-once,đóng băng)→Voice-lock(tất định)→Writer(sonnet)+VideoScriptAgent(sonnet)+InfographicComposer(haiku)→Guardrail(tất định). Router quyết định TUYẾN nào đáng sinh (output_channels).',
+   layers:[
+     {biz:'Trích số liệu quan trọng', desc_biz:'AI đọc bài gốc, gạch ra số liệu/mốc thời gian đáng chú ý, xác nhận có nguyên văn (không tự chế).',
+      tech:'Brief', desc_tech:"run_brief() → BriefResult{facts[] (canonical_value tính bằng CODE), no_numeric_content}."},
+     {biz:'Chọn khung viết & tuyến sản phẩm', desc_biz:'AI chọn văn phong phù hợp VÀ quyết định nên làm những định dạng nào — có tin không đáng làm infographic.',
+      tech:'Structure Router (route-once)', desc_tech:'get_or_route() → RouterDecision{structure,hook,output_channels}. CHỈ route 1 LẦN/chủ đề rồi ĐÓNG BĂNG (RouterDecisionStore).'},
+     {biz:'Ráp giọng văn thương hiệu', desc_biz:'Ghép đúng công thức viết khớp khung đã chọn vào chỉ dẫn cho AI.',
+      tech:'Voice-lock (tất định, $0)', desc_tech:'assemble_voice(decision) trích đúng 1 khối khung từ docs/voice_examples.md.'},
+     {biz:'Viết bài / kịch bản / mẫu ảnh', desc_biz:'AI viết bài, kịch bản video, và đặc tả nội dung infographic (chưa phải ảnh vẽ sẵn).',
+      tech:'Writer + VideoScriptAgent + InfographicSpecAgent', desc_tech:'run_writer_with_retry() (sonnet). Composer (haiku) nén facts[]+khung thành spec JSON 8 trường.'},
+     {biz:'Kiểm tra trước khi giao', desc_biz:'Máy tự rà: có bịa số không có trong bài gốc? Thiếu miễn trừ trách nhiệm? Hứa hẹn lợi nhuận?',
+      tech:'Guardrail (tất định, $0)', desc_tech:'apply_guardrails(): compliance.check() + unsupported_numbers() (Mục C). Vi phạm → Status=ERROR.'},
+   ]},
+
+  {id:'gate2', row:'spine', w:190, h:110, kind:'gate',
+   biz:'CỔNG 2 — Duyệt nội dung', tech:"Gate 2 — CONTENT.'Approve(gate 2)'",
+   file:"CONTENT.'Approve(gate 2)' (dropdown)",
+   descBiz:'Một người đọc lại bài/video/infographic AI vừa viết, chọn APPROVE hoặc REJECT. Vẫn là NGƯỜI quyết định — sản phẩm chưa được đưa sang khâu dựng media nếu chưa qua bước này.',
+   descTech:"CONTENT.'Approve(gate 2)': PENDING → APPROVE/REJECT. Thay thế tab ContentReview cũ.",
+   layers:[]},
+
+  {id:'production_factory', row:'spine', w:300, h:190, kind:'planned',
+   biz:'(KẾ HOẠCH) Production Factory', tech:'(KẾ HOẠCH) Production Factory',
+   file:'— chưa nối tự động; 1 script thủ công cho ảnh đã có —',
+   descBiz:'Ý tưởng: biến đặc tả văn bản (bài/kịch bản/spec ảnh) từ Content Factory thành SẢN PHẨM HOÀN THIỆN sẵn sàng đăng — ảnh infographic thật, video ngắn, bài đã format theo từng kênh. CHƯA được tự động hoá trong quy trình.',
+   descTech:'Khảo sát code (Phase A v2): 1/3 việc có sẵn 1 phần (xem layers), 2/3 chưa có code nào.',
+   layers:[
+     {biz:'Render infographic (ảnh)', desc_biz:'Có sẵn 1 công cụ chuyển đặc tả thành ảnh thật, nhưng phải chạy tay — chưa tự động sau khi duyệt.',
+      tech:'render/infographic.py + scripts/render_infographic.py — CÓ SẴN 1 PHẦN', desc_tech:'render_infographic_svg() render SVG thật, $0, tất định, dùng brand kit từ config. Là SCRIPT CHẠY TAY riêng — produce_from_sheet.py/power_on.py KHÔNG gọi tự động.'},
+     {biz:'Dựng video (News/Avatar/Human/Short/Reel)', desc_biz:'Chưa có công cụ nào tự tổng hợp giọng nói hay ráp video.',
+      tech:'— CHƯA CÓ code nào', desc_tech:'agents/production.py chỉ có _VIDEO_TTS_GUIDANCE — hướng dẫn AI viết kịch bản NGẮN, đọc lên tự nhiên (prompt text), KHÔNG phải code tổng hợp giọng nói/dựng video thật.'},
+     {biz:'Format bài publish-ready', desc_biz:'Chưa có công cụ tự động format bài theo khuôn từng kênh đăng.',
+      tech:'— CHƯA CÓ code nào', desc_tech:'Không tìm thấy module nào xử lý format bài theo kênh publish trong khảo sát code.'},
+   ]},
+
+  {id:'gate3', row:'spine', w:220, h:110, kind:'planned-gate',
+   biz:'(KẾ HOẠCH) CỔNG 3 — Duyệt Public', tech:'(KẾ HOẠCH) Gate 3 — Publish',
+   file:'— chưa có module nào —',
+   descBiz:'Ý tưởng: sau khi Production Factory dựng xong media hoàn thiện, cần 1 bước xác nhận CUỐI của người thật trước khi đăng thật lên kênh công khai — khác Cổng 2 (duyệt NỘI DUNG/văn bản), Cổng 3 duyệt SẢN PHẨM MEDIA cuối cùng sẽ hiển thị công khai.',
+   descTech:"Khảo sát code: không có cột/tab/hàm publish-approval nào cho Luồng A. Quy trình hiện DỪNG Ở Cổng 2 — CHƯA có Production Factory lẫn Cổng 3.",
+   layers:[]},
+
+  {id:'social', row:'spine', w:230, h:130, kind:'planned',
+   biz:'(KẾ HOẠCH) Social / Phân phối', tech:'(KẾ HOẠCH) Social / Phân phối',
+   file:'— chưa có module nào —',
+   descBiz:'Ý tưởng: tự động đăng nội dung đã duyệt lên các kênh mạng xã hội (Facebook/Zalo/Telegram...) theo lịch phù hợp từng kênh.',
+   descTech:"publishers/base.py (ConsolePublisher/StubPublisher) tồn tại nhưng CHỈ Luồng B (offline demo) dùng — không nối với CONTENT/Luồng A. Không có adapter MXH thật nào (Facebook Graph API, Zalo OA...) trong repo.",
+   layers:[]},
+
+  // ---- nhánh KẾ HOẠCH: Story Clustering (đặt trên trục, giữa Thu thập & Gate 1) ----
+  {id:'story_clustering', row:'story', w:220, h:110, kind:'planned',
    biz:'(KẾ HOẠCH) Gộp chuỗi tin theo câu chuyện', tech:'(KẾ HOẠCH) Story Clustering',
    file:'— chưa có module nào —',
-   descBiz:'Ý tưởng: tự động nhận ra nhiều tin trải dài nhiều ngày cùng kể một câu chuyện (vd một vụ việc đang diễn tiến) để gộp lại thành 1 mạch, tránh trùng lặp và giúp người duyệt đỡ rối. CHƯA XÂY.',
-   descTech:'Xác nhận qua khảo sát code (Phase A): không có module/hàm nào tên "story"/"clustering theo thời gian" trong repo. curation/enrich.cluster_by_event() CHỈ gộp các bài CÙNG 1 THỜI ĐIỂM đưa CÙNG 1 tin từ nhiều báo (chéo NGUỒN), KHÔNG gộp chuỗi tin trải dài nhiều ngày (chéo THỜI GIAN) — khác hẳn ý tưởng Story Clustering.',
+   descBiz:'Ý tưởng: tự động nhận ra nhiều tin trải dài nhiều ngày cùng kể 1 câu chuyện (vd 1 vụ việc đang diễn tiến) để gộp lại, tránh trùng lặp, giúp người duyệt đỡ rối. CHƯA XÂY.',
+   descTech:'Khảo sát code: không có module/hàm nào tên "story"/"clustering theo thời gian". cluster_by_event() CHỈ gộp bài CÙNG THỜI ĐIỂM từ nhiều NGUỒN (chéo nguồn), KHÔNG gộp chuỗi trải dài nhiều ngày (chéo thời gian).',
    layers:[]},
 
-  // ---- Curation ----
-  {id:'curation', x:340, y:360, w:230, h:110, kind:'module', tier:TIER.T0,
-   biz:'Lọc & chấm điểm tin', tech:'Corpus / Curation',
-   file:'src/twmkt/curation/normalize.py · enrich.py · file_store.py',
-   descBiz:'Loại tin trùng lặp, tin không liên quan đến chứng khoán/kinh tế VN, rồi chấm điểm mức độ "nóng" và gộp các bài từ nhiều báo cùng đưa 1 tin thành 1 mục duy nhất.',
-   descTech:'normalize(): dedup theo content-hash (sha256 title+markdown — KHÁC hệ khoá với TopicKey bên dưới) + whitelist mã CK + lọc bài macro theo từ khoá. enrich.py: classify()/marketing_score()/hotness_pct()/cluster_by_event() (gộp sự kiện CHÉO NGUỒN, giữ báo Priority cao nhất làm đại diện). FileDocumentStore: persist theo ngày, retention N ngày.',
+  // ================= CROSS-CUTTING (lane hỗ trợ) =================
+  {id:'config', row:'support', w:220, h:120, kind:'infra',
+   biz:'Cấu hình hệ thống', tech:'Config',
+   file:'config/settings.yaml · src/twmkt/config.py',
+   descBiz:'Nơi chỉnh mọi tham số vận hành — nguồn tin, mô hình AI viết bài, tần suất chạy... — mà KHÔNG cần sửa code.',
+   descTech:'load_settings() đọc YAML, expand ${ENV}. data_root()/data_path() trỏ MỌI dữ liệu runtime RA NGOÀI repo.',
+   layers:[]},
+
+  {id:'corpus', row:'support', w:230, h:120, kind:'module', tier:TIER.T0,
+   biz:'Kho lưu & khử trùng nội dung', tech:'Corpus (file_store)',
+   file:'src/twmkt/curation/file_store.py',
+   descBiz:'Nơi lưu tạm các bài đã tải, tự động loại bỏ bản sao trùng lặp — khác với "chứng minh thư chủ đề" TopicKey (đó là danh tính cho DÒNG TRÊN BẢNG, đây là danh tính cho NỘI DUNG lưu trữ).',
+   descTech:'FileDocumentStore: persist theo ngày, retention N ngày. content_hash = sha256(title+markdown) — hệ khoá RIÊNG, KHÔNG cross-reference với TopicKey (curation/keys.py) — xác nhận qua khảo sát code.',
+   layers:[]},
+
+  {id:'sheets_io', row:'support', w:250, h:150, kind:'module', tier:TIER.T0,
+   biz:'Bảng điều khiển chung (Google Sheets)', tech:'Control Plane / Sheets',
+   file:'src/twmkt/sheets_board.py',
+   descBiz:'Cỗ máy đọc/ghi đứng sau mọi bảng Google Sheet (CONTEXT, CONTENT...) — thêm dòng, cập nhật, gộp hiển thị, tự thử lại khi Google giới hạn tốc độ — để các bước khác không cần tự lo phần kỹ thuật này.',
+   descTech:"upsert_context_rows()/append_content_rows() (UPSERT theo url) · regroup_and_merge_content() (mergeCells — XOÁ THẬT ô bị gộp, lý do TopicKey là cột riêng) · _RetryingProxy (retry 429) · migrate_rows() (cột mới luôn APPEND cuối).",
    layers:[
-     {biz:'Loại bài trùng lặp', desc_biz:'Nếu robot lỡ tải cùng 1 bài 2 lần (kể cả crawl nhiều lượt trong ngày), chỉ giữ lại 1.',
-      tech:'normalize() — dedup content-hash', desc_tech:'d.content_hash = sha256(markdown chuẩn hoá). Khác hẳn TopicKey (curation/keys.py) — đây là khoá NỘI DUNG cho kho lưu trữ, không phải danh tính "chủ đề" trên Sheet.'},
-     {biz:'Lọc bài không liên quan', desc_biz:'Bỏ các tin không nhắc đến mã cổ phiếu theo dõi và không đủ từ khoá kinh tế vĩ mô quan trọng.',
-      tech:'is_relevant() + extract_tickers()', desc_tech:'So khớp whitelist mã (data/tickers.txt cho Luồng A) + đếm từ khoá macro (curation.relevance.keywords_file).'},
-     {biz:'Chấm điểm & phân nhóm', desc_biz:'Gắn nhãn chủ đề (Cổ phiếu/Chính sách/Vĩ mô...) và tính điểm mức độ đáng chú ý.',
-      tech:'classify() + marketing_score() + hotness_pct()', desc_tech:'Trọng số đọc từ curation.score.* (config-first). Nhóm tối đa 2 nhãn/bài.'},
-     {biz:'Gộp tin trùng từ nhiều báo', desc_biz:'Nếu 3 báo cùng đưa 1 tin, chỉ hiện 1 dòng (ưu tiên báo uy tín nhất), các báo khác gộp vào phần "nguồn tham khảo".',
-      tech:'cluster_by_event(threshold=0.6)', desc_tech:'So khớp độ tương đồng tiêu đề CHÉO NGUỒN cùng lượt crawl — giữ đại diện có Source.priority cao nhất.'},
+     {biz:'Bảng CONTEXT (13 cột)', desc_biz:'Danh sách tin chờ duyệt chủ đề.', tech:'CONTEXT_HEADER', desc_tech:'Timestamp|Hot%|Score|Group|Topic|Context|Hook|Source|Status|Execute|tickers|Notes|TopicKey.'},
+     {biz:'Bảng CONTENT (8 cột)', desc_biz:'Danh sách bài/video/infographic chờ duyệt nội dung.', tech:'CONTENT_HEADER', desc_tech:"Timestamp|Context|Type|Status|Output|Notes|Approve(gate 2)|TopicKey."},
    ]},
 
-  {id:'curation_keys', x:340, y:510, w:230, h:100, kind:'module', tier:TIER.T0,
-   biz:"Gắn 'chứng minh thư' cho mỗi tin", tech:'Curation — Keys (TopicKey)',
-   file:'src/twmkt/curation/keys.py (Lớp 5)',
-   descBiz:'Mỗi tin được gắn 1 mã định danh bền vững, không đổi dù bảng dữ liệu bị người dùng sắp xếp lại, chèn hay xoá dòng — nhờ đó hệ thống luôn biết chính xác bài viết nào thuộc về tin nào.',
-   descTech:'compute_topic_key(url): sha256(URL đã chuẩn hoá canonical) — GIỮ query định danh thật (vd ?id=), CHỈ bỏ tracking param (utm_*, fbclid...). Sửa lỗi gốc "content mồ côi": Google Sheets API mergeCells XOÁ THẬT giá trị ô Context/Timestamp của các dòng bị gộp hiển thị — TopicKey là cột RIÊNG, không nằm trong vùng bị gộp, nên luôn còn nguyên.',
-   layers:[]},
-
-  // ---- Sheets: CONTEXT ----
-  {id:'sheets_context', x:660, y:360, w:210, h:110, kind:'module', tier:TIER.T0,
-   biz:'Bảng chờ duyệt CHỦ ĐỀ', tech:'Control Plane — tab CONTEXT',
-   file:'src/twmkt/sheets_board.py',
-   descBiz:'Danh sách các tin đã lọc và chấm điểm, hiển thị trên Google Sheet để con người xem qua và quyết định tin nào đáng đầu tư công viết bài.',
-   descTech:"context_row() → SheetsBoard.upsert_context_rows() — UPSERT theo url (KHÔNG xoá dòng cũ, dòng đã duyệt/đã sửa tay được giữ nguyên). 13 cột: Timestamp|Hot%|Score|Group|Topic|Context|Hook|Source|Status|Execute|tickers|Notes|TopicKey. Sắp lại theo Hot% giảm dần sau mỗi lượt crawl.",
-   layers:[]},
-
-  // ---- Gate 1 ----
-  {id:'gate1', x:930, y:370, w:190, h:90, kind:'gate',
-   biz:'CỔNG 1 — Người duyệt CHỦ ĐỀ', tech:'Gate 1 — CONTEXT.Status',
-   file:'CONTEXT.Status (dropdown)',
-   descBiz:'Một người xem qua danh sách tin, chọn APPROVE cho tin đáng viết bài, hoặc REJECT để bỏ qua. Đây là bước NGƯỜI THẬT quyết định — máy không tự ý sản xuất nội dung khi chưa được cho phép.',
-   descTech:"CONTEXT.Status: PENDING (mặc định) → APPROVE / REJECT (dropdown do format_board() đặt). APPROVE → CONTEXT.Execute tự động chuyển rỗng→RUN (sync_approve_execute_flags, gọi mỗi lượt review_to_sheet.py/produce_from_sheet.py hoặc --sync-only). REJECT không kích hoạt gì — chỉ đơn giản không lọt qua bộ lọc Status=='APPROVE'.",
-   layers:[]},
-
-  // ---- Production ----
-  {id:'production', x:1200, y:330, w:260, h:170, kind:'module', tier:TIER.T2,
-   biz:'Xưởng sản xuất nội dung (AI)', tech:'Production Pipeline',
-   file:'src/twmkt/agents/{brief,structure_router,route_once,voice,writer,production}.py',
-   descBiz:'Sau khi chủ đề được duyệt, AI tự viết bài phân tích, kịch bản video ngắn, và bản đặc tả hình ảnh (infographic) — có cơ chế kiểm tra chéo để KHÔNG bịa số liệu tài chính.',
-   descTech:'Brief(haiku)→Structure Router(haiku, route-once, đóng băng)→Voice-lock(tất định)→Writer(sonnet,retry)+VideoScriptAgent(sonnet)+InfographicComposer(haiku)→Guardrail(tất định). Router quyết ĐỊNH TUYẾN nào đáng sinh (output_channels) — KHÔNG ép sinh đủ 3 loại cho mọi tin.',
-   layers:[
-     {biz:'Trích số liệu quan trọng', desc_biz:'AI đọc bài gốc, gạch ra những con số/mốc thời gian đáng chú ý nhất, xác nhận có nguyên văn trong bài (không tự chế).',
-      tech:'Brief', desc_tech:"run_brief() (LLM haiku) → BriefResult{facts[] (kèm canonical_value tính bằng CODE, KHÔNG tin AI làm toán), no_numeric_content}. Cờ no_numeric_content PHÂN BIỆT 'rỗng-do-hỏng' (LLM lỗi/timeout) vs 'rỗng-hợp-lệ' (Brief đọc kỹ, xác nhận tin thuần định tính, không có số)."},
-     {biz:'Chọn khung viết & tuyến sản phẩm', desc_biz:'AI quyết định nên viết theo văn phong nào (vd "tổng-phân-hợp" hay "phản đề nghịch lý") VÀ nên làm những định dạng nào — có tin không đáng làm infographic vì quá ít số liệu.',
-      tech:'Structure Router (route-once)', desc_tech:'get_or_route() (LLM haiku) → RouterDecision{structure S1-S5, hook H1-H3, secondary, output_channels{article,infographic,video}}. CHỈ route 1 LẦN/chủ đề rồi ĐÓNG BĂNG (RouterDecisionStore, file JSON) — article/video/infographic của CÙNG chủ đề dùng chung 1 quyết định, không lệch khung.'},
-     {biz:'Ráp giọng văn thương hiệu', desc_biz:'Ghép đúng "công thức viết" (mở bài, chuyển ý, kết bài) khớp với khung đã chọn ở bước trên vào chỉ dẫn cho AI viết bài.',
-      tech:'Voice-lock (tất định, $0)', desc_tech:'assemble_voice(decision) đọc docs/voice_examples.md, trích ĐÚNG 1 khối khung (§2) + hook (§2b) + ví dụ neo (§5) khớp RouterDecision, nối vào system prompt Writer.'},
-     {biz:'Viết bài / kịch bản / mẫu ảnh', desc_biz:'AI viết bài phân tích đầy đủ, kịch bản video ngắn, và bản đặc tả nội dung cho infographic (không phải ảnh vẽ sẵn).',
-      tech:'Writer + VideoScriptAgent + InfographicSpecAgent', desc_tech:'run_writer_with_retry() (sonnet, tự thử lại khi lỗi hạ tầng, KHÔNG thử lại khi bị guardrail chặn). InfographicSpecAgent/Composer (haiku) nén facts[]+khung thành spec JSON 8 trường.'},
-     {biz:'Kiểm tra trước khi giao', desc_biz:'Máy tự rà lại bài AI vừa viết: có bịa số nào không có trong bài gốc không? Có thiếu dòng miễn trừ trách nhiệm không? Có lỡ hứa hẹn lợi nhuận không?',
-      tech:'Guardrail (tất định, $0)', desc_tech:'apply_guardrails(): compliance.check() (claim cấm/thiếu disclaimer) + unsupported_numbers() (Mục C — số trong bài phải khớp facts[].canonical_value trong dung sai cho phép, KHÔNG được tự cộng/gộp nhiều số hay đổi bậc số/đơn vị). Vi phạm → Status=ERROR, không lọt qua.'},
-   ]},
-
-  // ---- Sheets: CONTENT ----
-  {id:'sheets_content', x:1520, y:360, w:210, h:110, kind:'module', tier:TIER.T0,
-   biz:'Bảng chờ duyệt NỘI DUNG', tech:'Control Plane — tab CONTENT',
-   file:'src/twmkt/sheets_board.py',
-   descBiz:'Danh sách bài/video/infographic AI vừa viết xong, hiển thị trên Google Sheet để con người đọc lại và duyệt trước khi tính đến việc đăng.',
-   descTech:'content_row() → append_content_rows(). 8 cột: Timestamp|Context|Type|Status|Output|Notes|Approve(gate 2)|TopicKey. regroup_and_merge_content() gộp hiển thị dọc (Sheets mergeCells) khi ≥2 loại cùng chủ đề — CHÚ Ý: thao tác này xoá thật giá trị ô Context/Timestamp của dòng bị gộp, đây là lý do TopicKey phải là cột riêng.',
-   layers:[]},
-
-  // ---- Gate 2 ----
-  {id:'gate2', x:1790, y:370, w:190, h:90, kind:'gate',
-   biz:'CỔNG 2 — Người duyệt NỘI DUNG', tech:"Gate 2 — CONTENT.'Approve(gate 2)'",
-   file:"CONTENT.'Approve(gate 2)' (dropdown)",
-   descBiz:'Một người đọc lại bài/video/infographic AI vừa viết, chọn APPROVE nếu ổn hoặc REJECT nếu cần sửa lại. Vẫn là NGƯỜI quyết định cuối cùng — không có gì được đăng công khai nếu chưa qua bước này.',
-   descTech:"CONTENT.'Approve(gate 2)': PENDING (mặc định) → APPROVE / REJECT (dropdown, format_board() tô màu). Thay thế tab ContentReview cũ (đã gộp) — người duyệt chọn ngay trên dòng sản phẩm, không cần mở tab riêng.",
-   layers:[]},
-
-  // ---- Gate 3 (planned) ----
-  {id:'gate3', x:2060, y:370, w:230, h:100, kind:'planned-gate',
-   biz:'(KẾ HOẠCH) CỔNG 3 — Duyệt ĐĂNG CÔNG KHAI', tech:'(KẾ HOẠCH) Gate 3 — Publish',
-   file:'— chưa có module nào —',
-   descBiz:'Ý tưởng: sau khi nội dung đã qua Cổng 2, cần thêm 1 bước xác nhận CUỐI trước khi đăng thật lên mạng xã hội/kênh công khai (vd chọn đúng thời điểm đăng, đúng kênh). Hiện quy trình DỪNG LẠI ở Cổng 2 — CHƯA có bước đăng bài.',
-   descTech:"Xác nhận qua khảo sát code (Phase A): không có cột/tab/hàm publish nào cho Luồng A. Docstring produce_from_sheet.py ghi rõ: 'người duyệt xem & duyệt sản phẩm (cổng 2) --> Publish (giai đoạn sau)'. publishers/base.py (ConsolePublisher/StubPublisher) CHỈ được Luồng B (offline demo) dùng, KHÔNG nối với CONTENT/Luồng A.",
-   layers:[]},
-
-  // ---- LLM Adapter ----
-  {id:'llm_adapter', x:1200, y:600, w:230, h:110, kind:'module', tier:TIER.T1,
+  {id:'llm_adapter', row:'support', w:230, h:150, kind:'module', tier:TIER.T1,
    biz:'Bộ chuyển đổi "bộ não AI"', tech:'LLM Adapter',
    file:'src/twmkt/agents/base.py · factory.py',
-   descBiz:'Lớp trung gian cho phép đổi nguồn AI đang dùng (gói Claude có sẵn qua dòng lệnh / gọi API trả phí / giả lập miễn phí để thử nghiệm) mà KHÔNG cần sửa logic viết bài.',
-   descTech:"3 backend cùng interface LLMClient.complete(): ClaudeCodeLLM (CLI 'claude -p', dùng gói Pro/Max/Team có sẵn, KHÔNG cần ANTHROPIC_API_KEY riêng) | AnthropicLLM (gọi thẳng API, cần key) | MockLLM ($0, tất định). Chọn qua llm.mode (factory.make_llm). Mọi backend LÙI MƯỢT khi lỗi/thiếu key (KHÔNG crash pipeline), trừ bước fail_loud=True (Writer).",
+   descBiz:'Lớp trung gian cho phép đổi nguồn AI đang dùng mà KHÔNG cần sửa logic viết bài.',
+   descTech:"3 backend cùng interface LLMClient.complete(): ClaudeCodeLLM (CLI 'claude -p') | AnthropicLLM (API, cần key) | MockLLM ($0, tất định). Chọn qua llm.mode.",
    layers:[
-     {biz:'claude_code — dùng gói có sẵn', desc_biz:'Tận dụng gói Claude Pro/Max đang có, không tốn thêm tiền theo lượt gọi.', tech:'ClaudeCodeLLM', desc_tech:"subprocess gọi CLI 'claude -p --output-format json'. Không expose tham số sampling (temperature no-op)."},
-     {biz:'api — trả phí theo lượt', desc_biz:'Gọi thẳng dịch vụ AI trả phí, dùng cho tự động hoá không người trông.', tech:'AnthropicLLM', desc_tech:'anthropic SDK, model alias haiku/sonnet/opus → id thật.'},
-     {biz:'mock — thử nghiệm miễn phí', desc_biz:'Giả lập câu trả lời để kiểm tra logic hệ thống mà không tốn tiền/thời gian gọi AI thật.', tech:'MockLLM', desc_tech:'Trả chuỗi tất định, dùng cho toàn bộ 265 test tự động của repo.'},
+     {biz:'claude_code — dùng gói có sẵn', desc_biz:'Tận dụng gói Claude Pro/Max đang có.', tech:'ClaudeCodeLLM', desc_tech:"subprocess 'claude -p --output-format json'."},
+     {biz:'api — trả phí theo lượt', desc_biz:'Gọi thẳng dịch vụ AI trả phí.', tech:'AnthropicLLM', desc_tech:'anthropic SDK, alias haiku/sonnet/opus → id thật.'},
+     {biz:'mock — thử nghiệm miễn phí', desc_biz:'Giả lập câu trả lời để kiểm tra logic, $0.', tech:'MockLLM', desc_tech:'Trả chuỗi tất định, dùng cho toàn bộ test tự động.'},
    ]},
 
-  // ---- Notifier ----
-  {id:'notifier', x:930, y:600, w:210, h:100, kind:'module', tier:TIER.T0,
+  {id:'notifier', row:'support', w:210, h:120, kind:'module', tier:TIER.T0,
    biz:'Thông báo vận hành', tech:'Notifier (Telegram)',
    file:'src/twmkt/utils/telegram_notifier.py',
-   descBiz:'Gửi tin nhắn Telegram cho người vận hành biết khi hệ thống bắt đầu xử lý 1 tin, khi có bài mới, khi có lỗi cần chú ý — một chiều, không làm gián đoạn luồng chính dù Telegram bị lỗi.',
-   descTech:"make_notifier(): NullNotifier (chưa cấu hình, no-op êm) | TelegramNotifier thật. NON-BLOCKING TUYỆT ĐỐI — mọi lỗi mạng/HTTP/Telegram bị bắt bên trong notify(), KHÔNG BAO GIỜ raise ra caller. 5 điểm neo: start, draft_changed, error/needs_human, skipped, gate2_done.",
+   descBiz:'Gửi tin nhắn Telegram cho người vận hành khi bắt đầu xử lý, có bài mới, có lỗi — một chiều, không làm gián đoạn luồng chính dù Telegram lỗi.',
+   descTech:'make_notifier(): NullNotifier (no-op) | TelegramNotifier thật. NON-BLOCKING — lỗi mạng/HTTP bị bắt bên trong notify(), KHÔNG raise ra caller.',
    layers:[]},
 
-  // ---- Orchestration Scripts ----
-  {id:'orchestration', x:660, y:600, w:230, h:110, kind:'module', tier:TIER.T0,
+  {id:'orchestration', row:'support', w:230, h:130, kind:'module', tier:TIER.T0,
    biz:'Kịch bản điều phối', tech:'Orchestration / Scripts',
    file:'scripts/*.py',
-   descBiz:'2 chương trình độc lập: một cái lo phần "từ tin tức tới danh sách chờ duyệt", một cái lo phần "từ chủ đề đã duyệt tới nội dung hoàn thiện". Có thể chạy tay hoặc theo lịch tự động.',
-   descTech:'review_to_sheet.py (nửa đầu, tới CONTEXT) + produce_from_sheet.py (nửa sau, CONTEXT→CONTENT, 4 chế độ: api/offline/--draft/--ingest) + power_on.py (chạy CẢ 2 lịch trong 1 tiến trình, lock file chống chạy trùng). Tiện ích Lớp 5: reroute.py (owner ép route lại/bật-tắt tuyến tay), backfill_topic_keys.py (điền TopicKey cho dòng cũ).',
+   descBiz:'2 chương trình độc lập: 1 lo phần "từ tin tức tới danh sách chờ duyệt", 1 lo phần "từ chủ đề đã duyệt tới nội dung hoàn thiện". Chạy tay hoặc theo lịch tự động.',
+   descTech:'review_to_sheet.py + produce_from_sheet.py + power_on.py (chạy CẢ 2 lịch, lock file chống trùng). Tiện ích Lớp 5: reroute.py, backfill_topic_keys.py.',
    layers:[]},
 
-  // ---- Luồng B (offline demo, tách biệt) ----
-  {id:'luong_b', x:60, y:820, w:340, h:130, kind:'sideflow',
+  // ================= LUỒNG B (riêng biệt) =================
+  {id:'luong_b', row:'side', w:420, h:130, kind:'sideflow',
    biz:'Luồng B — Bản demo cũ (KHÔNG dùng để sản xuất thật)', tech:'Luồng B — Offline MVP',
    file:'orchestrator.py · demo.py · agents/{producers,researcher}.py · knowledge/rag.py · approval/*.py',
-   descBiz:'Một phiên bản khác của hệ thống, chạy hoàn toàn trong bộ nhớ máy tính (không qua Google Sheet), được giữ lại làm thư viện tham khảo và demo chạy thử miễn phí. KHÔNG được dùng trong quy trình sản xuất nội dung thật hiện nay — 2 luồng KHÔNG gọi lẫn nhau.',
-   descTech:'MarketingPipeline (máy trạng thái Stage enum) → Collector→normalize()→store+Retriever.index()→ResearcherAgent (RAG thật, retriever.retrieve())→HookAgent→ApprovalGate (console/auto/sheets — tab ResearchReview/ContentReview KHÁC hẳn CONTEXT/CONTENT)→4 Producer (agents/producers.py)→compliance→ConsolePublisher. Dùng bởi: python -m twmkt.demo, scripts/run_pipeline.py.',
+   descBiz:'Một phiên bản khác của hệ thống, chạy hoàn toàn trong bộ nhớ máy (không qua Google Sheet), giữ lại làm thư viện tham khảo/demo miễn phí. KHÔNG dùng trong sản xuất thật — 2 luồng KHÔNG gọi lẫn nhau.',
+   descTech:'MarketingPipeline (Stage enum) → Collector→normalize()→Retriever.index()→ResearcherAgent→HookAgent→ApprovalGate (tab ResearchReview/ContentReview KHÁC CONTEXT/CONTENT)→4 Producer→compliance→ConsolePublisher.',
    layers:[]},
 ];
 
+/* route: 'row' (spine liền kề, ngang) | 'story-in'/'story-out' (nhánh kế hoạch phía trên trục)
+   | 'support' (spine ↔ lane hỗ trợ, dọc qua kênh trống). planned/support chỉ ảnh hưởng style. */
 const EDGES = [
-  {from:'config', to:'ingestion', planned:false, faint:true, biz:'cấu hình nguồn tin', tech:'sources[]'},
-  {from:'config', to:'curation', planned:false, faint:true, biz:'cấu hình lọc', tech:'CurationConfig'},
-  {from:'config', to:'production', planned:false, faint:true, biz:'cấu hình AI viết bài', tech:'llm.step_models'},
-  {from:'config', to:'llm_adapter', planned:false, faint:true, biz:'chọn bộ não AI', tech:'llm.mode'},
+  // ---- trục chính (spine, liền kề) ----
+  {from:'collect_board', to:'gate1', route:'row', planned:false, biz:'chờ duyệt', tech:"Status=='APPROVE'?"},
+  {from:'gate1', to:'content_factory', route:'row', planned:false, biz:'chủ đề đã duyệt', tech:'ProductionBrief'},
+  {from:'content_factory', to:'gate2', route:'row', planned:false, biz:'nội dung đã viết xong', tech:'ContentDraft (qua guardrail)'},
+  {from:'gate2', to:'production_factory', route:'row', planned:true, biz:'(kế hoạch) nội dung đã duyệt', tech:'—'},
+  {from:'production_factory', to:'gate3', route:'row', planned:true, biz:'(kế hoạch) media hoàn thiện', tech:'—'},
+  {from:'gate3', to:'social', route:'row', planned:true, biz:'(kế hoạch) sẵn sàng đăng', tech:'—'},
 
-  {from:'ingestion', to:'story_clustering', planned:true, biz:'(kế hoạch)', tech:'—'},
-  {from:'story_clustering', to:'curation', planned:true, biz:'(kế hoạch)', tech:'—'},
-  {from:'ingestion', to:'curation', planned:false, biz:'bài mới tải về', tech:'RawDocument[]'},
+  // ---- nhánh Story Clustering (kế hoạch) ----
+  {from:'collect_board', to:'story_clustering', route:'story-in', planned:true, biz:'(kế hoạch)', tech:'—'},
+  {from:'story_clustering', to:'gate1', route:'story-out', planned:true, biz:'(kế hoạch)', tech:'—'},
 
-  {from:'curation', to:'curation_keys', planned:false, biz:'tin đã lọc sạch', tech:'CleanDocument'},
-  {from:'curation_keys', to:'sheets_context', planned:false, biz:'tin + mã định danh', tech:'TopicKey + context_row()'},
-
-  {from:'sheets_context', to:'gate1', planned:false, biz:'chờ duyệt', tech:"Status=='APPROVE'?"},
-  {from:'gate1', to:'production', planned:false, biz:'chủ đề đã duyệt', tech:'ProductionBrief'},
-  {from:'production', to:'sheets_content', planned:false, biz:'nội dung đã viết xong', tech:'ContentDraft (qua guardrail)'},
-  {from:'sheets_content', to:'gate2', planned:false, biz:'chờ duyệt', tech:"Approve(gate 2)"},
-  {from:'gate2', to:'gate3', planned:true, biz:'(kế hoạch) chờ duyệt đăng', tech:'—'},
-
-  {from:'llm_adapter', to:'production', planned:false, faint:true, biz:'AI viết giúp', tech:'LLMClient.complete()'},
-  {from:'sheets_context', to:'notifier', planned:false, faint:true, biz:'báo bắt đầu xử lý', tech:"notify('start')"},
-  {from:'production', to:'notifier', planned:false, faint:true, biz:'báo có bài mới / lỗi', tech:"notify('draft_changed'|'error')"},
-  {from:'gate2', to:'notifier', planned:false, faint:true, biz:'báo đã duyệt xong', tech:"notify('gate2_done')"},
-  {from:'orchestration', to:'ingestion', planned:false, faint:true, biz:'chạy thu thập', tech:'review_to_sheet.run()'},
-  {from:'orchestration', to:'production', planned:false, faint:true, biz:'chạy sản xuất', tech:'produce_from_sheet.run()'},
+  // ---- hỗ trợ (cross-cutting) ----
+  {from:'collect_board', to:'config', route:'support', planned:false, biz:'hỗ trợ: cấu hình nguồn & lọc', tech:'sources[] · CurationConfig'},
+  {from:'collect_board', to:'corpus', route:'support', planned:false, biz:'hỗ trợ: lưu & khử trùng', tech:'FileDocumentStore'},
+  {from:'collect_board', to:'sheets_io', route:'support', planned:false, biz:'hỗ trợ: ghi CONTEXT', tech:'upsert_context_rows()'},
+  {from:'collect_board', to:'notifier', route:'support', planned:false, biz:'hỗ trợ: báo bắt đầu', tech:"notify('start')"},
+  {from:'gate1', to:'sheets_io', route:'support', planned:false, biz:'hỗ trợ: đọc/ghi Status', tech:'CONTEXT.Status'},
+  {from:'content_factory', to:'config', route:'support', planned:false, biz:'hỗ trợ: cấu hình model AI', tech:'llm.step_models'},
+  {from:'content_factory', to:'llm_adapter', route:'support', planned:false, biz:'hỗ trợ: gọi AI viết', tech:'LLMClient.complete()'},
+  {from:'content_factory', to:'sheets_io', route:'support', planned:false, biz:'hỗ trợ: ghi CONTENT', tech:'append_content_rows()'},
+  {from:'content_factory', to:'notifier', route:'support', planned:false, biz:'hỗ trợ: báo có bài mới/lỗi', tech:"notify('draft_changed'|'error')"},
+  {from:'gate2', to:'sheets_io', route:'support', planned:false, biz:"hỗ trợ: đọc/ghi Approve(gate 2)", tech:"CONTENT.'Approve(gate 2)'"},
+  {from:'gate2', to:'notifier', route:'support', planned:false, biz:'hỗ trợ: báo đã duyệt xong', tech:"notify('gate2_done')"},
+  {from:'orchestration', to:'collect_board', route:'support', planned:false, biz:'điều phối: chạy thu thập', tech:'review_to_sheet.run()'},
+  {from:'orchestration', to:'content_factory', route:'support', planned:false, biz:'điều phối: chạy sản xuất', tech:'produce_from_sheet.run()'},
 ];
 
-const GROUPS = [
-  {x:20, y:330, w:610, h:300, label:'THU THẬP & LỌC'},
-  {x:900, y:340, w:250, h:150, label:'CỔNG 1'},
-  {x:1170, y:300, w:330, h:250, label:'SẢN XUẤT (AI)'},
-  {x:1760, y:340, w:250, h:150, label:'CỔNG 2'},
-  {x:2030, y:340, w:290, h:160, label:'KẾ HOẠCH'},
+const GROUP_DEFS = [
+  {ids:['collect_board','story_clustering','gate1'], label:'THU THẬP & DUYỆT CHỦ ĐỀ · đã có', pad:22},
+  {ids:['content_factory','gate2'], label:'CONTENT FACTORY · MILESTONE (a) · đã có', pad:22},
+  {ids:['production_factory','gate3','social'], label:'PRODUCTION FACTORY & PHÂN PHỐI · KẾ HOẠCH', pad:22},
+  {ids:['config','corpus','sheets_io','llm_adapter','notifier','orchestration'], label:'HỖ TRỢ (CROSS-CUTTING)', pad:22},
 ];
+
+/* =====================================================================
+   LAYOUT — vị trí X tính tuần tự theo hàng (spine/support/side); Y hàng
+   spine/story cố định, Y hàng support tính SAU khi đo chiều cao thật của
+   spine (đảm bảo kênh định tuyến luôn trống, xem computeLayout()/positionSupportRow()).
+   ===================================================================== */
+const ROW_GAP = 70;
+const STORY_Y = 50;
+const SPINE_Y = 230;
+const SUPPORT_GAP = 90;
+const SIDE_GAP = 70;
+
+function nodeById(id){ return NODES.find(n=>n.id===id); }
+
+function layoutRow(nodes, y){
+  let x = 40;
+  nodes.forEach(n=>{ n.x = x; if(y!==null) n.y = y; x += n.w + ROW_GAP; });
+}
+
+function computeLayout(){
+  layoutRow(NODES.filter(n=>n.row==='spine'), SPINE_Y);
+  layoutRow(NODES.filter(n=>n.row==='support'), null);
+  layoutRow(NODES.filter(n=>n.row==='side'), null);
+  const story = nodeById('story_clustering');
+  const cb = nodeById('collect_board'), g1 = nodeById('gate1');
+  if(story && cb && g1){
+    const gapStart = cb.x + cb.w, gapEnd = g1.x;
+    story.x = gapStart + ((gapEnd - gapStart) - story.w) / 2;
+    story.y = STORY_Y;
+  }
+}
+
+function positionSupportRow(){
+  const spineNodes = NODES.filter(n=>n.row==='spine');
+  const maxSpineBottom = Math.max(...spineNodes.map(n=>n.y+n.h));
+  const supportY = maxSpineBottom + SUPPORT_GAP;
+  NODES.filter(n=>n.row==='support').forEach(n=>{ n.y = supportY; });
+  window.CHANNEL_Y = maxSpineBottom + SUPPORT_GAP/2;
+
+  const supportNodes = NODES.filter(n=>n.row==='support');
+  const maxSupportBottom = supportNodes.length ? Math.max(...supportNodes.map(n=>n.y+n.h)) : maxSpineBottom;
+  NODES.filter(n=>n.row==='side').forEach(n=>{ n.y = maxSupportBottom + SIDE_GAP; });
+
+  const story = nodeById('story_clustering');
+  if(story){
+    window.STORY_CHANNEL_Y = story.y + story.h + (SPINE_Y - (story.y + story.h)) / 2;
+  }
+  window.SCENE_H = (NODES.filter(n=>n.row==='side').length ? Math.max(...NODES.filter(n=>n.row==='side').map(n=>n.y+n.h)) : maxSupportBottom) + 40;
+  window.SCENE_W = Math.max(...NODES.map(n=>n.x+n.w)) + 40;
+}
 
 /* =====================================================================
    RENDER + TƯƠNG TÁC
@@ -453,7 +522,7 @@ function textEl(x, y, str, cls){
 }
 
 /* Đo chữ THẬT (getComputedTextLength) thay vì đếm ký tự — đếm ký tự sai lệch
-   nhiều với tiếng Việt có dấu (rộng hơn ký tự Latin thường), gây tràn khung. */
+   nhiều với tiếng Việt có dấu, gây tràn khung. */
 function makeMeasurer(cls){
   const t = el('text', {class: cls, x:-9999, y:-9999});
   nodeLayer.appendChild(t);
@@ -464,10 +533,6 @@ function makeMeasurer(cls){
 }
 function wrapByWidth(str, cls, maxWidth){
   const measurer = makeMeasurer(cls);
-  // Tách theo khoảng trắng TRƯỚC, nhưng đường dẫn file (vd "agents/{brief,...}")
-  // không có khoảng trắng -> giữ nguyên đường /,{ } làm điểm ngắt phụ, kèm
-  // fallback CHẶT theo ký tự (nhị phân tìm điểm cắt vừa khít) cho bất kỳ đoạn
-  // nào vẫn dài hơn khung dù đã tách hết — đảm bảo KHÔNG BAO GIỜ tràn khung.
   const rough = (str||'').split(/(?<=[\s/,])/).map(t=>t.trim()).filter(Boolean);
   const lines = [];
   let cur = '';
@@ -495,24 +560,27 @@ function wrapByWidth(str, cls, maxWidth){
   return lines;
 }
 
-function nodeById(id){ return NODES.find(n=>n.id===id); }
-
 function drawGroups(){
   groupLayer.innerHTML = '';
-  GROUPS.forEach(g=>{
-    const r = el('rect', {x:g.x, y:g.y, width:g.w, height:g.h, class:'groupbox'});
-    groupLayer.appendChild(r);
-    groupLayer.appendChild(textEl(g.x+14, g.y+20, g.label, 'groupbox-label'));
+  GROUP_DEFS.forEach(gd=>{
+    const ns = gd.ids.map(nodeById).filter(Boolean);
+    if(!ns.length) return;
+    const pad = gd.pad;
+    const x0 = Math.min(...ns.map(n=>n.x)) - pad, y0 = Math.min(...ns.map(n=>n.y)) - pad;
+    const x1 = Math.max(...ns.map(n=>n.x+n.w)) + pad, y1 = Math.max(...ns.map(n=>n.y+n.h)) + pad;
+    groupLayer.appendChild(el('rect', {x:x0, y:y0, width:x1-x0, height:y1-y0, class:'groupbox'}));
+    groupLayer.appendChild(textEl(x0+14, y0+20, gd.label, 'groupbox-label'));
   });
 }
 
 const PAD_X = 16, TITLE_TOP = 34, TITLE_LH = 19, SUB_GAP = 10, SUB_LH = 13, CHIP_H = 26, BOTTOM_PAD = 14;
 
 /* Tính TRƯỚC chiều cao THẬT cần cho mỗi node (theo chế độ xem hiện tại) rồi
-   GHI ĐÈ n.h — chạy TRƯỚC drawEdges()/drawNodes() để cạnh nối đúng điểm neo,
-   khung không đè chữ, chữ không tràn khung. */
+   GHI ĐÈ n.h — chạy TRƯỚC positionSupportRow()/drawEdges()/drawNodes() để
+   cạnh nối đúng điểm neo, khung không đè chữ, chữ không tràn khung. */
 function measureNodes(){
   NODES.forEach(n=>{
+    if(n._baseH===undefined) n._baseH = n.h;
     const isGate = n.kind==='gate' || n.kind==='planned-gate';
     const label = mode==='biz' ? n.biz : n.tech;
     const titleMaxW = n.w - PAD_X*2 - (isGate?26:0);
@@ -529,8 +597,7 @@ function measureNodes(){
     const contentH = TITLE_TOP + n._titleLines.length*TITLE_LH
       + (subLines.length ? SUB_GAP + subLines.length*SUB_LH : 0)
       + BOTTOM_PAD + (n.tier ? CHIP_H : 0);
-    n.h = Math.max(n._baseH || n.h, contentH);
-    if(!n._baseH) n._baseH = n.h;
+    n.h = Math.max(n._baseH, contentH);
   });
 }
 
@@ -572,53 +639,168 @@ function drawNodes(){
     }
 
     g.addEventListener('click', (ev)=>{ ev.stopPropagation(); openPanel(n.id); });
+    g.addEventListener('mouseenter', ()=> highlightNode(n.id));
+    g.addEventListener('mouseleave', clearHighlight);
     nodeLayer.appendChild(g);
   });
 }
 
-function anchorPoint(n, side){
-  // side: 'left'|'right'|'top'|'bottom' -- pick automatically via caller
-  return {
-    left:{x:n.x, y:n.y+n.h/2}, right:{x:n.x+n.w, y:n.y+n.h/2},
-    top:{x:n.x+n.w/2, y:n.y}, bottom:{x:n.x+n.w/2, y:n.y+n.h},
-  }[side];
+/* ---- định tuyến trực giao (Manhattan) — bảo đảm 0 va chạm bằng CẤU TRÚC:
+   'row'   : 2 node liền kề CÙNG hàng spine -> 1 đoạn ngang tại y cố định
+             (SPINE_Y + TRUNK_OFFSET) trong MỌI node hàng spine -> không gì
+             chen giữa 2 cột liền kề nên không thể chạm node khác.
+   'support'/'story-*' : node hàng trên <-> node hàng dưới, đi qua 1 "kênh"
+             ngang HOÀN TOÀN TRỐNG (không node nào chiếm dải Y đó) -> đoạn dọc
+             luôn nằm ngay dưới/trên chính node của nó (không thể chạm node
+             khác), đoạn ngang nằm trong kênh trống (không thể chạm node nào). */
+const TRUNK_OFFSET = 50;
+
+function buildChannelOffsets(){
+  const total = {}, seen = {};
+  EDGES.forEach(e=>{
+    if(e.route==='support' || e.route==='story-in' || e.route==='story-out'){
+      total[e.from] = (total[e.from]||0) + 1;
+      total[e.to] = (total[e.to]||0) + 1;
+    }
+  });
+  EDGES.forEach(e=>{
+    if(e.route==='support' || e.route==='story-in' || e.route==='story-out'){
+      seen[e.from] = (seen[e.from]||0);
+      seen[e.to] = (seen[e.to]||0);
+      const fi = seen[e.from]++, ti = seen[e.to]++;
+      e._fromFrac = (fi+1) / (total[e.from]+1);
+      e._toFrac = (ti+1) / (total[e.to]+1);
+    }
+  });
+}
+
+function computeEdgePoints(e){
+  const a = nodeById(e.from), b = nodeById(e.to);
+  if(!a || !b) return null;
+  if(e.route === 'row'){
+    const y = a.y + TRUNK_OFFSET;
+    if(a.x < b.x) return [{x:a.x+a.w, y}, {x:b.x, y}];
+    return [{x:a.x, y}, {x:b.x+b.w, y}];
+  }
+  const midY = e.route==='support' ? window.CHANNEL_Y : window.STORY_CHANNEL_Y;
+  const aAbove = a.y < b.y;
+  const exitX = a.x + a.w * (e._fromFrac||0.5);
+  const entryX = b.x + b.w * (e._toFrac||0.5);
+  return [
+    {x:exitX, y: aAbove ? a.y+a.h : a.y},
+    {x:exitX, y: midY},
+    {x:entryX, y: midY},
+    {x:entryX, y: aAbove ? b.y : b.y+b.h},
+  ];
+}
+
+function pointsToPath(pts){
+  return 'M ' + pts.map(p=>`${p.x} ${p.y}`).join(' L ');
 }
 
 function drawEdges(){
+  buildChannelOffsets();
   edgeLayer.innerHTML = '';
-  EDGES.forEach(e=>{
-    const a = nodeById(e.from), b = nodeById(e.to);
-    if(!a || !b) return;
-    let p1, p2;
-    if(Math.abs((a.y+a.h/2)-(b.y+b.h/2)) < 40 || (a.x+a.w < b.x || b.x+b.w < a.x)){
-      // roughly horizontal relationship
-      if(a.x + a.w <= b.x){ p1 = anchorPoint(a,'right'); p2 = anchorPoint(b,'left'); }
-      else if(b.x + b.w <= a.x){ p1 = anchorPoint(a,'left'); p2 = anchorPoint(b,'right'); }
-      else { p1 = anchorPoint(a,'bottom'); p2 = anchorPoint(b,'top'); }
-    } else if(a.y + a.h <= b.y){ p1 = anchorPoint(a,'bottom'); p2 = anchorPoint(b,'top'); }
-    else { p1 = anchorPoint(a,'top'); p2 = anchorPoint(b,'bottom'); }
-
-    const mx = (p1.x+p2.x)/2;
-    const dPath = `M ${p1.x} ${p1.y} C ${mx} ${p1.y}, ${mx} ${p2.y}, ${p2.x} ${p2.y}`;
-    const g = el('g', {class:'edge' + (e.planned?' planned':'') + (e.faint?' faint':'')});
-    if(e.faint) g.style.opacity = 0.55;
-    const path = el('path', {d:dPath, 'marker-end': e.planned?'url(#arrow-planned)':'url(#arrow)'});
+  EDGES.forEach((e,i)=>{
+    const pts = computeEdgePoints(e);
+    e._points = pts;
+    if(!pts) return;
+    const cls = 'edge' + (e.planned?' planned':'') + (e.route==='support'?' support':'');
+    const g = el('g', {class:cls, 'data-i':i});
+    const marker = e.planned ? 'url(#arrow-planned)' : (e.route==='support' ? 'url(#arrow-support)' : 'url(#arrow)');
+    const path = el('path', {d:pointsToPath(pts), 'marker-end':marker});
     g.appendChild(path);
 
     const label = mode==='biz' ? e.biz : e.tech;
     if(label && label!=='—'){
-      const lx = mx, ly = (p1.y+p2.y)/2 - 6;
+      const mid = pts[Math.floor((pts.length-1)/2)];
+      const mid2 = pts[Math.ceil((pts.length-1)/2)];
+      const lx = (mid.x+mid2.x)/2, ly = (mid.y+mid2.y)/2 - 6;
       const approxW = Math.min(label.length*6.2+10, 220);
       g.appendChild(el('rect', {class:'textbg', x:lx-approxW/2, y:ly-12, width:approxW, height:16, rx:4}));
       const t = textEl(lx, ly, label, mode==='biz'?'bizlabel':'');
       t.setAttribute('text-anchor','middle');
       g.appendChild(t);
     }
+    g.addEventListener('mouseenter', ()=> highlightEdge(i));
+    g.addEventListener('mouseleave', clearHighlight);
     edgeLayer.appendChild(g);
   });
 }
 
-function renderAll(){ measureNodes(); drawGroups(); drawEdges(); drawNodes(); }
+/* ---- tự kiểm định tuyến: đếm số lần 1 đoạn cạnh cắt qua bbox 1 node KHÔNG
+   phải điểm đầu/cuối của chính cạnh đó. Mục tiêu bắt buộc: 0. ---- */
+function segIntersectsRect(p1, p2, r){
+  const EPS = 0.5;
+  const rx0=r.x+EPS, ry0=r.y+EPS, rx1=r.x+r.w-EPS, ry1=r.y+r.h-EPS;
+  if(Math.abs(p1.x-p2.x) < 0.01){
+    const x=p1.x, y0=Math.min(p1.y,p2.y), y1=Math.max(p1.y,p2.y);
+    return x>rx0 && x<rx1 && y1>ry0 && y0<ry1;
+  }
+  const y=p1.y, x0=Math.min(p1.x,p2.x), x1=Math.max(p1.x,p2.x);
+  return y>ry0 && y<ry1 && x1>rx0 && x0<rx1;
+}
+function verifyRouting(){
+  let crossings = 0; const details = [];
+  EDGES.forEach(e=>{
+    const pts = e._points; if(!pts) return;
+    for(let i=0;i<pts.length-1;i++){
+      const p1=pts[i], p2=pts[i+1];
+      NODES.forEach(n=>{
+        if(n.id===e.from || n.id===e.to) return;
+        if(segIntersectsRect(p1,p2,n)){ crossings++; details.push(`${e.from}→${e.to} x ${n.id}`); }
+      });
+    }
+  });
+  return {crossings, details};
+}
+
+function renderAll(){
+  computeLayout();
+  measureNodes();
+  positionSupportRow();
+  drawGroups();
+  drawEdges();
+  drawNodes();
+  const check = verifyRouting();
+  window.__ROUTING_CHECK__ = check;
+  console.log('[system_design v2] orthogonal edge-node crossings:', check.crossings, check.details);
+}
+
+/* ---- hover highlight (node/cạnh) ---- */
+function buildAdjacency(){
+  const map = {};
+  NODES.forEach(n=> map[n.id] = new Set());
+  EDGES.forEach((e,i)=>{ map[e.from] && map[e.from].add(i); map[e.to] && map[e.to].add(i); });
+  return map;
+}
+function applyHighlight(nodeIds, edgeIdx){
+  nodeLayer.querySelectorAll('.node').forEach(elx=>{
+    const id = elx.getAttribute('data-id');
+    elx.classList.toggle('hl', nodeIds.has(id));
+    elx.classList.toggle('dim', !nodeIds.has(id));
+  });
+  edgeLayer.querySelectorAll('.edge').forEach(elx=>{
+    const i = Number(elx.getAttribute('data-i'));
+    elx.classList.toggle('hl', edgeIdx.has(i));
+    elx.classList.toggle('dim', !edgeIdx.has(i));
+  });
+}
+function highlightNode(id){
+  const adjacency = buildAdjacency();
+  const edgeIdx = adjacency[id] || new Set();
+  const nodeIds = new Set([id]);
+  edgeIdx.forEach(i=>{ nodeIds.add(EDGES[i].from); nodeIds.add(EDGES[i].to); });
+  applyHighlight(nodeIds, edgeIdx);
+}
+function highlightEdge(i){
+  const e = EDGES[i];
+  applyHighlight(new Set([e.from, e.to]), new Set([i]));
+}
+function clearHighlight(){
+  nodeLayer.querySelectorAll('.node').forEach(elx=> elx.classList.remove('hl','dim'));
+  edgeLayer.querySelectorAll('.edge').forEach(elx=> elx.classList.remove('hl','dim'));
+}
 
 /* ---- panel ---- */
 const panel = document.getElementById('panel');
@@ -667,9 +849,6 @@ document.getElementById('viewToggle').addEventListener('click', (ev)=>{
   document.querySelectorAll('#viewToggle button').forEach(b=>b.classList.toggle('active', b===btn));
   document.getElementById('hintMode').textContent = mode==='biz' ? 'Nghiệp vụ' : 'Kỹ thuật';
   renderAll();
-  if(panel.classList.contains('open')){
-    const openId = document.getElementById('pTitle').dataset.id;
-  }
   panel.classList.remove('open');
 });
 
@@ -686,9 +865,9 @@ document.getElementById('legendHead').addEventListener('click', ()=>{
 });
 
 /* ---- pan & zoom ---- */
-let vb = {x:0, y:0, w:2360, h:1180};
+let vb = {x:0, y:0, w:2400, h:1000};
 function applyVB(){ svg.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.w} ${vb.h}`); }
-function resetView(){ vb = {x:0,y:0,w:2360,h:1180}; applyVB(); }
+function resetView(){ vb = {x:0,y:0,w:window.SCENE_W||2400,h:window.SCENE_H||1000}; applyVB(); }
 document.getElementById('resetView').addEventListener('click', resetView);
 
 let panning = false, panStart = {x:0,y:0}, vbStart = {x:0,y:0};
@@ -714,8 +893,8 @@ svg.addEventListener('wheel', (ev)=>{
   const scale = vb.w / rect.width;
   const cx = vb.x + mx*scale, cy = vb.y + my*scale;
   const factor = ev.deltaY > 0 ? 1.12 : 0.89;
-  const newW = Math.min(Math.max(vb.w*factor, 500), 5000);
-  const newH = newW * (1180/2360);
+  const newW = Math.min(Math.max(vb.w*factor, 500), 6000);
+  const newH = newW * (1000/2400);
   vb.x = cx - (cx-vb.x)*(newW/vb.w);
   vb.y = cy - (cy-vb.y)*(newH/vb.h);
   vb.w = newW; vb.h = newH;
@@ -738,8 +917,8 @@ svg.addEventListener('touchmove', (ev)=>{
 svg.addEventListener('touchend', ()=>{ touchStart=null; });
 
 /* ---- init ---- */
-applyVB();
 renderAll();
+resetView();
 </script>
 </body>
 </html>
