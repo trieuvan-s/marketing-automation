@@ -652,6 +652,50 @@ def backfill_content_topic_keys(
     return out, warnings
 
 
+# =====================================================================
+# LỚP 5 Phase 2 — Upsert CONTENT theo khoá. INVARIANT (chốt của Lead): match-
+# or-insert TRA THEO CỘT TopicKey ĐÃ LƯU. TUYỆT ĐỐI không tra theo Source sống,
+# không theo chỉ số dòng. TopicKey KHÔNG nằm trong _CONTENT_MERGE_COLS nên
+# SỐNG SÓT mergeCells (khác Context/Timestamp bị API xoá thật) — đây là lý do
+# chuyển dedup từ (Context, Type) sang (TopicKey, Type) đóng dứt điểm bug
+# "content mồ côi" (xem curation/keys.py docstring cho gốc rễ đầy đủ).
+# =====================================================================
+def content_topic_keys(header: list[str], rows: list[list[str]]) -> tuple[set[tuple[str, str]], list[str]]:
+    """(TopicKey, Type) đã có trong CONTENT — đọc TRỰC TIẾP cột TopicKey, KHÔNG
+    suy/tái tạo từ Context (bị mergeCells xoá thật, không đáng tin). Dòng CÓ
+    Type nhưng TopicKey RỖNG (dữ liệu cũ chưa backfill/rekey — xem
+    backfill_content_topic_keys) KHÔNG được đưa vào set khoá (không thể định
+    danh theo khoá) — Context của các dòng đó (carry-forward qua merge-blank,
+    cùng kỹ thuật backfill_content_topic_keys) trả riêng ở phần tử thứ 2 để
+    caller CẢNH BÁO/NEEDS_HUMAN. TUYỆT ĐỐI KHÔNG dùng Context này để auto-map
+    khoá — chỉ để báo người vận hành chạy backfill_topic_keys.py.
+    Hàm THUẦN — SheetsBoard.existing_content_keys()/existing_content_missing_
+    keys() là 2 wrapper live gọi hàm này."""
+    low = [h.strip().lower() for h in header]
+    if "type" not in low or "topickey" not in low:
+        return set(), []
+    it, ik = low.index("type"), low.index("topickey")
+    ic = low.index("context") if "context" in low else None
+    keys: set[tuple[str, str]] = set()
+    missing: list[str] = []
+    last_context = ""
+    for r in rows:
+        type_ = r[it].strip() if it < len(r) else ""
+        if not type_:
+            continue
+        ctx = r[ic].strip() if ic is not None and ic < len(r) else ""
+        if ctx:
+            last_context = ctx
+        key = r[ik].strip() if ik < len(r) else ""
+        if key:
+            keys.add((key, type_))
+        else:
+            effective_ctx = ctx or last_context
+            if effective_ctx:
+                missing.append(effective_ctx)
+    return keys, missing
+
+
 def approved_context_from_rows(rows: list[list[str]]) -> list[dict]:
     """Các dòng CONTEXT có Status=APPROVE -> list dict (ánh xạ theo TÊN cột):
     context (tiêu đề), hook, source (url chính), tickers, group, topic, execute
@@ -1181,23 +1225,31 @@ class SheetsBoard:
         return approved_context_from_rows(rows)
 
     def existing_content_keys(self) -> set[tuple[str, str]]:
-        """(Context, Type) đã có trong CONTENT — bỏ qua sản phẩm đã sinh để KHỎI
-        tốn Sonnet lại (dedup across-run)."""
+        """(TopicKey, Type) đã có trong CONTENT (Lớp 5 Phase 2) — đọc TRỰC TIẾP
+        cột TopicKey, bỏ qua sản phẩm đã sinh để KHỎI tốn Sonnet lại (dedup
+        across-run). Xem content_topic_keys() cho lý do đóng dứt điểm "content
+        mồ côi" (KHÔNG suy từ Context, sống sót mergeCells)."""
         try:
             rows = self._tab("CONTENT").get_all_values()
         except Exception:  # pragma: no cover - tab chưa tồn tại
             return set()
         if not rows:
             return set()
-        header = [c.strip().lower() for c in rows[0]]
-        if "context" not in header or "type" not in header:
-            return set()
-        ic, it = header.index("context"), header.index("type")
-        keys: set[tuple[str, str]] = set()
-        for r in rows[1:]:
-            if ic < len(r) and it < len(r) and r[ic].strip():
-                keys.add((r[ic].strip(), r[it].strip()))
+        keys, _missing = content_topic_keys(rows[0], rows[1:])
         return keys
+
+    def existing_content_missing_keys(self) -> list[str]:
+        """Context (carry-forward qua merge-blank) của các dòng CONTENT CÓ Type
+        nhưng TopicKey RỖNG (dữ liệu cũ chưa backfill/rekey, Lớp 5 Phase 2) —
+        dùng để CẢNH BÁO/NEEDS_HUMAN. TUYỆT ĐỐI KHÔNG dùng để auto-map khoá."""
+        try:
+            rows = self._tab("CONTENT").get_all_values()
+        except Exception:  # pragma: no cover - tab chưa tồn tại
+            return []
+        if not rows:
+            return []
+        _keys, missing = content_topic_keys(rows[0], rows[1:])
+        return missing
 
     def append_content_rows(self, rows: list[list[str]]) -> int:
         """Ghi thêm (append) các dòng sản phẩm vào tab CONTENT. Trả số dòng đã ghi."""

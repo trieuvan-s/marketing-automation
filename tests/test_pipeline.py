@@ -1964,6 +1964,60 @@ def test_backfill_content_topic_keys_warns_when_context_not_found():
     assert warnings == ["Bài đã bị xoá khỏi CONTEXT"]
 
 
+# =====================================================================
+# LỚP 5 PHASE 2 — Upsert CONTENT theo khoá. INVARIANT: match-or-insert TRA
+# THEO cột TopicKey ĐÃ LƯU, TUYỆT ĐỐI không tra theo Context/Source sống.
+# =====================================================================
+def test_content_topic_keys_reads_topickey_column_not_context():
+    """content_topic_keys() đọc TRỰC TIẾP cột TopicKey — 2 dòng CÙNG Context
+    text nhưng KHÁC TopicKey (vd bug trùng tiêu đề) vẫn được coi là 2 khoá khác
+    nhau; KHÔNG suy/gộp theo Context."""
+    from twmkt.sheets_board import CONTENT_HEADER, content_row, content_topic_keys
+
+    rows = [
+        content_row(context="Cùng tiêu đề", type_="article", status="DONE", output="x", topic_key="KEY-A"),
+        content_row(context="Cùng tiêu đề", type_="article", status="DONE", output="y", topic_key="KEY-B"),
+    ]
+    keys, missing = content_topic_keys(CONTENT_HEADER, rows)
+    assert keys == {("KEY-A", "article"), ("KEY-B", "article")}
+    assert missing == []
+
+
+def test_content_topic_keys_survives_merge_blank_context_zero_orphan():
+    """Lớp 5 Phase 2 — mô phỏng CONTENT ĐÃ QUA mergeCells: Context/Timestamp bị
+    XOÁ THẬT ở 2 dòng sau của dải merge (TopicKey KHÔNG nằm trong
+    _CONTENT_MERGE_COLS nên SỐNG SÓT) -> content_topic_keys() vẫn nhận diện
+    ĐỦ cả 3 loại theo khoá, 0 dòng "mồ côi" (0 missing)."""
+    from twmkt.sheets_board import CONTENT_HEADER, content_row, content_topic_keys
+
+    KEY = "topic-key-merged-001"
+    rows = [
+        content_row(context="Chủ đề đã merge", type_="article", status="DONE", output="a", topic_key=KEY),
+        content_row(context="", type_="video_script", status="DONE", output="b", topic_key=KEY, ts=""),
+        content_row(context="", type_="infographic", status="DONE", output="c", topic_key=KEY, ts=""),
+    ]
+    keys, missing = content_topic_keys(CONTENT_HEADER, rows)
+    assert keys == {(KEY, "article"), (KEY, "video_script"), (KEY, "infographic")}
+    assert missing == []
+
+
+def test_content_topic_keys_blank_topickey_row_excluded_reported_as_missing():
+    """Dòng CÓ Type nhưng TopicKey RỖNG (dữ liệu cũ chưa backfill/rekey) KHÔNG
+    được đưa vào set khoá (không thể match-or-insert theo khoá) — Context của
+    dòng đó (carry-forward qua merge-blank) trả riêng để caller CẢNH BÁO/
+    NEEDS_HUMAN, KHÔNG auto-map."""
+    from twmkt.sheets_board import CONTENT_HEADER, content_row, content_topic_keys
+
+    rows = [
+        content_row(context="Bài cũ chưa backfill", type_="article", status="DONE", output="a", topic_key=""),
+        # carry-forward: Context rỗng (mô phỏng merge-blank) NHƯNG TopicKey CŨNG rỗng -> vẫn missing.
+        content_row(context="", type_="video_script", status="DONE", output="b", topic_key="", ts=""),
+    ]
+    keys, missing = content_topic_keys(CONTENT_HEADER, rows)
+    assert keys == set()
+    assert missing == ["Bài cũ chưa backfill", "Bài cũ chưa backfill"]
+
+
 def test_group_content_rows_groups_by_context_preserves_order():
     """group_content_rows: nhóm theo Context, GIỮ thứ tự xuất hiện trong nhóm;
     hàng Context rỗng bị bỏ qua."""
@@ -2674,6 +2728,9 @@ class _FakeProduceBoard:
     def existing_content_keys(self):
         return set()
 
+    def existing_content_missing_keys(self):
+        return []
+
     def append_content_rows(self, rows):
         self.appended_content.extend(rows)
         return len(rows)
@@ -2755,9 +2812,9 @@ def _run_produce_scenario(writer_llm, approved_row: dict, route_llm=None, decisi
     return result, board, notifier
 
 
-def _approved_row(context: str, row: int) -> dict:
-    return {"context": context, "hook": "hook gợi ý", "source": "", "tickers": [],
-           "group": "", "topic": "", "execute": "RUN", "row": row}
+def _approved_row(context: str, row: int, *, source: str = "", topic_key: str = "") -> dict:
+    return {"context": context, "hook": "hook gợi ý", "source": source, "tickers": [],
+           "group": "", "topic": "", "execute": "RUN", "row": row, "topic_key": topic_key}
 
 
 def test_run_article_done_writes_content_marks_execute_done_and_notifies():
@@ -2978,18 +3035,23 @@ def test_run_article_needs_human_marks_execute_needs_human_writes_error_content(
 
 
 def test_run_article_idempotent_skips_writer_when_already_in_content():
-    """Idempotent: (context,'article') ĐÃ có trong CONTENT (existing_content_keys)
-    -> KHÔNG gọi writer_llm lần nào (PoisonLLM raise nếu bị gọi), skip hoàn toàn."""
+    """Idempotent (Lớp 5 Phase 2): (TopicKey,'article') ĐÃ có trong CONTENT
+    (existing_content_keys, tra THEO KHÓA — không theo Context) -> KHÔNG gọi
+    writer_llm lần nào (PoisonLLM raise nếu bị gọi), skip hoàn toàn."""
     sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
     import produce_from_sheet as pfs
+    from twmkt.curation.keys import compute_topic_key
 
     class _PoisonWriterLLM:
         def complete(self, *a, **kw):
             raise AssertionError("KHÔNG được gọi writer khi article đã có trong CONTENT")
 
+    _URL = "https://example.com/bai-da-co-article"
+    _KEY = compute_topic_key(_URL)
+
     class _BoardWithExistingArticle(_FakeProduceBoard):
         def existing_content_keys(self):
-            return {("Bài đã có article", "article")}
+            return {(_KEY, "article")}
 
     import tempfile
     from pathlib import Path
@@ -2999,7 +3061,7 @@ def test_run_article_idempotent_skips_writer_when_already_in_content():
     data = dict(base.raw)
     data["router"] = {"decisions_path": str(Path(tempfile.mkdtemp()) / "router_decisions.json")}
     test_settings = Settings(data)
-    board = _BoardWithExistingArticle([_approved_row("Bài đã có article", row=2)])
+    board = _BoardWithExistingArticle([_approved_row("Bài đã có article", row=2, source=_URL)])
     notifier = _FakeProduceNotifier()
 
     orig = {
@@ -3028,6 +3090,366 @@ def test_run_article_idempotent_skips_writer_when_already_in_content():
     # infographic mới) -> Execute=DONE ĐÚNG theo logic cũ (_is_fully_produced),
     # KHÔNG phải vì writer chạy lại.
     assert board.execute_updates.get(2) == "DONE"
+
+
+def test_run_twice_same_topic_key_no_duplicate_content_rows():
+    """Lớp 5 Phase 2: produce CÙNG 1 chủ đề 2 lần (source URL cố định -> khoá
+    tất định) -> lần 2 KHÔNG sinh thêm dòng nào (existing_content_keys đọc lại
+    từ appended_content THẬT — mô phỏng đọc lại Sheet — tra THEO KHÓA, không
+    theo Context/row-index) — 0 trùng."""
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+    import produce_from_sheet as pfs
+    from twmkt.sheets_board import CONTENT_HEADER, content_topic_keys
+
+    class _StatefulContentBoard(_FakeProduceBoard):
+        def existing_content_keys(self):
+            keys, _missing = content_topic_keys(CONTENT_HEADER, self.appended_content)
+            return keys
+
+        def existing_content_missing_keys(self):
+            _keys, missing = content_topic_keys(CONTENT_HEADER, self.appended_content)
+            return missing
+
+    class _CleanWriterLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            return _clean_writer_json()
+
+    _URL = "https://example.com/chu-de-lap-lai-2-lan"
+    board = _StatefulContentBoard([_approved_row("Chủ đề lặp lại 2 lần", row=2, source=_URL)])
+    notifier = _FakeProduceNotifier()
+
+    import tempfile
+    from pathlib import Path
+    from twmkt.config import Settings, load_settings as real_load_settings
+
+    base = real_load_settings()
+    data = dict(base.raw)
+    data["router"] = {"decisions_path": str(Path(tempfile.mkdtemp()) / "router_decisions.json")}
+    test_settings = Settings(data)
+
+    orig = {
+        "load_settings": pfs.load_settings, "_open_board": pfs._open_board,
+        "make_notifier": pfs.make_notifier, "make_llm": pfs.factory.make_llm,
+        "build_writer_llm": pfs.factory.build_writer_llm,
+    }
+    pfs.load_settings = lambda *a, **kw: test_settings
+    pfs._open_board = lambda settings, **kw: board
+    pfs.make_notifier = lambda settings: notifier
+    pfs.factory.make_llm = lambda settings: _EmptyRouteLLM()
+    pfs.factory.build_writer_llm = lambda settings: _CleanWriterLLM()
+    try:
+        pfs.run(limit=5)   # lần 1: sinh đủ 3 loại
+        pfs.run(limit=5)   # lần 2: CÙNG chủ đề, CÙNG khoá -> phải skip hết
+    finally:
+        pfs.load_settings = orig["load_settings"]
+        pfs._open_board = orig["_open_board"]
+        pfs.make_notifier = orig["make_notifier"]
+        pfs.factory.make_llm = orig["make_llm"]
+        pfs.factory.build_writer_llm = orig["build_writer_llm"]
+
+    for t in ("article", "video_script", "infographic"):
+        matching = [r for r in board.appended_content if r[2] == t]
+        assert len(matching) == 1, f"{t}: kỳ vọng đúng 1 dòng sau 2 lượt chạy, thực tế {len(matching)}"
+    assert board.execute_updates.get(2) == "DONE"
+
+
+def test_run_against_already_merged_content_no_duplicate_no_orphan():
+    """Lớp 5 Phase 2 — nghiệm thu bắt buộc: seed CONTENT với 3 dòng ĐÃ QUA
+    mergeCells (Context/Timestamp dòng 2+ RỖNG, TopicKey nguyên — sống sót vì
+    KHÔNG nằm trong _CONTENT_MERGE_COLS) rồi produce lại CÙNG chủ đề (source
+    URL cố định -> khoá tất định TRÙNG khoá đã seed) -> KHÔNG sinh thêm gì (0
+    trùng), Execute=DONE NGAY (0 mồ côi — hệ thống NHẬN RA đã đủ cả 3 loại dù
+    2/3 dòng có Context rỗng)."""
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+    import produce_from_sheet as pfs
+    from twmkt.sheets_board import CONTENT_HEADER, content_row, content_topic_keys
+    from twmkt.curation.keys import compute_topic_key
+
+    _URL = "https://example.com/chu-de-da-merge-roi-upsert-lai"
+    KEY = compute_topic_key(_URL)
+    seeded_rows = [
+        content_row(context="Chủ đề đã merge", type_="article", status="DONE", output="x", topic_key=KEY),
+        # mergeCells đã xoá Context+Timestamp của 2 dòng này -- TopicKey vẫn còn nguyên.
+        content_row(context="", type_="video_script", status="DONE", output="x", topic_key=KEY, ts=""),
+        content_row(context="", type_="infographic", status="DONE", output="x", topic_key=KEY, ts=""),
+    ]
+
+    class _MergedContentBoard(_FakeProduceBoard):
+        def existing_content_keys(self):
+            keys, _m = content_topic_keys(CONTENT_HEADER, seeded_rows + self.appended_content)
+            return keys
+
+        def existing_content_missing_keys(self):
+            _k, missing = content_topic_keys(CONTENT_HEADER, seeded_rows + self.appended_content)
+            return missing
+
+    class _PoisonWriterLLM:
+        def complete(self, *a, **kw):
+            raise AssertionError("KHÔNG được gọi writer -- chủ đề đã đủ cả 3 loại (đã merge)")
+
+    board = _MergedContentBoard([_approved_row("Chủ đề đã merge", row=2, source=_URL)])
+    notifier = _FakeProduceNotifier()
+
+    import tempfile
+    from pathlib import Path
+    from twmkt.config import Settings, load_settings as real_load_settings
+
+    base = real_load_settings()
+    data = dict(base.raw)
+    data["router"] = {"decisions_path": str(Path(tempfile.mkdtemp()) / "router_decisions.json")}
+    test_settings = Settings(data)
+
+    orig = {
+        "load_settings": pfs.load_settings, "_open_board": pfs._open_board,
+        "make_notifier": pfs.make_notifier, "make_llm": pfs.factory.make_llm,
+        "build_writer_llm": pfs.factory.build_writer_llm,
+    }
+    pfs.load_settings = lambda *a, **kw: test_settings
+    pfs._open_board = lambda settings, **kw: board
+    pfs.make_notifier = lambda settings: notifier
+    pfs.factory.make_llm = lambda settings: _EmptyRouteLLM()
+    pfs.factory.build_writer_llm = lambda settings: _PoisonWriterLLM()
+    try:
+        pfs.run(limit=5)
+    finally:
+        pfs.load_settings = orig["load_settings"]
+        pfs._open_board = orig["_open_board"]
+        pfs.make_notifier = orig["make_notifier"]
+        pfs.factory.make_llm = orig["make_llm"]
+        pfs.factory.build_writer_llm = orig["build_writer_llm"]
+
+    assert board.appended_content == []
+    assert board.execute_updates.get(2) == "DONE"
+
+
+def test_run_content_row_missing_topic_key_marks_needs_human_no_production():
+    """Lớp 5 Phase 2 INVARIANT: CONTENT đã có dòng CÙNG Context nhưng TopicKey
+    RỖNG (dữ liệu cũ chưa backfill/rekey) -> KHÔNG auto-map theo Context,
+    Execute=NEEDS_HUMAN, KHÔNG gọi writer (PoisonLLM raise nếu bị gọi), KHÔNG
+    ghi CONTENT thêm cho dòng này."""
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+    import produce_from_sheet as pfs
+
+    class _PoisonWriterLLM:
+        def complete(self, *a, **kw):
+            raise AssertionError("KHÔNG được gọi writer khi CONTENT thiếu TopicKey (NEEDS_HUMAN)")
+
+    class _MissingKeyBoard(_FakeProduceBoard):
+        def existing_content_keys(self):
+            return set()   # TopicKey rỗng -> content_topic_keys() loại khỏi set khoá
+
+        def existing_content_missing_keys(self):
+            return ["Chủ đề thiếu khoá cũ"]
+
+    board = _MissingKeyBoard([_approved_row("Chủ đề thiếu khoá cũ", row=2)])
+    notifier = _FakeProduceNotifier()
+
+    import tempfile
+    from pathlib import Path
+    from twmkt.config import Settings, load_settings as real_load_settings
+
+    base = real_load_settings()
+    data = dict(base.raw)
+    data["router"] = {"decisions_path": str(Path(tempfile.mkdtemp()) / "router_decisions.json")}
+    test_settings = Settings(data)
+
+    orig = {
+        "load_settings": pfs.load_settings, "_open_board": pfs._open_board,
+        "make_notifier": pfs.make_notifier, "make_llm": pfs.factory.make_llm,
+        "build_writer_llm": pfs.factory.build_writer_llm,
+    }
+    pfs.load_settings = lambda *a, **kw: test_settings
+    pfs._open_board = lambda settings, **kw: board
+    pfs.make_notifier = lambda settings: notifier
+    pfs.factory.make_llm = lambda settings: _EmptyRouteLLM()
+    pfs.factory.build_writer_llm = lambda settings: _PoisonWriterLLM()
+    try:
+        pfs.run(limit=5)
+    finally:
+        pfs.load_settings = orig["load_settings"]
+        pfs._open_board = orig["_open_board"]
+        pfs.make_notifier = orig["make_notifier"]
+        pfs.factory.make_llm = orig["make_llm"]
+        pfs.factory.build_writer_llm = orig["build_writer_llm"]
+
+    assert board.appended_content == []
+    assert board.execute_updates.get(2) == "NEEDS_HUMAN"
+    assert any(e == "needs_human" for e, _ in notifier.events)
+
+
+def test_phase3_adversarial_reorder_insert_delete_sort_topic_key_invariant_and_reproduce():
+    """Lớp 5 Phase 3.1 — PROBE ĐỐI KHÁNG: dựng 3 chủ đề (A đủ 3 loại, B thiếu
+    video_script, C chưa có gì), chụp ánh xạ {TopicKey: nội dung} GỐC, rồi:
+      (a) chèn 1 dòng KHÔNG liên quan lên ĐẦU block (CONTENT lẫn CONTEXT),
+      (b) xóa 1 dòng Ở GIỮA (CONTENT: video_script của A; CONTEXT: 1 dòng phụ),
+      (c) re-sort (CONTENT: đảo thứ tự; CONTEXT: Hot% GIẢM DẦN — đúng hành vi
+          sort_context_by_hot() thật).
+    Assert ánh xạ TopicKey BẤT BIẾN (0 lệch, 0 mồ côi), rồi PRODUCE LẠI —
+    assert upsert hạ ĐÚNG dòng theo khóa (0 trùng, 0 dòng mới sai chỗ)."""
+    from collections import Counter
+
+    from twmkt.curation.keys import compute_topic_key
+    from twmkt.sheets_board import (
+        CONTENT_HEADER, CONTEXT_HEADER, approved_context_from_rows, content_row,
+        content_topic_keys, context_row,
+    )
+
+    URL_A = "https://example.com/chu-de-a-probe"
+    URL_B = "https://example.com/chu-de-b-probe"
+    URL_C = "https://example.com/chu-de-c-probe"
+    KEY_A, KEY_B, KEY_C = compute_topic_key(URL_A), compute_topic_key(URL_B), compute_topic_key(URL_C)
+
+    # ---- 1) Dựng CONTEXT gốc: 3 chủ đề, Hot% khác nhau, đều APPROVE+RUN ----
+    ctx_data_rows = [
+        context_row(title="Chủ đề A probe", hook_line="hook A", source_url=URL_A,
+                    score=5, hot_pct=50.0, status="APPROVE", execute="RUN", topic_key=KEY_A),
+        context_row(title="Chủ đề B probe", hook_line="hook B", source_url=URL_B,
+                    score=8, hot_pct=90.0, status="APPROVE", execute="RUN", topic_key=KEY_B),
+        context_row(title="Chủ đề C probe", hook_line="hook C", source_url=URL_C,
+                    score=2, hot_pct=10.0, status="APPROVE", execute="RUN", topic_key=KEY_C),
+    ]
+
+    # ---- 2) Dựng CONTENT gốc: A đủ 3 loại, B thiếu video_script, C chưa có gì ----
+    content_rows = [
+        content_row(context="Chủ đề A probe", type_="article", status="DONE", output="A-article", topic_key=KEY_A),
+        content_row(context="Chủ đề A probe", type_="video_script", status="DONE", output="A-video", topic_key=KEY_A),
+        content_row(context="Chủ đề A probe", type_="infographic", status="DONE", output="A-info", topic_key=KEY_A),
+        content_row(context="Chủ đề B probe", type_="article", status="DONE", output="B-article", topic_key=KEY_B),
+        content_row(context="Chủ đề B probe", type_="infographic", status="DONE", output="B-info", topic_key=KEY_B),
+    ]
+
+    it, io, ik = CONTENT_HEADER.index("Type"), CONTENT_HEADER.index("Output"), CONTENT_HEADER.index("TopicKey")
+
+    def _snapshot(rows):
+        keys, _missing = content_topic_keys(CONTENT_HEADER, rows)
+        out = {(r[ik], r[it]): r[io] for r in rows if r[ik]}
+        return out, keys
+
+    # ---- 3) Chụp ánh xạ GỐC {TopicKey: nội dung} ----
+    original_map, original_keys = _snapshot(content_rows)
+    assert original_keys == {
+        (KEY_A, "article"), (KEY_A, "video_script"), (KEY_A, "infographic"),
+        (KEY_B, "article"), (KEY_B, "infographic"),
+    }
+
+    # ---- 4) DỜI THỨ TỰ trên CONTENT: (a) chèn đầu, (b) xóa giữa, (c) đảo thứ tự ----
+    unrelated_content = content_row(context="Chủ đề KHÔNG liên quan", type_="article",
+                                    status="DONE", output="unrelated", topic_key="unrelated-probe-key")
+    content_rows = [unrelated_content] + content_rows                       # (a) chèn đầu block
+    del_i = next(i for i, r in enumerate(content_rows) if r[ik] == KEY_A and r[it] == "video_script")
+    del content_rows[del_i]                                                  # (b) xóa 1 dòng Ở GIỮA
+    content_rows = list(reversed(content_rows))                              # (c) re-sort (đảo thứ tự)
+
+    # ---- 5) DỜI THỨ TỰ trên CONTEXT: (a) chèn đầu, (b) xóa 1 dòng phụ, (c) sort Hot% giảm dần ----
+    unrelated_ctx = context_row(title="Chủ đề KHÔNG liên quan CONTEXT", hook_line="x",
+                                source_url="https://example.com/khong-lien-quan-ctx",
+                                score=1, hot_pct=5.0, status="PENDING", execute="")
+    to_delete_ctx = context_row(title="Sẽ bị xóa CONTEXT", hook_line="x",
+                                source_url="https://example.com/se-bi-xoa-ctx",
+                                score=1, hot_pct=1.0, status="PENDING", execute="")
+    ctx_data_rows = [unrelated_ctx, to_delete_ctx] + ctx_data_rows            # (a) chèn đầu block
+    del ctx_data_rows[1]                                                      # (b) xóa 1 dòng Ở GIỮA (to_delete_ctx)
+    hot_idx = CONTEXT_HEADER.index("Hot%")
+    ctx_data_rows.sort(key=lambda r: float(r[hot_idx]), reverse=True)         # (c) sort Hot% GIẢM DẦN
+    ctx_rows = [CONTEXT_HEADER] + ctx_data_rows
+
+    # ---- 6) Đọc lại -> assert ánh xạ TopicKey BẤT BIẾN (0 lệch, 0 mồ côi) ----
+    after_map, after_keys = _snapshot(content_rows)
+    expected_after_keys = {
+        (KEY_A, "article"), (KEY_A, "infographic"),         # video_script A đã bị xóa CHỦ Ý ở bước (b)
+        (KEY_B, "article"), (KEY_B, "infographic"),
+        ("unrelated-probe-key", "article"),
+    }
+    assert after_keys == expected_after_keys, "0 lệch: khoá phải khớp CHÍNH XÁC sau chèn/xóa/sort"
+    for k in expected_after_keys - {("unrelated-probe-key", "article")}:
+        assert after_map[k] == original_map[k], f"Nội dung khoá {k} bị LỆCH sau reorder"
+    _k2, missing_after = content_topic_keys(CONTENT_HEADER, content_rows)
+    assert missing_after == [], "0 mồ côi: không dòng nào mất khả năng định danh theo khoá"
+
+    approved_all = approved_context_from_rows(ctx_rows)
+    approved_by_key = {a["topic_key"]: a for a in approved_all if a["topic_key"] in (KEY_A, KEY_B, KEY_C)}
+    assert set(approved_by_key) == {KEY_A, KEY_B, KEY_C}
+    assert approved_by_key[KEY_A]["context"] == "Chủ đề A probe"
+    assert approved_by_key[KEY_B]["context"] == "Chủ đề B probe"
+    assert approved_by_key[KEY_C]["context"] == "Chủ đề C probe"
+
+    # ---- 7) PRODUCE LẠI sau reorder — upsert phải hạ ĐÚNG dòng theo khóa ----
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+    import produce_from_sheet as pfs
+
+    class _ProbeBoard(_FakeProduceBoard):
+        def __init__(self, approved_rows, seed_content_rows):
+            super().__init__(approved_rows)
+            self._seed = list(seed_content_rows)
+
+        def existing_content_keys(self):
+            keys, _m = content_topic_keys(CONTENT_HEADER, self._seed + self.appended_content)
+            return keys
+
+        def existing_content_missing_keys(self):
+            _k, missing = content_topic_keys(CONTENT_HEADER, self._seed + self.appended_content)
+            return missing
+
+    approved_list = [approved_by_key[KEY_A], approved_by_key[KEY_B], approved_by_key[KEY_C]]
+    board = _ProbeBoard(approved_list, content_rows)
+    notifier = _FakeProduceNotifier()
+
+    import tempfile
+    from pathlib import Path
+    from twmkt.config import Settings, load_settings as real_load_settings
+
+    base = real_load_settings()
+    data = dict(base.raw)
+    data["router"] = {"decisions_path": str(Path(tempfile.mkdtemp()) / "router_decisions.json")}
+    test_settings = Settings(data)
+
+    class _CleanWriterLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            return _clean_writer_json()
+
+    orig = {
+        "load_settings": pfs.load_settings, "_open_board": pfs._open_board,
+        "make_notifier": pfs.make_notifier, "make_llm": pfs.factory.make_llm,
+        "build_writer_llm": pfs.factory.build_writer_llm,
+    }
+    pfs.load_settings = lambda *a, **kw: test_settings
+    pfs._open_board = lambda settings, **kw: board
+    pfs.make_notifier = lambda settings: notifier
+    pfs.factory.make_llm = lambda settings: _EmptyRouteLLM()
+    pfs.factory.build_writer_llm = lambda settings: _CleanWriterLLM()
+    try:
+        pfs.run(limit=10)
+    finally:
+        pfs.load_settings = orig["load_settings"]
+        pfs._open_board = orig["_open_board"]
+        pfs.make_notifier = orig["make_notifier"]
+        pfs.factory.make_llm = orig["make_llm"]
+        pfs.factory.build_writer_llm = orig["build_writer_llm"]
+
+    # ---- 8) Nghiệm thu produce-lại: 0 trùng, 0 dòng mới sai chỗ ----
+    all_rows_after = content_rows + board.appended_content
+    final_keys, final_missing = content_topic_keys(CONTENT_HEADER, all_rows_after)
+    assert final_missing == []
+    for key in (KEY_A, KEY_B, KEY_C):
+        for t in ("article", "video_script", "infographic"):
+            assert (key, t) in final_keys, f"THIẾU {(key, t)} sau produce-lại"
+
+    counts = Counter((r[ik], r[it]) for r in all_rows_after if r[it])
+    dup = {k: c for k, c in counts.items() if c > 1}
+    assert dup == {}, f"TRÙNG sau produce-lại (đúng lỗi 'content mồ côi' cần chặn): {dup}"
+
+    # A.article/A.infographic/B.article/B.infographic KHÔNG bị sinh lại (nội
+    # dung GIỮ NGUYÊN bản gốc — writer/agent KHÔNG được gọi lại cho các khoá này).
+    assert [r[io] for r in all_rows_after if r[ik] == KEY_A and r[it] == "article"] == ["A-article"]
+    assert [r[io] for r in all_rows_after if r[ik] == KEY_A and r[it] == "infographic"] == ["A-info"]
+    assert [r[io] for r in all_rows_after if r[ik] == KEY_B and r[it] == "article"] == ["B-article"]
+    assert [r[io] for r in all_rows_after if r[ik] == KEY_B and r[it] == "infographic"] == ["B-info"]
+    # dòng KHÔNG liên quan không bị đụng tới (đúng 1 dòng, nguyên nội dung).
+    assert [r[io] for r in all_rows_after if r[ik] == "unrelated-probe-key"] == ["unrelated"]
+
+    assert board.execute_updates.get(approved_by_key[KEY_A]["row"]) == "DONE"
+    assert board.execute_updates.get(approved_by_key[KEY_B]["row"]) == "DONE"
+    assert board.execute_updates.get(approved_by_key[KEY_C]["row"]) == "DONE"
 
 
 # =====================================================================
