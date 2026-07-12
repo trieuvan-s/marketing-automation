@@ -2,9 +2,17 @@
 
 KHÔNG dùng LLM, KHÔNG phụ thuộc ngoài (không cần Pillow/cairo): SVG là văn bản
 XML thuần, mở trực tiếp bằng trình duyệt hoặc export PNG bằng công cụ thiết kế
-khi cần đăng MXH. Brand kit (màu/font/kích thước) đọc từ config/settings.yaml
-(mục `render.infographic`) qua `brand_kit_from_settings()` — đổi màu không sửa
-code (adapter/config-first như CLAUDE.md yêu cầu).
+khi cần đăng MXH.
+
+PRODUCTION FACTORY PHASE 1.2 (quyết định #4 — giữ SVG, KHÔNG chuyển Playwright/
+HTML): brand kit (màu/font/wordmark/footer) đọc từ `config/brand.yaml` (MỘT
+NGUỒN, qua `config.load_brand()`) — dùng CHUNG cho renderer này VÀ template
+video (CSS, Phase 2) sau này, vì infographic/video KHÔNG chung LAYOUT nhưng
+chung TOKEN thương hiệu. KÍCH THƯỚC (width/height, layout thuần) vẫn đọc từ
+`render.infographic.*` trong config/settings.yaml — settings.yaml CÓ THỂ ghi
+đè từng token brand riêng lẻ nếu 1 lượt render cụ thể cần khác đi tạm thời
+(brand.yaml là mặc định, không bắt buộc). `brand_kit_from_settings()` gộp cả
+2 nguồn — đổi màu/logo/wordmark chỉ sửa config/brand.yaml, KHÔNG sửa code.
 
 Bố cục cố định (template đơn), từ trên xuống:
   wordmark + related (mã) -> title -> subtitle -> thẻ số liệu (hero+market gộp,
@@ -29,6 +37,11 @@ from __future__ import annotations
 import html
 import textwrap
 
+# Lùi mượt CUỐI CÙNG nếu CẢ settings.yaml LẪN config/brand.yaml đều thiếu key
+# (vd môi trường test dựng Settings({}) trần, hoặc brand.yaml bị xoá nhầm) —
+# KHÔNG còn brand cũ "Turtle Wealth VN" (đã chốt FVA Capital, xem
+# PROJECT_HANDOFF_P5.md §1); giữ palette navy/gold hiện có (gần đúng logo
+# thật, xem config/brand.yaml ghi chú màu ước).
 _DEFAULT_BRAND = {
     "width": 1080,
     "height": 1350,
@@ -38,11 +51,14 @@ _DEFAULT_BRAND = {
     "text": "#F5F5F0",
     "text_muted": "#9FB3C8",
     "font_family": "Arial, 'Segoe UI', sans-serif",
+    "wordmark": "FVA CAPITAL",
 }
 
 # Phase 4.11: disclaimer KHÔNG còn trong spec (data/style tách bạch) -> render
-# tự gắn hằng số này (trùng nội dung agents/production._DISCLAIMER, KHÔNG
-# import ngược để giữ module render độc lập với agents).
+# tự gắn. Phase 1.2: ưu tiên đọc config/brand.yaml (footer.disclaimer) qua
+# brand_kit_from_settings(); hằng số này CHỈ còn là lùi-mượt-cuối-cùng khi
+# brand.yaml thiếu/lỗi (KHÔNG import ngược agents/production, giữ render độc
+# lập — trùng nội dung agents/production._DISCLAIMER có chủ đích).
 _RENDER_DISCLAIMER = (
     "Nội dung chỉ mang tính thông tin, không phải khuyến nghị đầu tư. "
     "Nhà đầu tư tự chịu trách nhiệm với quyết định của mình."
@@ -50,17 +66,30 @@ _RENDER_DISCLAIMER = (
 
 
 def brand_kit_from_settings(settings) -> dict:
-    """Đọc `render.infographic.*`, thiếu key nào dùng mặc định tương ứng."""
+    """Gộp brand kit từ 2 nguồn (Phase 1.2, quyết định #4): MÀU/FONT/WORDMARK/
+    FOOTER từ `config/brand.yaml` (MỘT NGUỒN, qua `config.load_brand()`) —
+    KÍCH THƯỚC (width/height, layout thuần) từ `render.infographic.*` trong
+    settings.yaml. settings.yaml CÓ THỂ ghi đè từng token brand riêng lẻ (vd
+    `render.infographic.primary`) nếu 1 lượt render cụ thể cần khác brand.yaml
+    tạm thời — brand.yaml là mặc định, không bắt buộc. Thiếu CẢ 2 nguồn cho 1
+    key -> lùi về `_DEFAULT_BRAND`."""
+    from ..config import load_brand
+
+    brand = load_brand()
+    colors = brand.get("colors", {}) if isinstance(brand.get("colors"), dict) else {}
+    footer = brand.get("footer", {}) if isinstance(brand.get("footer"), dict) else {}
     g = lambda k, d: settings.get(f"render.infographic.{k}", d)
     return {
         "width": int(g("width", _DEFAULT_BRAND["width"])),
         "height": int(g("height", _DEFAULT_BRAND["height"])),
-        "bg": g("bg", _DEFAULT_BRAND["bg"]),
-        "surface": g("surface", _DEFAULT_BRAND["surface"]),
-        "primary": g("primary", _DEFAULT_BRAND["primary"]),
-        "text": g("text", _DEFAULT_BRAND["text"]),
-        "text_muted": g("text_muted", _DEFAULT_BRAND["text_muted"]),
-        "font_family": g("font_family", _DEFAULT_BRAND["font_family"]),
+        "bg": g("bg", colors.get("bg", _DEFAULT_BRAND["bg"])),
+        "surface": g("surface", colors.get("surface", _DEFAULT_BRAND["surface"])),
+        "primary": g("primary", colors.get("primary", _DEFAULT_BRAND["primary"])),
+        "text": g("text", colors.get("text", _DEFAULT_BRAND["text"])),
+        "text_muted": g("text_muted", colors.get("text_muted", _DEFAULT_BRAND["text_muted"])),
+        "font_family": g("font_family", brand.get("font_family", _DEFAULT_BRAND["font_family"])),
+        "wordmark": g("wordmark", brand.get("wordmark", _DEFAULT_BRAND["wordmark"])),
+        "disclaimer": g("disclaimer", footer.get("disclaimer", _RENDER_DISCLAIMER)),
     }
 
 
@@ -105,7 +134,7 @@ def render_infographic_svg(spec: dict, brand: dict | None = None) -> str:
     hero = [{**s, "emphasis": True} for s in (spec.get("hero") or [])]
     market = [{**s, "emphasis": False} for s in (spec.get("market") or [])]
     stats = (hero + market)[:5]
-    disclaimer_lines = _wrap(_RENDER_DISCLAIMER, max_chars=70)[:3]
+    disclaimer_lines = _wrap(b.get("disclaimer", _RENDER_DISCLAIMER), max_chars=70)[:3]
     source = spec.get("source", "")
 
     parts: list[str] = []
@@ -118,7 +147,7 @@ def render_infographic_svg(spec: dict, brand: dict | None = None) -> str:
     # --- wordmark + ticker pill --------------------------------------------
     y = pad + 10
     parts.append(f'<text x="{pad}" y="{y}" font-size="26" font-weight="700" '
-                 f'letter-spacing="2" fill="{b["primary"]}">TURTLE WEALTH VN</text>')
+                 f'letter-spacing="2" fill="{b["primary"]}">{_esc(b.get("wordmark", "FVA CAPITAL"))}</text>')
     if ticker_txt:
         pill_w = 24 + 16 * len(ticker_txt)
         px = w - pad - pill_w

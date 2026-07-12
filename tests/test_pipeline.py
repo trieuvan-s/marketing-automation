@@ -182,6 +182,41 @@ def test_data_path_config_first_swap_data_root_changes_resolved_path():
     assert p1 != p2
 
 
+def test_load_brand_reads_real_config_brand_yaml():
+    """load_brand() không truyền path -> đọc config/brand.yaml THẬT trên đĩa
+    (giống load_settings() đọc config/settings.yaml thật, KHÔNG có bản mock
+    mặc định)."""
+    from twmkt.config import load_brand
+
+    brand = load_brand()
+    assert brand["name"] == "FVA Capital"
+    assert brand["wordmark"] == "FVA CAPITAL"
+    assert brand["colors"]["bg"] == "#0B1B2B"
+    assert "khuyến nghị đầu tư" in brand["footer"]["disclaimer"]
+
+
+def test_load_brand_missing_file_degrades_to_empty_no_crash():
+    """LÙI MƯỢT: thiếu file (khác load_settings() — brand.yaml KHÔNG bắt buộc
+    để hệ thống chạy) -> {} , KHÔNG raise."""
+    from twmkt.config import load_brand
+
+    assert load_brand(path="khong/ton/tai/brand.yaml") == {}
+
+
+def test_load_brand_custom_path_parses_correctly():
+    import tempfile
+    from pathlib import Path
+    from twmkt.config import load_brand
+
+    tmp = Path(tempfile.mkdtemp()) / "custom_brand.yaml"
+    tmp.write_text(
+        "brand:\n  name: \"Test Brand\"\n  colors:\n    primary: \"#123456\"\n",
+        encoding="utf-8",
+    )
+    brand = load_brand(path=tmp)
+    assert brand["name"] == "Test Brand" and brand["colors"]["primary"] == "#123456"
+
+
 def test_build_store_file_resolves_under_data_root_not_hardcoded_storage():
     from twmkt import factory
     from twmkt.config import Settings
@@ -874,13 +909,15 @@ def test_build_format_requests_covers_features_and_is_deterministic():
     assert kinds.count("deleteConditionalFormatRule") == 3
     # CONTEXT: Status(APPROVE/PENDING/REJECT=3) + Execute(RUN/DONE/FAILED/NEEDS_HUMAN=4,
     # Phase 4.9) + score + hot% => 3+4+1+1 = 9
-    # CONTENT: "Approve(gate 2)"(APPROVE/PENDING/REJECT=3) => 9+3 = 12
-    assert kinds.count("addConditionalFormatRule") == 12
+    # CONTENT: "Approve(gate 2)"(APPROVE/PENDING/REJECT=3) + "Gate3" (Phase 1.3,
+    # APPROVE/PENDING/REJECT=3) => 9+3+3 = 15
+    assert kinds.count("addConditionalFormatRule") == 15
     # checkbox: SOURCES.Enable + PROMPTS.Enable (Use đã xoá, KHÔNG còn checkbox CONTEXT)
     # dropdown: CONTEXT.Status + CONTEXT.Execute + CONTENT.Status + CONTENT."Approve(gate 2)"
+    # + CONTENT."Gate3" (Phase 1.3) => 5
     sd = [r["setDataValidation"] for r in reqs if "setDataValidation" in r]
     conds = [v["rule"]["condition"]["type"] for v in sd]
-    assert conds.count("BOOLEAN") == 2 and conds.count("ONE_OF_LIST") == 4
+    assert conds.count("BOOLEAN") == 2 and conds.count("ONE_OF_LIST") == 5
     # determinism = idempotent theo cấu trúc
     assert build_format_requests(tabs) == reqs
     assert SOURCES_HEADER[0].lower() == "enable"
@@ -5037,16 +5074,23 @@ def test_router_decision_store_set_channel_invalid_channel_raises():
 
 # --- Render Infographic (src/twmkt/render, $0 tất định) --------------------
 def test_brand_kit_from_settings_reads_overrides_and_defaults():
+    """Phase 1.2: brand_kit_from_settings() gộp config/brand.yaml (màu/font/
+    wordmark/footer, MỘT NGUỒN) + render.infographic.* (kích thước, có thể
+    ghi đè từng token brand). Đọc file brand.yaml THẬT trên đĩa (giống các
+    test đọc prompts/*.md thật khác trong file này) — đổi giá trị trong
+    config/brand.yaml thì cập nhật lại assertion primary/wordmark ở đây."""
     from twmkt.render import brand_kit_from_settings
 
     kit = brand_kit_from_settings(Settings({}))
-    assert kit["width"] == 1080 and kit["primary"] == "#E7C873"
+    assert kit["width"] == 1080 and kit["primary"] == "#C9973E"
+    assert kit["wordmark"] == "FVA CAPITAL"
+    assert "không phải khuyến nghị đầu tư" in kit["disclaimer"]
 
     kit2 = brand_kit_from_settings(Settings({"render": {"infographic": {
         "primary": "#FF0000", "width": 800,
     }}}))
-    assert kit2["primary"] == "#FF0000" and kit2["width"] == 800
-    assert kit2["bg"] == "#0B1B2B"   # key không khai -> vẫn dùng mặc định
+    assert kit2["primary"] == "#FF0000" and kit2["width"] == 800   # settings.yaml GHI ĐÈ brand.yaml
+    assert kit2["bg"] == "#0B1B2B"   # key không ghi đè -> vẫn dùng brand.yaml/mặc định
 
 
 def test_number_discipline_block_present_in_writer_and_composer_system():
@@ -5109,6 +5153,18 @@ def test_render_infographic_svg_contains_headline_stats_and_disclaimer():
     assert spec["hero"][0]["value"] in svg
     assert "không phải khuyến nghị đầu tư" in svg
     assert brand["primary"] in svg
+
+
+def test_render_infographic_svg_uses_brand_wordmark_not_old_brand():
+    """Regression Phase 1.2: wordmark cũ 'TURTLE WEALTH VN' hard-code từng in
+    thẳng lên MỌI ảnh infographic — đã sửa đọc từ config/brand.yaml (FVA
+    Capital, xem PROJECT_HANDOFF_P5.md §1)."""
+    from twmkt.render import brand_kit_from_settings, render_infographic_svg
+
+    brand = brand_kit_from_settings(Settings({}))
+    svg = render_infographic_svg({"title": "T"}, brand)
+    assert "FVA CAPITAL" in svg
+    assert "TURTLE WEALTH" not in svg
 
 
 def test_render_infographic_svg_handles_empty_stats_and_missing_footer():
@@ -5578,22 +5634,222 @@ def test_approved_context_from_rows_filters_and_maps():
 
 
 def test_content_row_shape():
-    """TopicKey (Lớp 5 Phase 1) — APPEND CUỐI (không chen giữa Context/Type),
-    khớp comment CONTENT_HEADER trong sheets_board.py."""
+    """TopicKey (Lớp 5 Phase 1) + Facts/AssetPath/Gate3 (Production Factory
+    Phase 1.3) — TẤT CẢ APPEND CUỐI (không chen giữa Context/Type), khớp
+    comment CONTENT_HEADER trong sheets_board.py."""
     from twmkt.sheets_board import content_row, CONTENT_HEADER
     assert CONTENT_HEADER == ["Timestamp", "Context", "Type", "Status", "Output",
-                             "Notes", "Approve(gate 2)", "TopicKey"]
+                             "Notes", "Approve(gate 2)", "TopicKey",
+                             "Facts", "AssetPath", "Gate3"]
     row = content_row(context="Bài A", type_="article", status="DONE",
                       output="nội dung", notes="ok", ts="ts", topic_key="key-a")
     d = dict(zip(CONTENT_HEADER, row))
     assert d == {"Timestamp": "ts", "Context": "Bài A", "Type": "article", "Status": "DONE",
                  "Output": "nội dung", "Notes": "ok", "Approve(gate 2)": "PENDING",
-                 "TopicKey": "key-a"}
+                 "TopicKey": "key-a", "Facts": "", "AssetPath": "", "Gate3": "PENDING"}
     row2 = content_row(context="Bài B", type_="video_script", status="ERROR",
                        output="x", approve="APPROVE", ts="ts2")
     d2 = dict(zip(CONTENT_HEADER, row2))
     assert d2["Approve(gate 2)"] == "APPROVE"
     assert d2["TopicKey"] == ""   # mặc định rỗng nếu caller chưa truyền
+    assert d2["Facts"] == "" and d2["AssetPath"] == "" and d2["Gate3"] == "PENDING"
+
+
+def test_content_row_facts_asset_path_gate3_fields():
+    """Phase 1.3: facts/asset_path điền đúng cột khi caller truyền vào; Gate3
+    KHÔNG nhận tham số (xem test_content_row_gate3_is_always_pending_and_not_
+    settable) — luôn "PENDING" bất kể caller truyền gì cho facts/asset_path."""
+    from twmkt.sheets_board import content_row, CONTENT_HEADER
+
+    row = content_row(context="Bài A", type_="infographic", status="DONE",
+                      output="{}", topic_key="key-a", facts='[{"value":"1"}]',
+                      asset_path="storage/output/x.svg", ts="ts")
+    d = dict(zip(CONTENT_HEADER, row))
+    assert d["Facts"] == '[{"value":"1"}]'
+    assert d["AssetPath"] == "storage/output/x.svg"
+    assert d["Gate3"] == "PENDING"
+
+
+def test_content_row_gate3_is_always_pending_and_not_settable():
+    """INVARIANT VĨNH VIỄN (sự cố THẬT trên Sheet production — Approve(gate 2)
+    VÀ Gate3 tự bị đổi sang APPROVE trên 3 dòng KHÔNG ai duyệt, phát hiện +
+    revert thủ công khi đóng Production Factory Phase 1 round-trip THẬT, xem
+    PROJECT_HANDOFF_P5.md): content_row() KHÔNG có tham số `gate3` — gọi với
+    từ khoá đó phải lỗi NGAY (TypeError), chứng minh KHÔNG hàm ghi-cả-dòng nào
+    có đường truyền giá trị vào cột Gate3. Test này phải ĐỎ nếu ai đó thêm lại
+    tham số gate3 vào content_row()."""
+    import inspect
+
+    from twmkt.sheets_board import CONTENT_HEADER, content_row
+
+    assert "gate3" not in inspect.signature(content_row).parameters
+    try:
+        content_row(context="x", type_="infographic", status="DONE", output="{}",
+                   gate3="APPROVE")   # type: ignore[call-arg]
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("content_row() phải TỪ CHỐI tham số gate3 (TypeError) — "
+                             "không hàm ghi-cả-dòng nào được phép ghi Gate3.")
+
+    row = content_row(context="x", type_="infographic", status="DONE", output="{}")
+    assert dict(zip(CONTENT_HEADER, row))["Gate3"] == "PENDING"
+
+
+def test_set_content_cell_refuses_to_write_gate3():
+    """INVARIANT VĨNH VIỄN: set_content_cell() (đường ghi 1-ô dùng bởi
+    scripts/render_production_assets.py cho Notes/AssetPath) phải TỪ CHỐI NGAY
+    (raise, không no-op êm) nếu bất kỳ code nào gọi nó nhắm cột Gate3 — kể cả
+    biến thể hoa/thường/khoảng trắng khác nhau. Test PHẢI network-free (fail
+    ngay ở bước validate tên cột, TRƯỚC khi chạm Sheets API thật) — KHÔNG dùng
+    pytest (repo này chạy test bằng _run_all() nội bộ, không có pytest cài)."""
+    from twmkt.sheets_board import SheetsBoard
+
+    board = SheetsBoard.__new__(SheetsBoard)   # bỏ qua __init__ (không cần kết nối thật)
+    for variant in ("Gate3", "gate3", "GATE3", "  Gate3  "):
+        try:
+            board.set_content_cell(2, variant, "APPROVE")
+        except ValueError:
+            continue
+        raise AssertionError(f"set_content_cell phải raise ValueError cho col_name={variant!r}")
+
+
+def test_no_machine_write_path_touches_gate3():
+    """INVARIANT VĨNH VIỄN, quét TĨNH toàn bộ source (không phải Sheet thật) —
+    'KHÔNG luồng máy nào được ghi vào cột Gate3, CHỈ người chọn dropdown.' Quét
+    src/twmkt + scripts (loại trừ chính test này) tìm bất kỳ lệnh gọi
+    set_content_cell(...) nào có literal string "gate3" (không phân biệt hoa/
+    thường) làm tên cột — đây là đường ghi-1-ô DUY NHẤT hiện có cho CONTENT
+    ngoài content_row() (đã khoá riêng, xem test phía trên). Test này phải ĐỎ
+    NGAY nếu code tương lai thêm 1 lệnh gọi set_content_cell(..., "Gate3", ...)
+    ở BẤT KỲ file .py nào trong 2 thư mục này."""
+    import re
+
+    pattern = re.compile(r'set_content_cell\s*\([^)]*["\']gate3["\']', re.IGNORECASE)
+    scan_dirs = [os.path.join(REPO_ROOT, "src", "twmkt"), os.path.join(REPO_ROOT, "scripts")]
+    offenders: list[str] = []
+    for base in scan_dirs:
+        for dirpath, _dirs, filenames in os.walk(base):
+            for fn in filenames:
+                if not fn.endswith(".py"):
+                    continue
+                path = os.path.join(dirpath, fn)
+                with open(path, encoding="utf-8") as f:
+                    text = f.read()
+                for m in pattern.finditer(text):
+                    line_no = text.count("\n", 0, m.start()) + 1
+                    offenders.append(f"{path}:{line_no}")
+    assert offenders == [], (
+        f"Tìm thấy lệnh ghi Gate3 qua set_content_cell() trong code MÁY — VI PHẠM "
+        f"invariant 'chỉ người chọn dropdown mới được ghi Gate3': {offenders}")
+
+
+def test_facts_to_json_and_back_round_trip():
+    from twmkt.sheets_board import facts_from_json, facts_to_json
+    from twmkt.models import Fact
+
+    facts = [Fact(value="8,18", label="GDP", unit="%", kind="percent",
+                  raw="8,18%", canonical_value=8.18, source="câu evidence")]
+    raw = facts_to_json(facts)
+    assert raw and "GDP" in raw
+    back = facts_from_json(raw)
+    assert len(back) == 1
+    assert back[0].value == "8,18" and back[0].canonical_value == 8.18
+    assert back[0].label == "GDP"
+
+
+def test_facts_to_json_empty_list_returns_empty_string():
+    from twmkt.sheets_board import facts_to_json
+
+    assert facts_to_json([]) == ""
+
+
+def test_facts_from_json_bad_or_empty_input_degrades_to_empty_list():
+    from twmkt.sheets_board import facts_from_json
+
+    assert facts_from_json("") == []
+    assert facts_from_json("khong phai JSON") == []
+    assert facts_from_json("{}") == []           # dict, không phải list -> []
+    assert facts_from_json('[{"khong_ton_tai": 1}]') == []   # field lạ -> bỏ qua fact đó
+
+
+def test_content_rows_for_render_filters_by_type_and_reads_all_columns():
+    from twmkt.sheets_board import CONTENT_HEADER, content_row, content_rows_for_render
+
+    # Gate3 KHÔNG còn là tham số của content_row() (xem test_content_row_gate3_
+    # is_always_pending_and_not_settable) — dòng thứ 3 giả lập 1 hàng NGƯỜI đã
+    # tự duyệt Gate3 qua dropdown trên Sheet (ghi tay index cuối, KHÔNG qua hàm
+    # ghi-cả-dòng nào của code máy) để test content_rows_for_render() đọc đúng.
+    row_c = content_row(context="Bài B", type_="infographic", status="DONE", output="{}",
+                        topic_key="tk-2", approve="APPROVE", asset_path="out/b.svg")
+    row_c[-1] = "APPROVE"   # mô phỏng NGƯỜI chọn dropdown Gate3, không phải máy ghi
+    rows = [
+        content_row(context="Bài A", type_="infographic", status="DONE", output="{}",
+                   topic_key="tk-1", facts='[{"value":"1"}]', asset_path=""),
+        content_row(context="Bài A", type_="article", status="DONE", output="# A",
+                   topic_key="tk-1"),
+        row_c,
+    ]
+    items = content_rows_for_render(CONTENT_HEADER, rows, type_="infographic")
+    assert len(items) == 2
+    assert items[0]["row"] == 2 and items[0]["topic_key"] == "tk-1"
+    assert items[0]["facts"] == '[{"value":"1"}]' and items[0]["asset_path"] == ""
+    assert items[1]["row"] == 4 and items[1]["asset_path"] == "out/b.svg"
+    assert items[1]["approve_gate2"] == "APPROVE" and items[1]["gate3"] == "APPROVE"
+
+
+def test_content_rows_for_render_missing_required_column_returns_empty():
+    from twmkt.sheets_board import content_rows_for_render
+
+    assert content_rows_for_render(["Timestamp", "Context"], [["t", "c"]]) == []
+
+
+def _render_prod_assets_module():
+    import os as _os
+    import sys as _sys
+    REPO_ROOT_ = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), ".."))
+    _sys.path.insert(0, _os.path.join(REPO_ROOT_, "scripts"))
+    import render_production_assets as rpa
+    return rpa
+
+
+def test_render_one_clean_spec_returns_svg_no_violations():
+    import json as _json
+    rpa = _render_prod_assets_module()
+
+    output = {"title": "GDP tăng mạnh", "hero": [{"label": "GDP", "value": "8,18%"}]}
+    item = {"output": _json.dumps(output), "facts": _json.dumps([
+        {"value": "8,18", "label": "GDP", "unit": "%", "source": "", "kind": "percent",
+         "raw": "8,18%", "canonical_value": 8.18, "approx": False}]),
+           "topic_key": "tk-1", "context": "GDP tăng mạnh"}
+    brand = {"width": 1080, "height": 1350, "bg": "#000", "surface": "#111", "primary": "#fff",
+            "text": "#fff", "text_muted": "#ccc", "font_family": "Arial", "wordmark": "FVA",
+            "disclaimer": "test"}
+    svg, violations, err = rpa.render_one(item, brand)
+    assert svg is not None and svg.startswith("<svg ")
+    assert violations == [] and err == ""
+
+
+def test_render_one_gate2_typo_returns_violations_no_svg():
+    import json as _json
+    rpa = _render_prod_assets_module()
+
+    output = {"title": "GDP", "hero": [{"label": "GDP", "value": "99%"}]}   # gõ nhầm ở Gate 2
+    item = {"output": _json.dumps(output), "facts": _json.dumps([
+        {"value": "8,18", "label": "GDP", "unit": "%", "source": "", "kind": "percent",
+         "raw": "8,18%", "canonical_value": 8.18, "approx": False}]),
+           "topic_key": "tk-1", "context": "GDP"}
+    brand = {"width": 1080, "height": 1350}
+    svg, violations, err = rpa.render_one(item, brand)
+    assert svg is None and len(violations) == 1 and err == ""
+
+
+def test_render_one_bad_output_json_returns_error_reason():
+    rpa = _render_prod_assets_module()
+
+    item = {"output": "khong phai JSON", "facts": "", "topic_key": "tk-1", "context": "X"}
+    svg, violations, err = rpa.render_one(item, {})
+    assert svg is None and violations == [] and "JSON hợp lệ" in err
 
 
 def test_build_content_llm_sonnet_router():
@@ -5930,6 +6186,219 @@ def test_power_on_acquire_lock_warns_but_allows_different_host():
     tmp.write_text("mot-may-khac:123", encoding="utf-8")
     po.acquire_lock(tmp)   # không raise
     po.release_lock(tmp)
+
+
+# =====================================================================
+# Production Factory Phase 1.1 — twmkt.media_factory.numbers / twmkt.media_factory.spec
+# =====================================================================
+def test_parse_vn_number_words_decimal_with_ty_suffix():
+    from twmkt.media_factory.numbers import parse_vn_number_words
+
+    assert parse_vn_number_words("mười ba phẩy tám tỷ") == 13.8e9
+
+
+def test_parse_vn_number_words_percent_no_scale():
+    from twmkt.media_factory.numbers import parse_vn_number_words
+
+    assert parse_vn_number_words("hai mươi ba phần trăm") == 23.0
+
+
+def test_parse_vn_number_words_nghin_ty_composes_correctly():
+    """'nghìn' xử NHƯ BỘI SỐ ×1.000 dù đứng giữa phần nguyên -> tự ra đúng
+    1.3e13 mà KHÔNG cần liệt 'nghìn tỷ' thành 1 đơn vị ghép riêng."""
+    from twmkt.media_factory.numbers import parse_vn_number_words
+
+    assert parse_vn_number_words("mười ba nghìn tỷ") == 1.3e13
+    assert parse_vn_number_words("mười ba nghìn") == 13000.0
+
+
+def test_parse_vn_number_words_decimal_reads_digit_by_digit():
+    """Phần thập phân đọc TỪNG CHỮ SỐ ĐƠN: "phẩy không tám" = .08, KHÔNG phải
+    ghép "không"+"tám" thành 1 số 2 chữ số."""
+    from twmkt.media_factory.numbers import parse_vn_number_words
+
+    assert parse_vn_number_words("mười ba phẩy không tám") == 13.08
+
+
+def test_parse_vn_number_words_simple_hundreds_and_units():
+    from twmkt.media_factory.numbers import parse_vn_number_words
+
+    assert parse_vn_number_words("năm trăm tám mươi lăm tỷ") == 585e9
+    assert parse_vn_number_words("một triệu") == 1e6
+    assert parse_vn_number_words("hai mươi mốt") == 21.0
+
+
+def test_parse_vn_number_words_invalid_returns_none():
+    from twmkt.media_factory.numbers import parse_vn_number_words
+
+    assert parse_vn_number_words("") is None
+    assert parse_vn_number_words("con mèo") is None
+    assert parse_vn_number_words("tỷ") is None            # chỉ có đơn vị, không có số
+    assert parse_vn_number_words("mười ba phẩy con mèo") is None   # phần thập phân hỏng
+
+
+def test_find_word_number_phrases_min_length_and_suffix_rule():
+    from twmkt.media_factory.numbers import find_word_number_phrases
+
+    # cụm 1 từ KHÔNG có hậu tố lớn -> bỏ qua (giảm dương tính giả, "một" hay
+    # dùng phi-số kiểu mạo từ trong câu tự nhiên).
+    out1 = find_word_number_phrases("có một điều đáng chú ý")
+    assert out1 == []
+
+    # cụm 1 từ CÓ hậu tố lớn ngay sau -> vẫn nhận.
+    out2 = find_word_number_phrases("doanh thu đạt một tỷ đồng năm nay")
+    assert [p for p, _ in out2] == ["một tỷ"]
+
+    # cụm >=2 từ số liên tiếp -> nhận dù không có hậu tố lớn.
+    out3 = find_word_number_phrases("tăng trưởng hai mươi ba phần trăm so cùng kỳ")
+    assert [p for p, _ in out3] == ["hai mươi ba phần trăm"]
+
+
+def test_verify_spec_accepts_matching_digit_and_word_numbers():
+    from twmkt.media_factory.spec import ProductionScene, ProductionSpec, verify_spec
+    from twmkt.models import Fact
+
+    facts = [Fact(value="8,18", label="GDP", unit="%", kind="percent",
+                  raw="8,18%", canonical_value=8.18, source="...")]
+    spec = ProductionSpec(
+        topic_key="tk-1", title="t", source_url="u", channel="facebook_feed",
+        facts=facts,
+        scenes=[ProductionScene(role="body", visual_kind="stat",
+                                slots={"stats": [{"label": "GDP", "value": "8,18%"}]}),
+               ProductionScene(role="outro", visual_kind="quote",
+                               slots={"lines": ["GDP tăng tám phẩy một tám phần trăm"]})],
+    )
+    assert verify_spec(spec) == []
+
+
+def test_verify_spec_flags_fabricated_number_in_slots():
+    from twmkt.media_factory.spec import ProductionScene, ProductionSpec, verify_spec
+    from twmkt.models import Fact
+
+    facts = [Fact(value="8,18", label="GDP", unit="%", kind="percent",
+                  raw="8,18%", canonical_value=8.18, source="...")]
+    spec = ProductionSpec(
+        topic_key="tk-1", title="t", source_url="u", channel="facebook_feed", facts=facts,
+        scenes=[ProductionScene(role="body", visual_kind="stat",
+                                slots={"stats": [{"label": "GDP bịa", "value": "99%"}]})],
+    )
+    violations = verify_spec(spec)
+    assert len(violations) == 1
+    assert violations[0].token == "99%" and violations[0].scene_index == 0
+    assert "stats[0].value" == violations[0].field
+
+
+def test_verify_spec_flags_wrong_unit_word_form():
+    """Số ĐÚNG giá trị chữ số nhưng SAI đơn vị (viết bằng chữ) -> vẫn bị bắt
+    (585 nghìn tỷ != 585 tỷ — sai 1.000 lần, đúng ca lỗi thật đã gặp)."""
+    from twmkt.media_factory.spec import ProductionScene, ProductionSpec, verify_spec
+    from twmkt.models import Fact
+
+    facts = [Fact(value="585", label="X", unit="tỷ đồng", kind="money",
+                  raw="585 tỷ đồng", canonical_value=585e9, source="...")]
+    spec = ProductionSpec(
+        topic_key="tk-1", title="t", source_url="u", channel="facebook_feed", facts=facts,
+        scenes=[ProductionScene(role="body", visual_kind="quote",
+                                slots={}, voice_text="năm trăm tám mươi lăm nghìn tỷ đồng")],
+    )
+    violations = verify_spec(spec)
+    assert len(violations) == 1 and violations[0].field == "voice_text"
+
+
+def test_verify_spec_checks_both_slots_and_voice_text():
+    from twmkt.media_factory.spec import ProductionScene, ProductionSpec, verify_spec
+    from twmkt.models import Fact
+
+    facts = [Fact(value="8,18", label="GDP", unit="%", kind="percent",
+                  raw="8,18%", canonical_value=8.18, source="...")]
+    spec = ProductionSpec(
+        topic_key="tk-1", title="t", source_url="u", channel="facebook_feed", facts=facts,
+        scenes=[ProductionScene(role="hook", visual_kind="title",
+                                slots={"title": "Tăng 50% bất ngờ"},
+                                voice_text="tăng năm mươi phần trăm bất ngờ")],
+    )
+    violations = verify_spec(spec)
+    fields = sorted(v.field for v in violations)
+    assert fields == ["title", "voice_text"]   # cả 2 nơi (slots VÀ voice_text) đều bị bắt
+
+
+def test_verify_spec_approx_word_grants_tolerance():
+    from twmkt.media_factory.spec import ProductionScene, ProductionSpec, verify_spec
+    from twmkt.models import Fact
+
+    facts = [Fact(value="585", label="X", unit="tỷ đồng", kind="money", approx=True,
+                  raw="585 tỷ đồng", canonical_value=585e9, source="...")]
+    spec = ProductionSpec(
+        topic_key="tk-1", title="t", source_url="u", channel="facebook_feed", facts=facts,
+        scenes=[ProductionScene(role="body", visual_kind="stat",
+                                slots={"stats": [{"label": "X", "value": "gần 600 tỷ đồng"}]})],
+    )
+    assert verify_spec(spec) == []   # 600 lệch ~2.5% so 585, có "gần" -> trong dung sai 5%
+
+
+def test_verify_spec_empty_facts_flags_everything_with_numbers():
+    from twmkt.media_factory.spec import ProductionScene, ProductionSpec, verify_spec
+
+    spec = ProductionSpec(
+        topic_key="tk-1", title="t", source_url="u", channel="facebook_feed", facts=[],
+        scenes=[ProductionScene(role="body", visual_kind="stat",
+                                slots={"stats": [{"label": "X", "value": "10%"}]})],
+    )
+    assert len(verify_spec(spec)) == 1
+
+
+def test_build_spec_from_content_maps_8field_to_scenes():
+    from twmkt.media_factory.spec import build_spec_from_content
+    from twmkt.models import Fact
+
+    output = {
+        "title": "GDP tăng mạnh", "subtitle": "6 tháng đầu năm 2026",
+        "hero": [{"label": "GDP", "value": "8,18%"}],
+        "market": [{"label": "Thu ngân sách", "value": "1,57 triệu tỷ đồng"}],
+        "highlights": ["Tăng trưởng lan toả nhiều địa phương."],
+        "render_hint": {"ratio": "1:1"},
+    }
+    facts = [Fact(value="8,18", label="GDP", unit="%", canonical_value=8.18)]
+    spec = build_spec_from_content(output, facts, topic_key="tk-1",
+                                   source_url="https://x.vn", channel="linkedin_square")
+    assert spec.topic_key == "tk-1" and spec.channel == "linkedin_square"
+    assert spec.aspect == "1:1" and spec.title == "GDP tăng mạnh"
+    assert len(spec.scenes) == 4
+    kinds = [s.visual_kind for s in spec.scenes]
+    assert kinds == ["title", "stat", "list", "quote"]
+    assert spec.scenes[0].slots["title"] == "GDP tăng mạnh"
+    assert spec.scenes[1].slots["stats"][0]["value"] == "8,18%"
+    assert spec.scenes[2].slots["items"][0]["label"] == "Thu ngân sách"
+    assert spec.scenes[3].slots["lines"] == ["Tăng trưởng lan toả nhiều địa phương."]
+
+
+def test_build_spec_from_content_then_verify_catches_gate2_typo():
+    """Mô phỏng ĐÚNG kịch bản Phase 1.3: người sửa tay Output ở Gate 2, gõ
+    nhầm số (99% thay vì 8,18%) -> verify_spec() TRÊN SPEC DẪN XUẤT LẠI phải
+    bắt được, dù bước guardrail (a) lúc Composer sinh ra đã sạch."""
+    from twmkt.media_factory.spec import build_spec_from_content, verify_spec
+    from twmkt.models import Fact
+
+    output_after_gate2_edit = {
+        "title": "GDP tăng mạnh", "subtitle": "",
+        "hero": [{"label": "GDP", "value": "99%"}],   # người gõ nhầm ở Gate 2
+        "market": [], "highlights": [],
+    }
+    facts = [Fact(value="8,18", label="GDP", unit="%", canonical_value=8.18)]
+    spec = build_spec_from_content(output_after_gate2_edit, facts, topic_key="tk-1")
+    violations = verify_spec(spec)
+    assert len(violations) == 1 and violations[0].token == "99%"
+
+
+def test_verify_spec_no_numbers_no_facts_clean():
+    from twmkt.media_factory.spec import ProductionScene, ProductionSpec, verify_spec
+
+    spec = ProductionSpec(
+        topic_key="tk-1", title="t", source_url="u", channel="facebook_feed", facts=[],
+        scenes=[ProductionScene(role="hook", visual_kind="title",
+                                slots={"title": "Không có số nào ở đây"})],
+    )
+    assert verify_spec(spec) == []
 
 
 # xfail: test biết trước ĐANG đỏ vì 1 phần việc CHƯA làm (không phải regression

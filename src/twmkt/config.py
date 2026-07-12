@@ -84,6 +84,34 @@ def load_settings(path: str | os.PathLike | None = None) -> Settings:
     return Settings(_expand(data))
 
 
+DEFAULT_BRAND_PATH = "config/brand.yaml"
+
+
+def load_brand(path: str | os.PathLike | None = None) -> dict:
+    """Nạp `config/brand.yaml` — brand kit MỘT NGUỒN (màu/font/wordmark/
+    footer), TÁCH khỏi settings.yaml có chủ đích (Production Factory Phase
+    1.2, quyết định #4): nhiều renderer (SVG `render/infographic.py` hiện tại,
+    CSS cho template video sau — Phase 2) đều đọc CHUNG file này thay vì mỗi
+    renderer tự khai màu riêng. `render.infographic.*` trong settings.yaml VẪN
+    giữ vai trò LAYOUT (width/height — kích thước, khác brand identity) và có
+    thể GHI ĐÈ TỪNG token brand riêng lẻ nếu cần (xem
+    render/infographic.brand_kit_from_settings).
+
+    LÙI MƯỢT (khác load_settings — brand.yaml là bổ trợ, không bắt buộc để hệ
+    thống chạy): thiếu PyYAML/thiếu file/lỗi parse -> trả `{}`, KHÔNG raise —
+    caller (renderer) tự có màu mặc định nội bộ khi thiếu."""
+    p = Path(path or os.environ.get("TWMKT_BRAND", DEFAULT_BRAND_PATH))
+    if yaml is None or not p.exists():
+        return {}
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except Exception:
+        return {}
+    brand = _expand(data).get("brand", {})
+    return brand if isinstance(brand, dict) else {}
+
+
 # =====================================================================
 # PHASE DATA-ROOT — GỐC DUY NHẤT cho mọi dữ liệu runtime (documents/output/
 # state/logs/ab), TÁCH khỏi repo. Trước phase này, mỗi nơi tự ghép chuỗi

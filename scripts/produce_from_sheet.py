@@ -94,7 +94,7 @@ from twmkt.agents.writer import WriterOutcome, run_writer_with_retry  # noqa: E4
 from twmkt.config import data_path, load_settings  # noqa: E402
 from twmkt.curation.keys import assign_topic_key  # noqa: E402
 from twmkt.models import ContentDraft, ContentFormat, Source  # noqa: E402
-from twmkt.sheets_board import SheetsBoard, content_row  # noqa: E402
+from twmkt.sheets_board import SheetsBoard, content_row, facts_to_json  # noqa: E402
 from twmkt.utils.telegram_notifier import make_notifier  # noqa: E402
 
 _OUTPUT_PREVIEW = 1500   # số ký tự Output đưa lên Sheet (đủ xem; full lưu ra file)
@@ -322,6 +322,14 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
             evidence=evidence, facts=brief_result.facts,
             no_numeric_content=brief_result.no_numeric_content,
         )
+        # Production Factory Phase 1.3 — snapshot facts[] MÁY-SỞ-HỮU ghi vào MỌI
+        # dòng CONTENT của chủ đề này (cột Facts, xem comment CONTENT_HEADER ở
+        # sheets_board.py) — nguồn sự thật cho verify_spec() (guardrail lần 2,
+        # media_factory/spec.py) chạy TRƯỚC KHI RENDER (Phase 1.3), TÁCH biệt
+        # facts[] còn trong RAM ở tiến trình này (không đồng bộ giữa nhiều máy —
+        # đúng bug Fix (a) đã sửa cho CONTEXT, không lặp lại cho Production
+        # Factory qua data_root).
+        facts_json = facts_to_json(brief.facts)
 
         # route-once (Mục A): gọi KHÔNG ĐIỀU KIỆN cho MỌI item (kể cả khi
         # article đã DONE từ trước) — cache-hit tức thời khi đã đóng băng
@@ -345,7 +353,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                      f"{decision.channel_rationale.get('article') or '(router không cho lý do)'}")
             rows.append(content_row(context=item["context"], type_="article",
                                     status="SKIPPED", output="", notes=reason,
-                                    topic_key=topic_key))
+                                    topic_key=topic_key, facts=facts_json))
             seen.add((topic_key, "article"))
             skipped += 1
             notifier.notify("skipped", topic=item["context"], type="article", reason=reason)
@@ -362,7 +370,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                     r.draft.body[:_OUTPUT_PREVIEW] + f"\n…(xem {fn.name})"
                 rows.append(content_row(context=item["context"], type_="article",
                                         status="DONE", output=preview, notes="",
-                                        topic_key=topic_key))
+                                        topic_key=topic_key, facts=facts_json))
                 seen.add((topic_key, "article"))
                 produced += 1
                 notifier.notify("draft_changed", topic=item["context"], type="article", status="DONE")
@@ -376,7 +384,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                     r.draft.body[:_OUTPUT_PREVIEW] + f"\n…(xem {fn.name})"
                 rows.append(content_row(context=item["context"], type_="article",
                                         status="ERROR", output=preview, notes=note,
-                                        topic_key=topic_key))
+                                        topic_key=topic_key, facts=facts_json))
                 flagged += 1
                 notifier.notify("error", topic=item["context"], type="article", issues=note)
             else:   # FAILED — hết retry (lỗi hạ tầng gọi LLM), KHÔNG có draft -> KHÔNG ghi CONTENT rác
@@ -412,7 +420,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                          f"{decision.channel_rationale.get(ch) or '(router không cho lý do)'}")
                 rows.append(content_row(context=item["context"], type_=type_key,
                                         status="SKIPPED", output="", notes=reason,
-                                        topic_key=topic_key))
+                                        topic_key=topic_key, facts=facts_json))
                 seen.add((topic_key, type_key))
                 skipped += 1
                 notifier.notify("skipped", topic=item["context"], type=ch, reason=reason)
@@ -437,7 +445,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                          "liệu (no_numeric_content=true) -> bất đồng router/brief, tạm SKIP")
                 rows.append(content_row(context=item["context"], type_="infographic",
                                         status="SKIPPED", output="", notes=reason,
-                                        topic_key=topic_key))
+                                        topic_key=topic_key, facts=facts_json))
                 seen.add((topic_key, "infographic"))
                 skipped += 1
                 notifier.notify("skipped", topic=item["context"], type="infographic", reason=reason)
@@ -475,7 +483,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                 draft.body[:_OUTPUT_PREVIEW] + f"\n…(xem {fn.name})"
             rows.append(content_row(context=item["context"], type_=type_,
                                     status=status, output=preview, notes=note,
-                                    topic_key=topic_key))
+                                    topic_key=topic_key, facts=facts_json))
             seen.add((topic_key, type_))
             produced += 1
             if draft.is_clean:
@@ -665,7 +673,8 @@ def run_draft(*, limit: int = 5, setup: bool = False) -> dict:
                                     status="DONE" if draft.is_clean else "ERROR",
                                     output=draft.body[:_OUTPUT_PREVIEW],
                                     notes="; ".join(draft.compliance_issues),
-                                    topic_key=topic_key))
+                                    topic_key=topic_key,
+                                    facts=facts_to_json(brief.facts)))   # rỗng ở đường --draft (chưa wire run_brief())
             seen.add((topic_key, "infographic"))
             infographic_done += 1
 
@@ -801,7 +810,8 @@ def run_ingest(*, setup: bool = False) -> dict:
             rows.append(content_row(context=context, type_=ctype,
                                     status="DONE" if draft.is_clean else "ERROR",
                                     output=preview, notes="; ".join(draft.compliance_issues),
-                                    topic_key=topic_key))
+                                    topic_key=topic_key,
+                                    facts=facts_to_json(brief.facts)))   # rỗng ở đường --ingest (chưa wire run_brief())
             seen.add((topic_key, ctype))
             ingested += 1
             flagged += 0 if draft.is_clean else 1

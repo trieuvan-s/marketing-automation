@@ -181,8 +181,25 @@ README_HEADER = ["Turtle Wealth — Bảng duyệt nội dung (Sheets là UI, th
 # liệt vào SheetsBoard._CONTENT_MERGE_COLS (chỉ "timestamp"/"context" bị
 # merge-xoá) — đây là cột SỐNG SÓT qua merge, neo lại danh tính chủ đề cho dòng
 # con dù Context/Timestamp của nó đã bị mergeCells xoá rỗng.
+#
+# PRODUCTION FACTORY Phase 1.3 — 3 cột MỚI (append CUỐI, cùng lý do TopicKey ở
+# trên):
+#   "Facts"     — JSON list[Fact] (twmkt.sheets_board.facts_to_json/facts_from_
+#                 json) — snapshot facts[] tại thời điểm sinh CONTENT, neo
+#                 TopicKey. MÁY-SỞ-HỮU: cùng nhóm cột KHOÁ với TopicKey/Source/
+#                 Timestamp — dự kiến bị Lớp 2 (khoá cột theo máy-sở-hữu, xem
+#                 PROJECT_HANDOFF_P5.md §6, hiện GÁC) khoá KHÔNG cho người sửa
+#                 tay. Đây là "chân lý" cho verify_spec() (guardrail lần 2,
+#                 media_factory/spec.py) — người sửa Output ở Gate 2 có thể gõ
+#                 nhầm số, nhưng KHÔNG được tự sửa facts[] (nếu cần sửa facts,
+#                 phải quay lại re-route/re-brief, không sửa tay cột này).
+#   "AssetPath" — đường dẫn file asset đã render (SVG) — MÁY-SỞ-HỮU, rỗng nếu
+#                 chưa render hoặc NEEDS_HUMAN (xem Notes).
+#   "Gate3"     — CỔNG DUYỆT ASSET cuối (PENDING|APPROVE|REJECT, dropdown,
+#                 NGƯỜI sở hữu — khác Facts/AssetPath) — duyệt ảnh/media THẬT
+#                 trước khi publish, KHÁC Gate 2 (duyệt NỘI DUNG/văn bản).
 CONTENT_HEADER = ["Timestamp", "Context", "Type", "Status", "Output", "Notes",
-                  "Approve(gate 2)", "TopicKey"]
+                  "Approve(gate 2)", "TopicKey", "Facts", "AssetPath", "Gate3"]
 
 # 8 tab dựng lần đầu (tên : header). Thứ tự = thứ tự tab hiển thị. ResearchReview/
 # ContentReview đã GỘP vào CONTEXT.Status / CONTENT."Approve(gate 2)" -> xoá khỏi
@@ -210,7 +227,8 @@ _LEGACY_TABS = {"Sheet1", "ResearchReview", "ContentReview"}
 # topic_keys), migrate_rows() chỉ lo dịch chuyển SCHEMA, không tính khoá.
 _MIGRATE_DEFAULTS: dict[str, dict[str, str]] = {
     "CONTEXT": {"Execute": "", "TopicKey": ""},
-    "CONTENT": {"Approve(gate 2)": "PENDING", "TopicKey": ""},
+    "CONTENT": {"Approve(gate 2)": "PENDING", "TopicKey": "",
+               "Facts": "", "AssetPath": "", "Gate3": "PENDING"},
 }
 
 _README_ROWS = [
@@ -461,14 +479,64 @@ def context_row(*, title: str, hook_line: str, source_url: str, score: int, hot_
 
 def content_row(*, context: str, type_: str, status: str, output: str,
                 notes: str = "", approve: str = "PENDING", topic_key: str = "",
+                facts: str = "", asset_path: str = "",
                 ts: str | None = None) -> list[str]:
     """1 hàng CONTENT ĐÚNG thứ tự CONTENT_HEADER (Timestamp|Context|Type|Status|
-    Output|Notes|Approve(gate 2)|TopicKey). Status: DONE (sạch)|ERROR (lỗi/
-    compliance) — kết quả sản xuất, tất định. Approve(gate 2): cổng NGƯỜI duyệt
-    nội dung (PENDING mặc định, thay tab ContentReview cũ). `topic_key` (Lớp 5
-    Phase 1) — caller tự tính (curation.keys.compute_topic_key) + truyền vào,
-    giống context_row(); rỗng nếu chưa wire. Đặt CUỐI (khớp CONTENT_HEADER append)."""
-    return [ts or _now_ddmmyyyy(), context, type_, status, output, notes, approve, topic_key]
+    Output|Notes|Approve(gate 2)|TopicKey|Facts|AssetPath|Gate3). Status: DONE
+    (sạch)|ERROR (lỗi/compliance) — kết quả sản xuất, tất định. Approve(gate 2):
+    cổng NGƯỜI duyệt nội dung (PENDING mặc định, thay tab ContentReview cũ).
+    `topic_key` (Lớp 5 Phase 1) — caller tự tính + truyền vào. `facts` (Phase
+    1.3, JSON — dùng `facts_to_json()`) — snapshot facts[] MÁY-SỞ-HỮU, xem
+    comment CONTENT_HEADER. `asset_path` (Phase 1.3) — rỗng mặc định (chưa
+    render).
+
+    INVARIANT (sự cố THẬT trên Sheet production, xem PROJECT_HANDOFF_P5.md):
+    Gate3 KHÔNG có tham số ở đây — CỐ Ý, KHÔNG phải thiếu sót. Gate3 là cổng
+    NGƯỜI chọn dropdown trên Sheet, KHÔNG luồng máy nào (kể cả hàm ghi-cả-dòng
+    này) được phép ghi giá trị cho cột đó — luôn CỨNG "PENDING" cho hàng MỚI,
+    người tự đổi qua dropdown khi thật sự duyệt asset. Xem
+    test_no_machine_write_path_touches_gate3 (tests/test_pipeline.py) — khoá
+    bất biến này VĨNH VIỄN, KHÔNG thêm lại tham số gate3 ở đây dù có lý do gì."""
+    return [ts or _now_ddmmyyyy(), context, type_, status, output, notes, approve,
+           topic_key, facts, asset_path, "PENDING"]
+
+
+def facts_to_json(facts: list) -> str:
+    """list[Fact] -> JSON string để ghi cột CONTENT.Facts (Phase 1.3). Rỗng
+    ([]) -> "" (KHÔNG ghi "[]" thô, đỡ rối mắt trên Sheet khi không có fact)."""
+    import json as _json
+    from dataclasses import asdict
+
+    if not facts:
+        return ""
+    return _json.dumps([asdict(f) for f in facts], ensure_ascii=False)
+
+
+def facts_from_json(raw: str) -> list:
+    """Chiều ngược `facts_to_json()` — "" /JSON hỏng -> [] (LÙI MƯỢT, KHÔNG
+    raise; caller (verify_spec) coi facts=[] là hợp lệ, chỉ khiến MỌI số bị
+    flag — an toàn, không bịa fact để lấp chỗ trống)."""
+    import json as _json
+
+    from .models import Fact
+
+    raw = (raw or "").strip()
+    if not raw:
+        return []
+    try:
+        data = _json.loads(raw)
+    except _json.JSONDecodeError:
+        return []
+    if not isinstance(data, list):
+        return []
+    out = []
+    for item in data:
+        if isinstance(item, dict):
+            try:
+                out.append(Fact(**item))
+            except TypeError:
+                continue   # field lạ/thiếu -> bỏ qua fact đó, KHÔNG vỡ cả danh sách
+    return out
 
 
 _FULL_TYPES = frozenset({"article", "video_script", "infographic"})
@@ -650,6 +718,45 @@ def backfill_content_topic_keys(
                 warnings.append(effective_ctx)
         out.append(row)
     return out, warnings
+
+
+# =====================================================================
+# Production Factory Phase 1.3 — tìm dòng CONTENT cần render (Approve(gate 2)=
+# APPROVE, AssetPath rỗng) + ghi lại AssetPath/Gate3/Notes theo (TopicKey,Type).
+# Dùng bởi scripts/render_production_assets.py. Hàm THUẦN, test được không cần
+# Sheet thật.
+# =====================================================================
+def content_rows_for_render(header: list[str], rows: list[list[str]], *,
+                            type_: str = "infographic") -> list[dict]:
+    """Danh sách dòng CONTENT khớp `type_` — mỗi item: {row (Sheet 1-based),
+    topic_key, context, output, facts (JSON thô), approve_gate2, asset_path,
+    gate3}. Thiếu cột bắt buộc (topickey/context/output/type/approve(gate 2))
+    -> [] (an toàn, KHÔNG đoán vị trí cột)."""
+    low = [h.strip().lower() for h in header]
+    required = ("topickey", "context", "output", "type", "approve(gate 2)")
+    if not all(c in low for c in required):
+        return []
+    idx = {c: low.index(c) for c in low}
+
+    def g(row: list[str], col: str) -> str:
+        i = idx.get(col)
+        return row[i].strip() if i is not None and i < len(row) else ""
+
+    out: list[dict] = []
+    for offset, row in enumerate(rows):
+        if g(row, "type") != type_:
+            continue
+        out.append({
+            "row": offset + 2,
+            "topic_key": g(row, "topickey"),
+            "context": g(row, "context"),
+            "output": g(row, "output"),
+            "facts": g(row, "facts"),
+            "approve_gate2": g(row, "approve(gate 2)"),
+            "asset_path": g(row, "assetpath"),
+            "gate3": g(row, "gate3"),
+        })
+    return out
 
 
 # =====================================================================
@@ -1051,6 +1158,10 @@ def _tab_requests(t: TabMeta) -> list[dict]:
         c = low.index("approve(gate 2)")
         out.append(_set_validation(sid, 1, fmt_rows, c,
                                    _one_of_list(["PENDING", "APPROVE", "REJECT"])))
+    if t.name == "CONTENT" and "gate3" in low:  # Phase 1.3 -> dropdown quy trình duyệt (cổng 3, duyệt ASSET)
+        c = low.index("gate3")
+        out.append(_set_validation(sid, 1, fmt_rows, c,
+                                   _one_of_list(["PENDING", "APPROVE", "REJECT"])))
 
     # 8) Conditional formatting cho CONTEXT/CONTENT (xóa rule cũ trước -> idempotent).
     if t.name in ("CONTEXT", "CONTENT"):
@@ -1076,6 +1187,11 @@ def _tab_requests(t: TabMeta) -> list[dict]:
             out.append(_score_scale_rule(sid, c, 1, fmt_rows))
     if t.name == "CONTENT" and "approve(gate 2)" in low:
         c = low.index("approve(gate 2)")
+        out.append(_text_eq_rule(sid, c, 1, fmt_rows, "APPROVE", _C_APPROVE))
+        out.append(_text_eq_rule(sid, c, 1, fmt_rows, "PENDING", _C_PENDING))
+        out.append(_text_eq_rule(sid, c, 1, fmt_rows, "REJECT", _C_REJECT))
+    if t.name == "CONTENT" and "gate3" in low:   # Phase 1.3
+        c = low.index("gate3")
         out.append(_text_eq_rule(sid, c, 1, fmt_rows, "APPROVE", _C_APPROVE))
         out.append(_text_eq_rule(sid, c, 1, fmt_rows, "PENDING", _C_PENDING))
         out.append(_text_eq_rule(sid, c, 1, fmt_rows, "REJECT", _C_REJECT))
@@ -1502,6 +1618,42 @@ class SheetsBoard:
         Source của dòng GIỮ khi nó đang là title-chip (Fix (a) Phase 2b).
         No-op nếu thiếu cột."""
         ws = self._tab("CONTEXT")
+        header = [h.strip().lower() for h in ws.row_values(1)]
+        low = col_name.strip().lower()
+        if low not in header:
+            return
+        col_letter = _col_a1(header.index(low) + 1)
+        ws.update(f"{col_letter}{row}", [[value]], value_input_option="USER_ENTERED")
+
+    # --- Production Factory Phase 1.3: render + Gate 3 ------------------
+    def read_content_for_render(self, *, type_: str = "infographic") -> list[dict]:
+        """Dòng CONTENT khớp `type_` (mặc định infographic) — dùng bởi
+        scripts/render_production_assets.py để tìm ứng viên render + đọc
+        Facts/AssetPath/Gate3 hiện có (xem content_rows_for_render). [] nếu
+        tab CONTENT rỗng/chưa tồn tại/thiếu cột bắt buộc."""
+        try:
+            rows = self._tab("CONTENT").get_all_values()
+        except Exception:  # pragma: no cover - tab chưa tồn tại
+            return []
+        if not rows:
+            return []
+        return content_rows_for_render(rows[0], rows[1:], type_=type_)
+
+    def set_content_cell(self, row: int, col_name: str, value: str) -> None:
+        """Ghi 1 giá trị vào 1 ô CONTENT (số dòng 1-based, tên cột KHÔNG phân
+        biệt hoa/thường) — dùng để ghi AssetPath/Notes sau khi render (Phase
+        1.3). No-op nếu thiếu cột.
+
+        INVARIANT (sự cố THẬT trên Sheet production, xem PROJECT_HANDOFF_P5.md):
+        CẤM ghi cột "Gate3" qua đường này (hay bất kỳ đường máy nào khác) —
+        Gate3 CHỈ người chọn dropdown trên Sheet mới được đổi. Raise ngay
+        (không no-op êm) để lộ lỗi SỚM nếu code sau này lỡ gọi nhầm — xem
+        test_no_machine_write_path_touches_gate3 (tests/test_pipeline.py)."""
+        if col_name.strip().lower() == "gate3":
+            raise ValueError(
+                "set_content_cell: CẤM ghi cột Gate3 — cổng NGƯỜI duyệt asset, "
+                "chỉ đổi qua dropdown trên Sheet, không luồng máy nào được ghi.")
+        ws = self._tab("CONTENT")
         header = [h.strip().lower() for h in ws.row_values(1)]
         low = col_name.strip().lower()
         if low not in header:

@@ -2,9 +2,12 @@
 
 > Dán file này vào đầu cuộc trò chuyện mới để Claude / Claude Code nắm toàn bộ bối cảnh dự án
 > mà không cần đọc lại lịch sử dài. Kế thừa `PROJECT_HANDOFF_P2.md` (đóng Milestone (a)).
-> **Cập nhật lần cuối:** đóng **Lớp 5 (TopicKey) + Fix (a) (dedup đọc Sheet)**.
-> **Trạng thái:** Sheet board hội tụ bất kể máy/DB nào crawl. Brand **FVA Capital** vừa được CHỐT
-> (logo đã có) — **code CHƯA migrate**. Kế tiếp: **Production Factory** (module lớn kế tiếp).
+> **Cập nhật lần cuối:** đóng **Production Factory Phase 1.0–1.3** (`twmkt.media_factory`:
+> ProductionSpec/guardrail lần 2/brand-kit/render+Gate 3). Trước đó: Lớp 5 (TopicKey) + Fix (a).
+> **Trạng thái:** Sheet board hội tụ bất kể máy/DB nào crawl. Brand **FVA Capital** đã wire vào
+> renderer SVG (`config/brand.yaml`), CTA/persona trong `agents/*.py` CHƯA đổi. CONTENT có thêm
+> `Facts`/`AssetPath`/`Gate3`. Kế tiếp: mở rộng Production Factory (Phase 2 — video) hoặc dọn nốt
+> brand cũ còn lại trong prompts/CTA.
 
 ---
 
@@ -126,10 +129,15 @@ kiểm tra viên gạch này TRƯỚC khi xây Production Factory từ đầu, t
 | LLM adapter (claude_code/api/mock) | ĐÃ CÓ | `agents/base.py`, `factory.py` |
 | Telegram notifier | ĐÃ CÓ (non-blocking) | `utils/telegram_notifier.py` |
 | Scheduler (crawl + draft, 1 tiến trình) | ĐÃ CÓ | `power_on.py`, `schedule.py` |
-| Renderer infographic (SVG, thủ công) | ĐÃ CÓ MỘT PHẦN, chưa wire, chưa brand | `render/infographic.py`, `scripts/render_infographic.py` |
+| Renderer infographic (SVG) — brand-kit wired | ĐÃ CÓ | `render/infographic.py` (`config/brand.yaml`, `config.load_brand()`) |
+| `ProductionSpec`/`ProductionScene`/`Violation` (schema trung lập vendor) | ĐÃ CÓ | `media_factory/spec.py` |
+| Chuẩn hoá số-chữ tiếng Việt (13,8 tỷ đọc bằng chữ) | ĐÃ CÓ | `media_factory/numbers.py` |
+| Guardrail lần 2 (`verify_spec`, TRƯỚC render, sau khi người sửa Gate 2) | ĐÃ CÓ | `media_factory/spec.py: verify_spec/build_spec_from_content` |
+| CONTENT.Facts/AssetPath/Gate3 (persist facts[] ra Sheet, KHÔNG data_root) | ĐÃ CÓ | `sheets_board.py` (`content_row`, `facts_to_json/facts_from_json`) |
+| Render + upsert asset theo TopicKey (idempotent) → Gate 3 | ĐÃ CÓ | `scripts/render_production_assets.py` |
 | Lớp 1–4, 6 (block ngày, khoá cột, sliding window, Manual adapter, validation tập trung) | **CHƯA XÂY** (GÁC, xem §5) | — |
-| Production Factory (media hoàn chỉnh: PNG/video) | **CHƯA XÂY** | — |
-| Gate 3 (duyệt Public) | **CHƯA XÂY** | — |
+| Production Factory — VIDEO (media hoàn chỉnh cho video, TTS/avatar) | **CHƯA XÂY** (Phase 2) | — |
+| PNG export (hiện chỉ SVG — quyết định #4 Phase 1.0, giữ SVG không Playwright) | **CHƯA XÂY**, xem `scripts/render_infographic.py` cũ (thủ công, tách biệt) | — |
 | Social/Phân phối (publisher thật) | **CHƯA XÂY** (chỉ `ConsolePublisher` stub) | `publishers/base.py` |
 | Story Clustering (StoryKey) | **CHƯA XÂY** (0 tham chiếu trong code) | — |
 | Web app (Vite+React/FastAPI) | **CHƯA XÂY** | — |
@@ -247,8 +255,14 @@ LLMClient.complete(system, prompt, *, model=None, fail_loud=False)   # mở rộ
   `Source`, `Timestamp`), **chừa `Approver`**, SA (service account) miễn protection. Khảo code:
   **0 dòng** liên quan `protectedRange`/`Approver` — cả 2 mô tả đều CHƯA XÂY, chi tiết-hơn của P5
   có thể là tinh chỉnh chưa kịp ghi vào P2, không hẳn mâu thuẫn — cần xác nhận khi mở lớp này.
-  Ngoài ra: **reader phải lấy `hyperlink` URI qua `spreadsheets.get`** để khôi phục Source bị
-  "title-chip hoá" — đã có sẵn hàm dùng lại được: `sheets_board.py: extract_cell_url()`,
+  **Cập nhật (Production Factory Phase 1.3):** CONTENT có thêm cột `Facts` (JSON facts[] snapshot)
+  — **MÁY-SỞ-HỮU, thuộc CÙNG nhóm khoá với `TopicKey`/`Source`/`Timestamp`** khi Lớp 2 mở (xem
+  comment `CONTENT_HEADER` trong `sheets_board.py`) — người KHÔNG được sửa tay cột này (nếu cần sửa
+  facts, phải re-route/re-brief, không gõ trực tiếp JSON). `AssetPath` cũng máy-sở-hữu (ghi bởi
+  `scripts/render_production_assets.py`) nhưng CHƯA xếp cùng nhóm khoá — cần xác nhận khi mở Lớp 2.
+  `Gate3` (dropdown APPROVE/PENDING/REJECT) là cột NGƯỜI, giống `Approve(gate 2)`/`Approver` —
+  KHÔNG khoá. Ngoài ra: **reader phải lấy `hyperlink` URI qua `spreadsheets.get`** để khôi phục
+  Source bị "title-chip hoá" — đã có sẵn hàm dùng lại được: `sheets_board.py: extract_cell_url()`,
   `is_title_chip()`, `fetch_context_source_cells()` (xây ở Fix (a), xem §7).
 - **Lớp 3 — Cửa sổ TRƯỢT 6 ngày làm việc** (bỏ CN, giữ T7, KHÔNG reset theo tuần lịch) + archive
   CONTEXT/CONTENT theo tuổi (**Manual theo tuổi AND Status=DONE**). Khớp P2 §11.3 (P2 không ghi rõ

@@ -1,0 +1,36 @@
+# config/brand.yaml — Brand kit MỘT NGUỒN (FVA Capital), TÁCH khỏi
+# config/settings.yaml có chủ đích (Production Factory Phase 1.2, quyết định
+# #4 — xem PROJECT_HANDOFF_P5.md): infographic (SVG, render/infographic.py)
+# và video (CSS template, Phase 2 sau) KHÔNG chung layout, CHỈ chung các token
+# ở file này (màu/font/wordmark/footer). Đổi màu/logo/tagline chỉ sửa Ở ĐÂY,
+# KHÔNG sửa code renderer nào. `render.infographic.*` trong settings.yaml vẫn
+# giữ KÍCH THƯỚC (width/height, layout) và có thể ghi đè từng token brand
+# riêng lẻ nếu 1 renderer cụ thể cần khác đi tạm thời.
+brand:
+  name: "FVA Capital"
+  tagline: "Tăng trưởng bền vững"
+
+  # Hiển thị trên ảnh khi CHƯA có file logo thật (xem logo_path bên dưới).
+  wordmark: "FVA CAPITAL"
+
+  # Đường dẫn asset logo (SVG hoặc PNG nền trong) — ĐỂ TRỐNG (null) cho tới khi
+  # logo thật được lưu vào đĩa (vd assets/brand/fva-logo-light.svg) rồi điền
+  # đường dẫn vào đây. render/infographic.py CHƯA đọc field này (Phase 1.2 chỉ
+  # wire text/màu; nhúng ảnh logo thật vào SVG là việc kế tiếp khi có file).
+  logo_path: null
+
+  # Màu ước theo logo đã nhận (nền navy đậm, chữ trắng bạc, nhấn vàng đồng) —
+  # CHƯA lấy mã hex CHÍNH XÁC từ file gốc (chỉ có ảnh xem qua chat, chưa có
+  # asset lưu đĩa để soi màu pixel-chính-xác). Cập nhật lại khi có file logo
+  # thật (vd dùng công cụ color-picker trên file gốc).
+  colors:
+    bg: "#0B1B2B"           # nền navy đậm
+    surface: "#132A3E"      # thẻ số liệu (nền phụ)
+    primary: "#C9973E"      # vàng đồng (nhấn số liệu/emphasis) — ước theo logo
+    text: "#F5F5F0"         # chữ chính (trắng ngà)
+    text_muted: "#9FB3C8"   # chữ phụ/nhạt hơn
+
+  font_family: "Arial, 'Segoe UI', sans-serif"
+
+  footer:
+    disclaimer: "Nội dung chỉ mang tính thông tin, không phải khuyến nghị đầu tư. Nhà đầu tư tự chịu trách nhiệm với quyết định của mình."
