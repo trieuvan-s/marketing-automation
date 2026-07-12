@@ -14,10 +14,13 @@ MÔ HÌNH THU THẬP 3 LỚP:
 
 Sau đó: classify (nhóm, tối đa 2 nhãn) + Field/Topic CHỈ theo TAXONOMY (keyword,
 KHÔNG dùng <category> thô RSS) + marketing_score + hotness_pct (curation/enrich.py,
-$0) + HookAgent(MockLLM) sinh hook ($0). UPSERT vào CONTEXT THEO URL: url ĐÃ CÓ
+$0) + HookAgent(MockLLM) sinh hook ($0). UPSERT vào CONTEXT THEO TopicKey (Fix (a)
+— membership đọc cột TopicKey TRÊN SHEET, KHÔNG phải Source-URL literal-match cũ,
+KHÔNG phải corpus cục bộ — bền qua nhiều máy/nhiều lượt crawl cho CÙNG 1 URL dù
+Source-text ghi ra khác nhau, xem SheetsBoard.upsert_context_rows): TopicKey ĐÃ CÓ
 -> BỎ QUA HOÀN TOÀN (giữ nguyên dòng cũ — Status/Execute/Hook/Notes không đổi,
-KHÔNG xoá/ghi đè); url CHƯA CÓ -> thêm dòng PENDING mới. Sắp lại TOÀN BẢNG theo
-Hot% giảm dần sau khi ghi. Nhật ký ghi tab LOG + console.
+KHÔNG xoá/ghi đè); TopicKey CHƯA CÓ -> thêm dòng PENDING mới. Sắp lại TOÀN BẢNG
+theo Hot% giảm dần sau khi ghi. Nhật ký ghi tab LOG + console.
 
 KHÔNG scale: bản nếm thử. Không gọi LLM đắt (MockLLM), không sinh nội dung.
 
@@ -237,8 +240,8 @@ def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False
         if debug and i == 0:
             _print_hook_debug(hook_agent)
         # Phase 1R.2 — WRITE-ONCE: dòng CONTEXT ở đây LUÔN LÀ MỚI (upsert_context_
-        # rows bỏ qua hoàn toàn url đã có, xem SheetsBoard.upsert_context_rows)
-        # nên existing_key luôn rỗng ("") — assign_topic_key() tính từ
+        # rows bỏ qua hoàn toàn TopicKey đã có, xem SheetsBoard.upsert_context_rows,
+        # Fix (a)) nên existing_key luôn rỗng ("") — assign_topic_key() tính từ
         # canonical_url (đã kiểm định — xem HttpFirstCollector.extract_canonical_
         # url) hoặc lùi về c.url; KHÔNG có URL hợp lệ -> gán SURROGATE uuid4
         # NGAY (KHÔNG còn để lại "" chờ backfill). Source (cột Sheet) VẪN ghi
@@ -250,16 +253,16 @@ def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False
             tickers=c.tickers, topic_key=assign_topic_key("", url=c.canonical_url or c.url))))
 
     scored_rows.sort(key=lambda x: x[0], reverse=True)   # thứ tự chèn (thứ tự cuối do sort_context_by_hot)
-    # UPSERT theo url: dòng ĐÃ CÓ giữ nguyên (không đụng Status/Execute/Hook/Notes
-    # người dùng đã sửa), dòng MỚI mới được thêm. Rồi sắp LẠI TOÀN BẢNG theo Hot%.
+    # UPSERT theo TopicKey (Fix (a)): dòng ĐÃ CÓ giữ nguyên (không đụng Status/
+    # Execute/Hook/Notes người dùng đã sửa), dòng MỚI mới được thêm. Rồi sắp LẠI
+    # TOÀN BẢNG theo Hot%.
     new_rows = board.upsert_context_rows([row for _, row in scored_rows])
     written = len(new_rows)
     board.sort_context_by_hot()
 
-    # PHASE 4.6: mỗi dòng CONTEXT thật sự MỚI (không phải url trùng bị bỏ qua)
-    # -> báo Telegram kèm link bài viết (Source = url gốc, có thể nhiều dòng
-    # nếu gộp sự kiện chéo nguồn -> lấy dòng ĐẦU = url chính, khớp primary_url()
-    # trong SheetsBoard.upsert_context_rows).
+    # PHASE 4.6: mỗi dòng CONTEXT thật sự MỚI (không phải TopicKey trùng bị bỏ
+    # qua, Fix (a)) -> báo Telegram kèm link bài viết (Source = url gốc, có thể
+    # nhiều dòng nếu gộp sự kiện chéo nguồn -> lấy dòng ĐẦU = url chính).
     for row in new_rows:
         topic = row[_I_CONTEXT] if _I_CONTEXT < len(row) else ""
         url = row[_I_SOURCE].splitlines()[0] if _I_SOURCE < len(row) and row[_I_SOURCE] else ""
@@ -273,7 +276,7 @@ def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False
     }
     board.log("INFO", f"TỔNG: crawled {totals['crawled']} / kept {totals['kept']} / "
                       f"cụm(gộp sự kiện chéo nguồn) {totals['clusters']} / stored {totals['stored']} / "
-                      f"CONTEXT +{totals['written']} dòng mới (url trùng đã bỏ qua) / "
+                      f"CONTEXT +{totals['written']} dòng mới (TopicKey trùng đã bỏ qua) / "
                       f"full-fetch lỗi {totals['full_fetch_failed']}",
               engine=engine)
     _print_summary(per_source, totals)
@@ -299,7 +302,7 @@ def _print_summary(per_source: list[dict], totals: dict) -> None:
     print(f"crawled {totals['crawled']} | kept(sau normalize) {totals['kept']} | "
           f"cụm duy nhất {totals['clusters']} | full-fetch lỗi {totals['full_fetch_failed']}")
     print(f"stored {totals['stored']} | CONTEXT +{totals['written']} dòng mới "
-          f"(url đã có trong CONTEXT giữ nguyên, không đụng)")
+          f"(TopicKey đã có trong CONTEXT giữ nguyên, không đụng)")
     u = totals.get("llm", {})
     n = totals["written"] or 1
     if totals.get("use_llm") and u.get("calls"):

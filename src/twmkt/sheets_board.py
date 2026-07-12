@@ -653,6 +653,81 @@ def backfill_content_topic_keys(
 
 
 # =====================================================================
+# Fix (a) Phase 2 — dọn dòng CONTEXT trùng TopicKey CŨ (dữ liệu TRƯỚC khi Fix
+# (a) Phase 1 chặn trùng mới ở upsert_context_rows). Dùng bởi scripts/
+# dedupe_context.py. Hàm THUẦN, test được không cần Sheet thật.
+# =====================================================================
+def find_duplicate_context_groups(header: list[str], rows: list[list[str]]) -> dict[str, list[int]]:
+    """{TopicKey: [số dòng Sheet 1-based, ...]} CHỈ cho TopicKey xuất hiện Ở
+    ÍT NHẤT 2 dòng. `rows` KHÔNG gồm header (rows[0] = dòng Sheet 2). TopicKey
+    rỗng bị bỏ qua (không tính là "trùng nhau", giống upsert_context_rows)."""
+    low = [h.strip().lower() for h in header]
+    if "topickey" not in low:
+        return {}
+    i_tk = low.index("topickey")
+    groups: dict[str, list[int]] = {}
+    for offset, r in enumerate(rows):
+        tk = r[i_tk].strip() if i_tk < len(r) else ""
+        if not tk:
+            continue
+        groups.setdefault(tk, []).append(offset + 2)
+    return {k: v for k, v in groups.items() if len(v) > 1}
+
+
+def _keep_rank(status: str, execute: str) -> int:
+    """Điểm ưu tiên GIỮ (cao hơn = ưu tiên giữ hơn): Execute=DONE (3) >
+    Status=APPROVE hoặc Execute=RUN (2) > còn lại/PENDING (1)."""
+    execute = (execute or "").strip().upper()
+    status = (status or "").strip().upper()
+    if execute == "DONE":
+        return 3
+    if status == "APPROVE" or execute == "RUN":
+        return 2
+    return 1
+
+
+def choose_keep_row(candidates: list[dict]) -> int:
+    """`candidates` = [{"row": int, "status": str, "execute": str,
+    "has_content": bool}, ...] CÙNG 1 TopicKey. Trả số dòng (1-based) nên GIỮ
+    theo quy tắc ưu tiên đã duyệt: rank(Execute=DONE > Status=APPROVE/Execute=
+    RUN > PENDING) giảm dần -> hoà thì có CONTENT con thắng -> hoà nữa thì
+    dòng nhỏ nhất (số dòng thấp nhất, xuất hiện sớm nhất)."""
+    best = max(candidates, key=lambda c: (_keep_rank(c["status"], c["execute"]),
+                                          bool(c["has_content"]), -c["row"]))
+    return best["row"]
+
+
+def extract_cell_url(cell: dict) -> str | None:
+    """URL THẬT gắn với 1 ô (CellData từ spreadsheets.get/fetch_sheet_metadata
+    với includeGridData=True), KHÔNG dựa formattedValue/get_all_values() —
+    Sheets có thể hiển thị TIÊU ĐỀ trong khi cell vẫn link tới URL thật
+    ("title-chip", quan sát THẬT trên board production: Source hiển thị tiêu
+    đề bài, nhưng hyperlink ẩn bên dưới là URL crawl gốc).
+    Ưu tiên `cell["hyperlink"]` (link áp cho CẢ ô — trường hợp phổ biến).
+    Fallback `cell["textFormatRuns"][i]["format"]["link"]["uri"]` (link áp cho
+    1 PHẦN chuỗi — quan sát THẬT trên board: 1 dòng có link nằm ở textFormatRuns
+    thay vì cell["hyperlink"], có thể do cách link được chèn khác nhau).
+    None nếu không tìm thấy URL nào (ô là text thuần, không link)."""
+    hl = cell.get("hyperlink")
+    if hl:
+        return hl
+    for run in cell.get("textFormatRuns") or []:
+        uri = ((run.get("format") or {}).get("link") or {}).get("uri")
+        if uri:
+            return uri
+    return None
+
+
+def is_title_chip(cell: dict, formatted_value: str) -> bool:
+    """True nếu ô CÓ url thật (extract_cell_url) NHƯNG KHÁC formattedValue —
+    dấu hiệu cột Source "nói dối" nếu đọc bằng get_all_values() (hiện chữ tiêu
+    đề, không phải URL). False nếu ô không có url (text thuần) HOẶC url TRÙNG
+    formattedValue (chip nhưng hiển thị đúng URL, không gây hiểu lầm)."""
+    url = extract_cell_url(cell)
+    return bool(url) and url.strip() != (formatted_value or "").strip()
+
+
+# =====================================================================
 # LỚP 5 Phase 2 — Upsert CONTENT theo khoá. INVARIANT (chốt của Lead): match-
 # or-insert TRA THEO CỘT TopicKey ĐÃ LƯU. TUYỆT ĐỐI không tra theo Source sống,
 # không theo chỉ số dòng. TopicKey KHÔNG nằm trong _CONTENT_MERGE_COLS nên
@@ -1356,6 +1431,84 @@ class SheetsBoard:
         ws.batch_update([{"range": f"{col_letter}{r}", "values": [[v]]}
                          for r, v in key_by_row.items()], value_input_option="RAW")
 
+    # --- Fix (a) Phase 2: dọn dòng CONTEXT trùng TopicKey cũ ------------
+    def fetch_context_source_cells(self, rows: list[int]) -> dict[int, dict]:
+        """{số dòng 1-based: CellData thô (formattedValue/hyperlink/
+        textFormatRuns)} cho cột Source của các dòng CONTEXT chỉ định — gọi
+        spreadsheets.get (KHÔNG phải get_all_values, vốn chỉ trả formattedValue,
+        thiếu hyperlink) để dedupe_context.py xác minh "title-chip" trước khi
+        xoá (xem sheets_board.extract_cell_url/is_title_chip). Rỗng -> {}."""
+        if not rows:
+            return {}
+        header = [h.strip().lower() for h in self._tab("CONTEXT").row_values(1)]
+        if "source" not in header:
+            return {}
+        col = _col_a1(header.index("source") + 1)
+        r0, r1 = min(rows), max(rows)
+        params = {
+            "ranges": [f"CONTEXT!{col}{r0}:{col}{r1}"],
+            "fields": "sheets.data.rowData.values(formattedValue,hyperlink,textFormatRuns)",
+            "includeGridData": True,
+        }
+        meta = self._spreadsheet().fetch_sheet_metadata(params=params)
+        data = meta.get("sheets", [{}])[0].get("data", [{}])[0].get("rowData", [])
+        out: dict[int, dict] = {}
+        for i, row_data in enumerate(data):
+            row_n = r0 + i
+            if row_n not in rows:
+                continue
+            values = row_data.get("values") or [{}]
+            out[row_n] = values[0] if values else {}
+        return out
+
+    def backup_tab(self, name: str, *, suffix: str) -> str:
+        """Sao chép TOÀN BỘ tab `name` (dữ liệu + định dạng) sang tab MỚI
+        "<name>_backup_<suffix>" TRƯỚC khi làm thao tác phá huỷ (Fix (a) Phase
+        2b). Idempotent: xoá bản backup TRÙNG TÊN nếu đã có (chạy --apply 2
+        lần cùng ngày không lỗi/không chồng — GHI ĐÈ backup cũ trong ngày bằng
+        bản mới nhất trước khi xoá thật). Trả tên tab backup vừa tạo."""
+        import gspread
+
+        sh = self._spreadsheet()
+        src = self._tab(name)
+        new_title = f"{name}_backup_{suffix}"
+        try:
+            old = sh.worksheet(new_title)
+            sh.del_worksheet(old)
+        except gspread.exceptions.WorksheetNotFound:
+            pass
+        new_ws = sh.duplicate_sheet(source_sheet_id=src.id, new_sheet_name=new_title)
+        return new_ws.title
+
+    def delete_context_rows(self, rows: list[int]) -> None:
+        """Xoá NHIỀU dòng CONTEXT (số dòng Sheet 1-based) 1 lượt batch_update.
+        Sắp XOÁ TỪ DƯỚI LÊN (số dòng giảm dần) trong CÙNG 1 batch — deleteDimension
+        áp dụng TUẦN TỰ theo thứ tự request; xoá dòng nhỏ trước sẽ làm lệch số
+        dòng lớn hơn chưa xoá, xoá từ dưới lên tránh mất đồng bộ index."""
+        if not rows:
+            return
+        ws = self._tab("CONTEXT")
+        sid = ws.id
+        reqs = [
+            {"deleteDimension": {"range": {"sheetId": sid, "dimension": "ROWS",
+                                           "startIndex": r - 1, "endIndex": r}}}
+            for r in sorted(set(rows), reverse=True)
+        ]
+        self._spreadsheet().batch_update({"requests": reqs})
+
+    def set_context_cell(self, row: int, col_name: str, value: str) -> None:
+        """Ghi 1 giá trị vào 1 ô CONTEXT (số dòng 1-based, tên cột KHÔNG phân
+        biệt hoa/thường) — dùng để "chép" URL thật (extract_cell_url) vào ô
+        Source của dòng GIỮ khi nó đang là title-chip (Fix (a) Phase 2b).
+        No-op nếu thiếu cột."""
+        ws = self._tab("CONTEXT")
+        header = [h.strip().lower() for h in ws.row_values(1)]
+        low = col_name.strip().lower()
+        if low not in header:
+            return
+        col_letter = _col_a1(header.index(low) + 1)
+        ws.update(f"{col_letter}{row}", [[value]], value_input_option="USER_ENTERED")
+
     def read_prompt_versions(self) -> dict[str, str]:
         """Đọc LIVE tab PROMPTS (Name|Version|Enable) -> {name: version} (chỉ hàng
         Enable bật). Rỗng/thiếu tab -> {} (agent dùng default nội bộ)."""
@@ -1397,23 +1550,34 @@ class SheetsBoard:
         return True
 
     def upsert_context_rows(self, rows: list[list[str]]) -> list[list[str]]:
-        """UPSERT NHIỀU dòng vào CONTEXT theo url (cột Source), 1 lượt (2 lệnh
-        gọi API): url ĐÃ CÓ -> BỎ QUA HOÀN TOÀN (giữ nguyên dòng cũ — Status/
-        Execute/Hook/Notes... không đổi); url CHƯA CÓ -> append. KHÔNG xoá/ghi
-        đè dòng đã có (khác replace_context cũ đã bỏ). `rows` phải ĐÚNG thứ tự
-        CONTEXT_HEADER (dùng context_row). Trả CHÍNH CÁC DÒNG MỚI đã ghi (KHÔNG
-        chỉ đếm số lượng — Phase 4.6: review_to_sheet.py cần Context/Source của
-        từng dòng mới để bắn notify kèm link bài viết); `len(...)` thay cho số
-        đếm cũ nếu chỉ cần đếm."""
+        """UPSERT NHIỀU dòng vào CONTEXT theo TopicKey (Fix (a) — membership đọc
+        cột TopicKey TRÊN SHEET, KHÔNG phải Source-URL literal-match cũ và
+        KHÔNG phải corpus cục bộ), 1 lượt (2 lệnh gọi API):
+          - TopicKey ĐÃ CÓ trên Sheet -> BỎ QUA HOÀN TOÀN, KHÔNG ghi cột nào
+            (giữ nguyên TOÀN BỘ dòng cũ — Status/Execute/Hook/Notes/Hot%/Score...
+            — chính sách đã chốt, xem PR "Fix (a)").
+          - TopicKey CHƯA CÓ -> append.
+        Lý do đổi từ Source-URL literal-match: 2 lượt crawl (vd 2 máy khác nhau,
+        hoặc dữ liệu cũ trước khi convention "Source=URL" chuẩn hoá) có thể ghi
+        Source-text KHÁC NHAU cho CÙNG 1 chủ đề (khác domain mirror, hoặc dòng
+        cũ Source=tiêu đề thay vì URL) — literal-match BỎ SÓT, tạo dòng trùng dù
+        TopicKey (hash URL canonical) giống hệt. `rows` phải ĐÚNG thứ tự
+        CONTEXT_HEADER (dùng context_row, PHẢI có topic_key khác rỗng — xem
+        curation.keys.assign_topic_key; topic_key rỗng KHÔNG BAO GIỜ coi là
+        trùng dòng khác, kể cả dòng khác cũng rỗng -> luôn append, an toàn
+        nghiêng về không mất dữ liệu). KHÔNG xoá/ghi đè dòng đã có (khác
+        replace_context cũ đã bỏ). Trả CHÍNH CÁC DÒNG MỚI đã ghi (KHÔNG chỉ đếm
+        số lượng — Phase 4.6: review_to_sheet.py cần Context/Source của từng
+        dòng mới để bắn notify kèm link bài viết); `len(...)` thay cho số đếm
+        cũ nếu chỉ cần đếm."""
         ws = self._tab("CONTEXT")
-        existing_urls = self._context_urls(ws)
-        i_src = [h.strip().lower() for h in CONTEXT_HEADER].index("source")
+        existing_keys = self._context_topic_keys(ws)
+        i_tk = [h.strip().lower() for h in CONTEXT_HEADER].index("topickey")
 
-        def primary_url(row: list[str]) -> str:
-            # ô Source có thể gộp "<url>\n(+N báo)\n<url2>..." -> url ĐẦU là chính.
-            return row[i_src].splitlines()[0].strip() if i_src < len(row) else ""
+        def topic_key_of(row: list[str]) -> str:
+            return row[i_tk].strip() if i_tk < len(row) else ""
 
-        new_rows = [r for r in rows if primary_url(r) and primary_url(r) not in existing_urls]
+        new_rows = [r for r in rows if not topic_key_of(r) or topic_key_of(r) not in existing_keys]
         if new_rows:
             ws.append_rows(new_rows, value_input_option="USER_ENTERED")
         return new_rows
@@ -1469,7 +1633,9 @@ class SheetsBoard:
 
     def _context_urls(self, ws) -> set[str]:
         """Tập url đã có ở tab CONTEXT (ánh xạ theo tên cột 'source'; ô Source
-        có thể gộp "<url>\\n(+N báo)\\n..." -> chỉ tính url ĐẦU/chính)."""
+        có thể gộp "<url>\\n(+N báo)\\n..." -> chỉ tính url ĐẦU/chính). Dùng bởi
+        write_context() (đơn dòng) — upsert_context_rows() dùng
+        _context_topic_keys() (Fix (a), xem docstring ở đó)."""
         rows = ws.get_all_values()
         if not rows:
             return set()
@@ -1478,6 +1644,20 @@ class SheetsBoard:
             return set()
         i = header.index("source")
         return {r[i].splitlines()[0].strip() for r in rows[1:] if i < len(r) and r[i].strip()}
+
+    def _context_topic_keys(self, ws) -> set[str]:
+        """Tập TopicKey đã có ở tab CONTEXT — membership đọc TRỰC TIẾP TỪ SHEET
+        (Fix (a)), KHÔNG phải corpus cục bộ (file_store — corpus chỉ giữ vai
+        trò evidence, xem curation/keys.py). Khoá rỗng KHÔNG được tính (không
+        coi 2 dòng cùng thiếu khoá là "trùng nhau")."""
+        rows = ws.get_all_values()
+        if not rows:
+            return set()
+        header = [c.strip().lower() for c in rows[0]]
+        if "topickey" not in header:
+            return set()
+        i = header.index("topickey")
+        return {r[i].strip() for r in rows[1:] if i < len(r) and r[i].strip()}
 
     def context_titles(self) -> list[str]:
         """Danh sách tiêu đề (cột Context) đã có trong CONTEXT — dùng để lọc

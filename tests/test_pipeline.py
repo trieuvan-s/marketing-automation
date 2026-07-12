@@ -1564,21 +1564,27 @@ class _FakeContextWS:
 
 
 def test_upsert_context_rows_skips_existing_url_appends_new():
-    """upsert_context_rows: url ĐÃ CÓ -> bỏ qua HOÀN TOÀN (dòng cũ y nguyên,
-    không tạo dòng trùng); url CHƯA CÓ -> append. Trả số dòng MỚI (không tính
-    dòng bị bỏ qua)."""
+    """upsert_context_rows (Fix (a)): TopicKey ĐÃ CÓ -> bỏ qua HOÀN TOÀN (dòng
+    cũ y nguyên, không tạo dòng trùng) DÙ Source-text khác nhau (membership =
+    TopicKey, không phải Source-URL literal); TopicKey CHƯA CÓ -> append. Trả
+    số dòng MỚI (không tính dòng bị bỏ qua)."""
     from twmkt.sheets_board import SheetsBoard, CONTEXT_HEADER, context_row
 
     board = SheetsBoard(spreadsheet_id="X", creds_path="Y")
     existing = context_row(title="Đã duyệt", hook_line="h", source_url="http://u/1",
-                           score=5, hot_pct=10.0, status="APPROVE", execute="RUN")
+                           score=5, hot_pct=10.0, status="APPROVE", execute="RUN",
+                           topic_key="tk-1")
     ws = _FakeContextWS([CONTEXT_HEADER, list(existing)])
     board._ws["CONTEXT"] = ws
 
-    dup = context_row(title="Crawl lại — url trùng", hook_line="h2", source_url="http://u/1",
-                      score=99, hot_pct=99.0)   # điểm/nội dung KHÁC nhưng CÙNG url
+    # dup: CÙNG topic_key nhưng Source-text KHÁC (mô phỏng bug thật quan sát
+    # trên Sheet: dòng cũ Source=tiêu đề, dòng mới Source=URL/domain khác) ->
+    # VẪN phải bị coi là trùng (membership = TopicKey, không phải Source).
+    dup = context_row(title="Crawl lại — topic trùng", hook_line="h2",
+                      source_url="http://u/1-mirror-khac", score=99, hot_pct=99.0,
+                      topic_key="tk-1")
     new = context_row(title="Bài mới", hook_line="h3", source_url="http://u/2",
-                      score=2, hot_pct=2.0)
+                      score=2, hot_pct=2.0, topic_key="tk-2")
     written = board.upsert_context_rows([dup, new])
 
     assert written == [new]                     # trả CHÍNH dòng mới (không phải chỉ đếm)
@@ -1589,19 +1595,97 @@ def test_upsert_context_rows_skips_existing_url_appends_new():
 
 
 def test_upsert_context_rows_called_twice_no_duplicate():
-    """Gọi upsert_context_rows 2 LẦN với CÙNG 1 dòng (mô phỏng crawl lại) ->
-    lần 2 KHÔNG tạo thêm dòng nào."""
+    """Gọi upsert_context_rows 2 LẦN với CÙNG 1 topic_key (mô phỏng crawl lại)
+    -> lần 2 KHÔNG tạo thêm dòng nào."""
     from twmkt.sheets_board import SheetsBoard, CONTEXT_HEADER, context_row
 
     board = SheetsBoard(spreadsheet_id="X", creds_path="Y")
     ws = _FakeContextWS([list(CONTEXT_HEADER)])
     board._ws["CONTEXT"] = ws
 
-    row = context_row(title="Bài A", hook_line="h", source_url="http://u/1", score=1, hot_pct=1.0)
+    row = context_row(title="Bài A", hook_line="h", source_url="http://u/1", score=1,
+                      hot_pct=1.0, topic_key="tk-a")
     r1 = board.upsert_context_rows([row])
-    r2 = board.upsert_context_rows([row])          # "crawl lại" cùng url
+    r2 = board.upsert_context_rows([row])          # "crawl lại" cùng topic_key
     assert len(r1) == 1 and len(r2) == 0
     assert len(ws._v) == 2                          # header + đúng 1 dòng, KHÔNG trùng
+
+
+def test_upsert_context_rows_two_independent_machines_same_url_dedup_via_topic_key():
+    """Fix (a) — mô phỏng 2 MÁY crawl ĐỘC LẬP (corpus cục bộ riêng/rỗng mỗi máy,
+    KHÔNG liên quan tới quyết định này) cùng 1 URL vào CÙNG Sheet -> đúng 1
+    dòng CONTEXT, 0 trùng — dù Source-text ghi ra khác nhau giữa 2 lượt (đúng
+    bug thật đã quan sát trên Sheet production: dòng cũ Source=tiêu đề, dòng
+    mới Source=URL thật). TopicKey tính ĐỘC LẬP ở mỗi máy (assign_topic_key("",
+    url=...) — existing_key="" vì máy nào cũng coi đây là ứng viên MỚI, không
+    tra cứu chéo máy) nhưng ra CÙNG khoá vì CÙNG URL -> dedup đúng qua Sheet."""
+    from twmkt.curation.keys import assign_topic_key
+    from twmkt.sheets_board import SheetsBoard, CONTEXT_HEADER, context_row
+
+    url = "https://cafef.vn/bai-that-nhap-sieu.chn"
+
+    # Máy 1 (văn phòng): tính topic_key từ URL, Source ghi = tiêu đề (bug thật
+    # quan sát ở dữ liệu cũ).
+    tk_office = assign_topic_key("", url=url)
+    row_office = context_row(title="Nhập siêu 13,8 tỷ USD", hook_line="h",
+                             source_url="Nhập siêu 13,8 tỷ USD sau 5 tháng",
+                             score=1, hot_pct=1.0, topic_key=tk_office)
+    board = SheetsBoard(spreadsheet_id="X", creds_path="Y")
+    ws = _FakeContextWS([list(CONTEXT_HEADER)])
+    board._ws["CONTEXT"] = ws
+    board.upsert_context_rows([row_office])
+
+    # Máy 2 (nhà, corpus rỗng — KHÔNG đọc corpus/state của máy 1): tính
+    # topic_key ĐỘC LẬP từ CÙNG URL, Source ghi = URL thật (convention mới).
+    tk_home = assign_topic_key("", url=url)
+    row_home = context_row(title="Nhập siêu 13,8 tỷ USD", hook_line="h",
+                           source_url=url, score=1, hot_pct=1.0, topic_key=tk_home)
+    written = board.upsert_context_rows([row_home])
+
+    assert tk_office == tk_home                    # cùng URL -> cùng khoá dù tính độc lập
+    assert written == []                            # bị coi là trùng, KHÔNG chèn thêm
+    assert len(ws._v) == 2                           # header + đúng 1 dòng (của máy 1)
+    assert ws._v[1] == list(row_office)               # dòng máy 1 Y NGUYÊN, không bị đè
+
+
+def test_upsert_context_rows_match_does_not_touch_any_column():
+    """Chính sách đã chốt (Fix (a) Phase 1): MATCH -> KHÔNG ghi cột nào, kể cả
+    Hot%/Score — giữ nguyên TOÀN BỘ dòng cũ, đúng hành vi hiện tại (KHÔNG có
+    refresh Hot%/Score)."""
+    from twmkt.sheets_board import SheetsBoard, CONTEXT_HEADER, context_row
+
+    board = SheetsBoard(spreadsheet_id="X", creds_path="Y")
+    existing = context_row(title="Đã duyệt", hook_line="h cũ", source_url="http://u/1",
+                           score=5, hot_pct=10.0, status="APPROVE", execute="DONE",
+                           topic_key="tk-1")
+    ws = _FakeContextWS([CONTEXT_HEADER, list(existing)])
+    board._ws["CONTEXT"] = ws
+
+    # Crawl lại: Hot%/Score/Hook/Status/Execute đều KHÁC -> vẫn phải bị bỏ qua
+    # HOÀN TOÀN, không cột nào trong dòng cũ bị đổi.
+    resurvey = context_row(title="Đã duyệt", hook_line="h MỚI", source_url="http://u/1-khac",
+                           score=999, hot_pct=88.8, status="PENDING", execute="",
+                           topic_key="tk-1")
+    written = board.upsert_context_rows([resurvey])
+
+    assert written == []
+    assert ws._v[1] == list(existing)   # TOÀN BỘ dòng cũ y nguyên, kể cả Hot%/Score
+
+
+def test_upsert_context_rows_empty_topic_key_never_dedupes_always_appends():
+    """topic_key rỗng (không nên xảy ra nếu caller dùng assign_topic_key, phòng
+    hờ) -> KHÔNG BAO GIỜ coi là trùng dòng khác (kể cả dòng khác cũng rỗng) ->
+    LUÔN append. An toàn nghiêng về không mất dữ liệu."""
+    from twmkt.sheets_board import SheetsBoard, CONTEXT_HEADER, context_row
+
+    board = SheetsBoard(spreadsheet_id="X", creds_path="Y")
+    ws = _FakeContextWS([list(CONTEXT_HEADER)])
+    board._ws["CONTEXT"] = ws
+
+    row1 = context_row(title="A", hook_line="h", source_url="http://u/1", score=1, hot_pct=1.0)
+    row2 = context_row(title="B", hook_line="h", source_url="http://u/2", score=1, hot_pct=1.0)
+    written = board.upsert_context_rows([row1, row2])
+    assert len(written) == 2   # cả 2 đều append dù topic_key rỗng ở cả 2
 
 
 def test_sync_approve_execute_flags_sets_run_only_for_empty_execute():
@@ -2016,6 +2100,109 @@ def test_content_topic_keys_blank_topickey_row_excluded_reported_as_missing():
     keys, missing = content_topic_keys(CONTENT_HEADER, rows)
     assert keys == set()
     assert missing == ["Bài cũ chưa backfill", "Bài cũ chưa backfill"]
+
+
+# --- Fix (a) Phase 2: dedupe_context.py (dọn dòng CONTEXT trùng TopicKey cũ) ---
+def test_find_duplicate_context_groups_finds_only_topic_keys_with_2plus_rows():
+    from twmkt.sheets_board import CONTEXT_HEADER, context_row, find_duplicate_context_groups
+
+    rows = [
+        context_row(title="A", hook_line="h", source_url="u1", score=1, hot_pct=1.0, topic_key="tk-1"),
+        context_row(title="B", hook_line="h", source_url="u2", score=1, hot_pct=1.0, topic_key="tk-2"),
+        context_row(title="A lại", hook_line="h", source_url="u3", score=1, hot_pct=1.0, topic_key="tk-1"),
+        context_row(title="C", hook_line="h", source_url="u4", score=1, hot_pct=1.0, topic_key=""),  # rỗng -> bỏ qua
+    ]
+    groups = find_duplicate_context_groups(CONTEXT_HEADER, rows)
+    assert groups == {"tk-1": [2, 4]}   # dòng Sheet 1-based (rows[0]=dòng 2)
+
+
+def test_choose_keep_row_priority_execute_done_beats_approve_run_beats_pending():
+    from twmkt.sheets_board import choose_keep_row
+
+    # Đúng kịch bản thật quan sát: dòng 5 (APPROVE/DONE) vs dòng 11 (PENDING/rỗng).
+    candidates = [
+        {"row": 5, "status": "APPROVE", "execute": "DONE", "has_content": True},
+        {"row": 11, "status": "PENDING", "execute": "", "has_content": False},
+    ]
+    assert choose_keep_row(candidates) == 5
+
+    # Dòng 7 (PENDING/RUN) vs dòng 14 (PENDING/rỗng) — RUN > rỗng dù cùng Status.
+    candidates2 = [
+        {"row": 7, "status": "PENDING", "execute": "RUN", "has_content": False},
+        {"row": 14, "status": "PENDING", "execute": "", "has_content": False},
+    ]
+    assert choose_keep_row(candidates2) == 7
+
+
+def test_choose_keep_row_tiebreak_has_content_then_lowest_row():
+    from twmkt.sheets_board import choose_keep_row
+
+    # Hoà rank (cả 2 PENDING/rỗng) -> có CONTENT con thắng.
+    candidates = [
+        {"row": 20, "status": "PENDING", "execute": "", "has_content": True},
+        {"row": 3, "status": "PENDING", "execute": "", "has_content": False},
+    ]
+    assert choose_keep_row(candidates) == 20
+
+    # Hoà cả rank lẫn has_content -> dòng nhỏ nhất thắng.
+    candidates2 = [
+        {"row": 9, "status": "PENDING", "execute": "", "has_content": False},
+        {"row": 4, "status": "PENDING", "execute": "", "has_content": False},
+    ]
+    assert choose_keep_row(candidates2) == 4
+
+
+def test_extract_cell_url_prefers_hyperlink_falls_back_to_text_format_runs():
+    from twmkt.sheets_board import extract_cell_url
+
+    assert extract_cell_url({"hyperlink": "https://a.vn/x"}) == "https://a.vn/x"
+    # Dòng 8 thật (production): hyperlink=None, link nằm trong textFormatRuns.
+    cell_run = {"hyperlink": None,
+               "textFormatRuns": [{"format": {"link": {"uri": "https://b.vn/y"}}}]}
+    assert extract_cell_url(cell_run) == "https://b.vn/y"
+    assert extract_cell_url({}) is None
+    assert extract_cell_url({"textFormatRuns": [{"format": {}}]}) is None
+
+
+def test_is_title_chip_true_when_hyperlink_differs_from_display_text():
+    from twmkt.sheets_board import is_title_chip
+
+    # Đúng dòng 5 thật: hiển thị tiêu đề, href là URL khác -> title-chip.
+    cell = {"hyperlink": "https://cafebiz.vn/nhap-sieu-that.chn"}
+    assert is_title_chip(cell, "Nhập siêu 13,8 tỷ USD sau 5 tháng") is True
+    # Đúng dòng 11 thật: hiển thị CHÍNH URL đó -> KHÔNG phải title-chip (dù có hyperlink).
+    assert is_title_chip(cell, "https://cafebiz.vn/nhap-sieu-that.chn") is False
+    # Không có hyperlink -> không phải chip.
+    assert is_title_chip({}, "bất kỳ") is False
+
+
+def test_build_plan_matches_real_production_scenario():
+    """Mô phỏng ĐÚNG kịch bản thật trên board: 2 nhóm trùng (5&11, 7&14) ->
+    build_plan() phải chọn giữ 5 và 7, xoá 11 và 14 (khớp Phase 0 dry-run)."""
+    import os
+    import sys as _sys
+    REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    _sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+    import dedupe_context as dc
+    from twmkt.sheets_board import CONTEXT_HEADER, context_row
+
+    rows = [
+        context_row(title="A", hook_line="h", source_url="u", score=1, hot_pct=1.0,
+                   status="PENDING", execute="RUN", topic_key="tk-a"),          # dòng 2
+        context_row(title="B", hook_line="h", source_url="u", score=1, hot_pct=1.0,
+                   status="APPROVE", execute="DONE", topic_key="tk-b"),         # dòng 3 (GIỮ, nhóm b)
+        context_row(title="C", hook_line="h", source_url="u", score=1, hot_pct=1.0,
+                   status="PENDING", execute="RUN", topic_key="tk-c"),          # dòng 4 (GIỮ, nhóm c)
+        context_row(title="B lại", hook_line="h", source_url="u", score=1, hot_pct=1.0,
+                   status="PENDING", execute="", topic_key="tk-b"),             # dòng 5 (XOÁ)
+        context_row(title="C lại", hook_line="h", source_url="u", score=1, hot_pct=1.0,
+                   status="PENDING", execute="", topic_key="tk-c"),             # dòng 6 (XOÁ)
+    ]
+    plan = dc.build_plan(CONTEXT_HEADER, rows, content_keys=set())
+    by_key = {g["topic_key"]: g for g in plan}
+    assert by_key["tk-b"]["keep"] == 3 and by_key["tk-b"]["delete"] == [5]
+    assert by_key["tk-c"]["keep"] == 4 and by_key["tk-c"]["delete"] == [6]
+    assert "tk-a" not in by_key   # không trùng -> không nằm trong kế hoạch
 
 
 def test_group_content_rows_groups_by_context_preserves_order():
