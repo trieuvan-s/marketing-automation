@@ -1,0 +1,122 @@
+{
+  "slug": "nhap_sieu",
+  "url": "https://cafebiz.vn/nhap-sieu-138-ty-usd-sau-5-thang-chuyen-gia-cho-biet-dau-hieu-da-xuat-hien-tu-2-nam-truoc-17626061208405646.chn",
+  "title": "Nhập siêu 13,8 tỷ USD sau 5 tháng: Chuyên gia cho biết dấu hiệu đã xuất hiện từ 2 năm trước",
+  "curator": "human, đọc thủ công toàn bài — KHÔNG phải output model",
+  "fact_count": 14,
+  "facts": [
+    {
+      "kind": "scalar",
+      "value": "11/6",
+      "unit": null,
+      "label": "Ngày diễn ra phiên thảo luận Vietnam Investment Forum - Summer Summit",
+      "approx": false,
+      "source_sentence": "Tại phiên thảo luận “Vĩ mô 2026 - Việt Nam trước các cú sốc bên ngoài và cơ hội bên trong” trong khuôn khổ Vietnam Investment Forum - Summer Summit hôm 11/6, các chuyên gia đã dành nhiều thời gian phân tích diễn biến nhập siêu gia tăng, khả năng hấp thụ dòng vốn FDI cũng như những giải pháp giúp Việt Nam nâng cao vị thế trong chuỗi giá trị toàn cầu."
+    },
+    {
+      "kind": "scalar",
+      "value": "445",
+      "unit": "tỷ USD",
+      "label": "Tổng kim ngạch xuất nhập khẩu Việt Nam 5 tháng đầu năm",
+      "approx": true,
+      "source_sentence": "Dẫn số liệu 5 tháng đầu năm, ông cho biết tổng kim ngạch xuất nhập khẩu của Việt Nam đạt khoảng 445 tỷ USD."
+    },
+    {
+      "kind": "range",
+      "value_low": "225",
+      "value_high": "226",
+      "unit": "tỷ USD",
+      "label": "Giá trị nhập khẩu 5 tháng đầu năm",
+      "approx": true,
+      "source_sentence": "Trong đó, nhập khẩu vào khoảng 225 - 226 tỷ USD, dẫn tới mức nhập siêu khoảng 13,8 tỷ USD."
+    },
+    {
+      "kind": "scalar",
+      "value": "13,8",
+      "unit": "tỷ USD",
+      "label": "Mức nhập siêu 5 tháng đầu năm",
+      "approx": true,
+      "source_sentence": "Trong đó, nhập khẩu vào khoảng 225 - 226 tỷ USD, dẫn tới mức nhập siêu khoảng 13,8 tỷ USD."
+    },
+    {
+      "kind": "scalar",
+      "value": "4",
+      "unit": "năm",
+      "label": "Số năm dữ liệu xuất nhập khẩu nhóm nghiên cứu đã thống kê",
+      "approx": false,
+      "source_sentence": "Theo ông Hiếu, từ đầu năm ngoái, nhóm nghiên cứu đã tiến hành thống kê số liệu xuất nhập khẩu của Việt Nam trong vòng 4 năm và nhận thấy một xu hướng đáng chú ý: tổng kim ngạch thương mại vẫn tăng trưởng nhưng thặng dư thương mại lại giảm dần theo thời gian."
+    },
+    {
+      "kind": "scalar",
+      "value": "10",
+      "unit": "%",
+      "label": "Tăng trưởng vốn FDI đăng ký 5 tháng đầu năm so với cùng kỳ",
+      "approx": true,
+      "source_sentence": "Mặc dù bức tranh FDI trong 5 tháng đầu năm ghi nhận nhiều tín hiệu tích cực khi vốn đăng ký tăng khoảng 10% so với cùng kỳ năm trước, mức cao nhất trong vòng 5 năm trở lại đây."
+    },
+    {
+      "kind": "scalar",
+      "value": "5",
+      "unit": "năm",
+      "label": "Khung thời gian mức tăng vốn FDI đăng ký đạt cao nhất (ranking)",
+      "approx": false,
+      "source_sentence": "Mặc dù bức tranh FDI trong 5 tháng đầu năm ghi nhận nhiều tín hiệu tích cực khi vốn đăng ký tăng khoảng 10% so với cùng kỳ năm trước, mức cao nhất trong vòng 5 năm trở lại đây."
+    },
+    {
+      "kind": "scalar",
+      "value": "83",
+      "unit": "%",
+      "label": "Tỷ trọng vốn FDI đăng ký tập trung vào lĩnh vực chế biến, chế tạo",
+      "approx": true,
+      "source_sentence": "Đáng chú ý, khoảng 83% lượng vốn đăng ký tập trung vào lĩnh vực chế biến, chế tạo, cho thấy Việt Nam vẫn giữ vai trò quan trọng trong chuỗi cung ứng toàn cầu."
+    },
+    {
+      "kind": "scalar",
+      "value": "5",
+      "unit": "năm",
+      "label": "Thời hạn của kế hoạch phát triển kinh tế - xã hội đề cập chiến lược xuất nhập khẩu mới",
+      "approx": false,
+      "source_sentence": "Ông cho biết trong Nghị quyết về kế hoạch phát triển kinh tế - xã hội 5 năm đã đề cập đến việc xây dựng lại chiến lược xuất nhập khẩu quốc gia."
+    },
+    {
+      "kind": "range",
+      "value_low": "2026",
+      "value_high": "2035",
+      "unit": null,
+      "label": "Giai đoạn Chương trình đổi mới sáng tạo",
+      "approx": false,
+      "source_sentence": "Bên cạnh đó, mục tiêu hình thành thêm nhiều doanh nghiệp tư nhân quy mô lớn song hành với khu vực FDI cùng Chương trình đổi mới sáng tạo giai đoạn 2026 - 2035 được kỳ vọng sẽ tạo nền tảng cho chiến lược cạnh tranh quốc gia trong giai đoạn tới."
+    },
+    {
+      "kind": "entity",
+      "value": "Nghị quyết 57",
+      "label": "Nghị quyết của Bộ Chính trị về khoa học, công nghệ và đổi mới sáng tạo",
+      "source_sentence": "Ông đánh giá cao các chủ trương mới của Bộ Chính trị, trong đó có Nghị quyết 57 về khoa học, công nghệ và đổi mới sáng tạo nhằm tháo gỡ những điểm nghẽn hiện nay."
+    },
+    {
+      "kind": "entity",
+      "value": "CTCP Chứng khoán Sài Gòn - Hà Nội (SHS)",
+      "label": "Công ty chứng khoán được trích dẫn nhận định",
+      "source_sentence": "Liên quan đến con số nhập siêu 13,8 tỷ USD, ông Nguyễn Duy Linh, Tổng Giám đốc CTCP Chứng khoán Sài Gòn - Hà Nội (SHS), cho rằng có hai nguyên nhân chính."
+    },
+    {
+      "kind": "entity_list",
+      "entities": [
+        "TS. Phan Đức Hiếu (Ủy viên Thường trực Ủy ban Kinh tế và Tài chính Quốc hội khóa XVI)",
+        "Nguyễn Duy Linh (Tổng Giám đốc SHS)"
+      ],
+      "label": "Chuyên gia phát biểu tại phiên thảo luận",
+      "source_sentence": "TS. Phan Đức Hiếu, Ủy viên Thường trực Ủy ban Kinh tế và Tài chính của Quốc hội khóa XVI, Đại biểu Quốc hội khóa XVI, cho biết những lo ngại về xu hướng suy giảm thặng dư thương mại thực tế đã xuất hiện từ khá sớm."
+    },
+    {
+      "kind": "entity",
+      "value": "Vietnam Investment Forum - Summer Summit",
+      "label": "Sự kiện diễn ra phiên thảo luận",
+      "source_sentence": "Tại phiên thảo luận “Vĩ mô 2026 - Việt Nam trước các cú sốc bên ngoài và cơ hội bên trong” trong khuôn khổ Vietnam Investment Forum - Summer Summit hôm 11/6, các chuyên gia đã dành nhiều thời gian phân tích diễn biến nhập siêu gia tăng, khả năng hấp thụ dòng vốn FDI cũng như những giải pháp giúp Việt Nam nâng cao vị thế trong chuỗi giá trị toàn cầu."
+    }
+  ],
+  "excluded_borderline": [
+    "'giai đoạn 2024 - 2025' (khi nhóm bắt đầu lo ngại) mang tính định tính/hồi tưởng hơn là 1 mốc dữ liệu độc lập — không tách riêng, tránh đếm trùng ý với fact 4-năm dữ liệu ở trên."
+  ],
+  "topic_key": "b63ad00e9fd6e8af"
+}

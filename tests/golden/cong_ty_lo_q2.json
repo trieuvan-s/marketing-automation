@@ -1,0 +1,176 @@
+{
+  "slug": "cong_ty_lo_q2",
+  "url": "https://cafef.vn/cong-ty-dau-tien-bao-lo-quy-2-2026-188260711065804797.chn",
+  "title": "Công ty đầu tiên báo lỗ quý 2/2026",
+  "curator": "human, đọc thủ công toàn bài — KHÔNG phải output model",
+  "note": "Bài GIÀU delta (from→to) nhất trong golden set — ưu tiên dùng để chấm kind=delta ở Phase 3.",
+  "fact_count": 20,
+  "facts": [
+    {
+      "kind": "entity",
+      "value": "JOS",
+      "label": "Mã chứng khoán công ty",
+      "source_sentence": "Mã liên quan: JOS. Công ty Cổ phần Chế biến Thủy sản Xuất khẩu Minh Hải (mã CK: JOS) vừa công bố báo cáo tài chính quý 2/2026 với kết quả kinh doanh tiếp tục ảm đạm."
+    },
+    {
+      "kind": "entity",
+      "value": "Công ty Cổ phần Chế biến Thủy sản Xuất khẩu Minh Hải",
+      "label": "Tên đầy đủ công ty",
+      "source_sentence": "Mã liên quan: JOS. Công ty Cổ phần Chế biến Thủy sản Xuất khẩu Minh Hải (mã CK: JOS) vừa công bố báo cáo tài chính quý 2/2026 với kết quả kinh doanh tiếp tục ảm đạm."
+    },
+    {
+      "kind": "delta",
+      "from_value": "16,3 tỷ đồng",
+      "to_value": "hơn 176 triệu đồng",
+      "unit": null,
+      "label": "Doanh thu thuần quý 2 (quý 2/2025 → quý 2/2026)",
+      "approx": false,
+      "source_sentence": "Theo báo cáo kết quả hoạt động kinh doanh, doanh thu thuần về bán hàng và cung cấp dịch vụ của JOS trong quý 2/2026 chỉ đạt hơn 176 triệu đồng, giảm sâu so với mức 16,3 tỷ đồng của cùng kỳ năm 2025."
+    },
+    {
+      "kind": "delta",
+      "from_value": "hơn 23 tỷ đồng",
+      "to_value": "khoảng 815 triệu đồng",
+      "unit": null,
+      "label": "Tổng doanh thu lũy kế 6 tháng đầu năm (nửa đầu 2025 → nửa đầu 2026)",
+      "approx": true,
+      "source_sentence": "Tính chung lũy kế 6 tháng đầu năm 2026, tổng doanh thu của công ty đạt khoảng 815 triệu đồng, trong khi con số này ở nửa đầu năm 2025 là hơn 23 tỷ đồng."
+    },
+    {
+      "kind": "delta",
+      "from_value": "12,6 tỷ đồng",
+      "to_value": "9,34 tỷ đồng",
+      "unit": null,
+      "label": "Khoản lỗ sau thuế quý 2 (quý 2/2025 → quý 2/2026, lỗ đã thu hẹp)",
+      "approx": false,
+      "source_sentence": "Trong quý 2/2026, JOS ghi nhận khoản lỗ sau thuế thu nhập doanh nghiệp là 9,34 tỷ đồng. Con số này đã cải thiện đáng kể so với mức lỗ 12,6 tỷ đồng của quý 2 năm trước."
+    },
+    {
+      "kind": "scalar",
+      "value": "9,3",
+      "unit": "tỷ đồng",
+      "label": "Chi phí tài chính quý 2/2026 (toàn bộ là lãi vay)",
+      "approx": false,
+      "source_sentence": "Công ty cho biết, nguyên nhân chính dẫn đến kết quả này đến từ việc chi phí tài chính vẫn duy trì ở mức cao, cụ thể là 9,3 tỷ đồng trong quý 2/2026, toàn bộ là chi phí lãi vay."
+    },
+    {
+      "kind": "scalar",
+      "value": "30/06/2026",
+      "unit": null,
+      "label": "Ngày chốt số liệu tổng tài sản/nợ",
+      "approx": false,
+      "source_sentence": "Tính đến ngày 30/06/2026, tổng tài sản của công ty chỉ còn chưa đầy 6,1 tỷ đồng, giảm so với mức 6,5 tỷ đồng hồi đầu năm."
+    },
+    {
+      "kind": "delta",
+      "from_value": "6,5 tỷ đồng",
+      "to_value": "chưa đầy 6,1 tỷ đồng",
+      "unit": null,
+      "label": "Tổng tài sản (đầu năm → 30/06/2026)",
+      "approx": true,
+      "source_sentence": "Tính đến ngày 30/06/2026, tổng tài sản của công ty chỉ còn chưa đầy 6,1 tỷ đồng, giảm so với mức 6,5 tỷ đồng hồi đầu năm."
+    },
+    {
+      "kind": "scalar",
+      "value": "hơn 518,9",
+      "unit": "tỷ đồng",
+      "label": "Nợ phải trả (chủ yếu nợ ngắn hạn)",
+      "approx": true,
+      "source_sentence": "Trong khi đó, nợ phải trả của doanh nghiệp lên tới hơn 518,9 tỷ đồng, chủ yếu là các khoản nợ ngắn hạn."
+    },
+    {
+      "kind": "scalar",
+      "value": "769,7",
+      "unit": "tỷ đồng",
+      "label": "Khoản lỗ lũy kế chưa phân phối tính đến cuối quý 2/2026",
+      "approx": false,
+      "source_sentence": "Khoản lỗ lũy kế chưa phân phối tính đến cuối quý 2/2026 đã lên tới 769,7 tỷ đồng, khiến vốn chủ sở hữu của công ty âm nặng hơn 512,8 tỷ đồng."
+    },
+    {
+      "kind": "scalar",
+      "value": "âm hơn 512,8",
+      "unit": "tỷ đồng",
+      "label": "Vốn chủ sở hữu (âm) cuối quý 2/2026",
+      "approx": true,
+      "source_sentence": "Khoản lỗ lũy kế chưa phân phối tính đến cuối quý 2/2026 đã lên tới 769,7 tỷ đồng, khiến vốn chủ sở hữu của công ty âm nặng hơn 512,8 tỷ đồng."
+    },
+    {
+      "kind": "entity",
+      "value": "Camimex (Công ty Chế biến Thủy sản và Xuất nhập khẩu Cà Mau)",
+      "label": "Công ty gốc — JOS xuất thân từ Phân xưởng 3 của Camimex",
+      "source_sentence": "JOS có nguồn gốc từ Phân xưởng 3 của Camimex (Công ty Chế biến Thủy sản và Xuất nhập khẩu Cà Mau), được cổ phần hóa năm 1995 và thoái toàn bộ vốn Nhà nước vào năm 2003."
+    },
+    {
+      "kind": "scalar",
+      "value": "1995",
+      "unit": null,
+      "label": "Năm cổ phần hóa",
+      "approx": false,
+      "source_sentence": "JOS có nguồn gốc từ Phân xưởng 3 của Camimex (Công ty Chế biến Thủy sản và Xuất nhập khẩu Cà Mau), được cổ phần hóa năm 1995 và thoái toàn bộ vốn Nhà nước vào năm 2003."
+    },
+    {
+      "kind": "scalar",
+      "value": "2003",
+      "unit": null,
+      "label": "Năm thoái toàn bộ vốn Nhà nước",
+      "approx": false,
+      "source_sentence": "JOS có nguồn gốc từ Phân xưởng 3 của Camimex (Công ty Chế biến Thủy sản và Xuất nhập khẩu Cà Mau), được cổ phần hóa năm 1995 và thoái toàn bộ vốn Nhà nước vào năm 2003."
+    },
+    {
+      "kind": "range",
+      "value_low": "2009",
+      "value_high": "2012",
+      "unit": null,
+      "label": "Giai đoạn doanh thu đỉnh cao (quanh 1.000 tỷ đồng/năm)",
+      "approx": false,
+      "source_sentence": "Trong giai đoạn 2009 - 2012, doanh nghiệp từng đạt doanh thu quanh 1.000 tỷ đồng/năm, sản phẩm tôm đông lạnh xuất hiện tại các hệ thống bán lẻ lớn như Metro, BigC (nay là GO! và Tops Market) và xuất khẩu sang Mỹ, Nhật Bản, châu Âu, Hàn Quốc, Đài Loan."
+    },
+    {
+      "kind": "scalar",
+      "value": "quanh 1.000",
+      "unit": "tỷ đồng/năm",
+      "label": "Doanh thu đỉnh cao giai đoạn 2009-2012",
+      "approx": true,
+      "source_sentence": "Trong giai đoạn 2009 - 2012, doanh nghiệp từng đạt doanh thu quanh 1.000 tỷ đồng/năm, sản phẩm tôm đông lạnh xuất hiện tại các hệ thống bán lẻ lớn như Metro, BigC (nay là GO! và Tops Market) và xuất khẩu sang Mỹ, Nhật Bản, châu Âu, Hàn Quốc, Đài Loan."
+    },
+    {
+      "kind": "entity_list",
+      "entities": [
+        "Metro",
+        "BigC (nay là GO! và Tops Market)"
+      ],
+      "label": "Hệ thống bán lẻ từng phân phối tôm đông lạnh JOS (giai đoạn 2009-2012)",
+      "source_sentence": "Trong giai đoạn 2009 - 2012, doanh nghiệp từng đạt doanh thu quanh 1.000 tỷ đồng/năm, sản phẩm tôm đông lạnh xuất hiện tại các hệ thống bán lẻ lớn như Metro, BigC (nay là GO! và Tops Market) và xuất khẩu sang Mỹ, Nhật Bản, châu Âu, Hàn Quốc, Đài Loan."
+    },
+    {
+      "kind": "entity_list",
+      "entities": [
+        "Mỹ",
+        "Nhật Bản",
+        "châu Âu",
+        "Hàn Quốc",
+        "Đài Loan"
+      ],
+      "label": "Thị trường xuất khẩu tôm đông lạnh JOS (giai đoạn 2009-2012)",
+      "source_sentence": "Trong giai đoạn 2009 - 2012, doanh nghiệp từng đạt doanh thu quanh 1.000 tỷ đồng/năm, sản phẩm tôm đông lạnh xuất hiện tại các hệ thống bán lẻ lớn như Metro, BigC (nay là GO! và Tops Market) và xuất khẩu sang Mỹ, Nhật Bản, châu Âu, Hàn Quốc, Đài Loan."
+    },
+    {
+      "kind": "scalar",
+      "value": "2012",
+      "unit": null,
+      "label": "Năm bắt đầu chuỗi thua lỗ kéo dài",
+      "approx": false,
+      "source_sentence": "Tuy nhiên, đà tăng trưởng quá nhanh khiến nợ vay và hàng tồn kho phình to, mở đầu chuỗi thua lỗ kéo dài từ năm 2012."
+    },
+    {
+      "kind": "scalar",
+      "value": "quý 2/2026",
+      "unit": null,
+      "label": "Kỳ báo cáo tài chính công bố",
+      "approx": false,
+      "source_sentence": "Mã liên quan: JOS. Công ty Cổ phần Chế biến Thủy sản Xuất khẩu Minh Hải (mã CK: JOS) vừa công bố báo cáo tài chính quý 2/2026 với kết quả kinh doanh tiếp tục ảm đạm."
+    }
+  ],
+  "excluded_borderline": [],
+  "topic_key": "67af59f2d729a9c8"
+}

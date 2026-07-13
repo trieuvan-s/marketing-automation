@@ -1,0 +1,188 @@
+{
+  "slug": "vietnam_airlines_co_dong",
+  "url": "https://cafef.vn/tin-vui-voi-27203-co-dong-vietnam-airlines-tu-ngay-14-7-188260711065905036.chn",
+  "title": "Tin vui với 27.203 cổ đông Vietnam Airlines từ ngày 14/7",
+  "curator": "human, đọc thủ công toàn bài — KHÔNG phải output model",
+  "fact_count": 22,
+  "facts": [
+    {
+      "kind": "entity",
+      "value": "HVN",
+      "label": "Mã chứng khoán Vietnam Airlines",
+      "source_sentence": "Mã liên quan: HVN. Sở Giao dịch Chứng khoán TP.HCM (HoSE) vừa thông báo thay đổi tình trạng chứng khoán đối với cổ phiếu HVN của Tổng công ty Hàng không Việt Nam - Vietnam Airlines."
+    },
+    {
+      "kind": "scalar",
+      "value": "14/7/2026",
+      "unit": null,
+      "label": "Ngày HVN được đưa ra khỏi diện hạn chế giao dịch",
+      "approx": false,
+      "source_sentence": "Theo đó, cổ phiếu HVN được đưa ra khỏi diện hạn chế giao dịch kể từ ngày 14/7/2026 do doanh nghiệp đã khắc phục nguyên nhân dẫn đến tình trạng này."
+    },
+    {
+      "kind": "delta",
+      "from_value": "diện kiểm soát",
+      "to_value": "diện cảnh báo",
+      "unit": null,
+      "label": "Thay đổi phân loại giao dịch cổ phiếu HVN",
+      "approx": false,
+      "source_sentence": "Cùng thời điểm, HVN được chuyển từ diện kiểm soát sang diện cảnh báo."
+    },
+    {
+      "kind": "scalar",
+      "value": "31/12/2025",
+      "unit": null,
+      "label": "Ngày chốt số liệu cổ đông",
+      "approx": false,
+      "source_sentence": "Theo báo cáo thường niên 2025 của Vietnam Airlines, tính đến ngày 31/12/2025, doanh nghiệp có tổng cộng 27.203 cổ đông."
+    },
+    {
+      "kind": "scalar",
+      "value": "27.203",
+      "unit": "cổ đông",
+      "label": "Tổng số cổ đông Vietnam Airlines",
+      "approx": false,
+      "source_sentence": "Theo báo cáo thường niên 2025 của Vietnam Airlines, tính đến ngày 31/12/2025, doanh nghiệp có tổng cộng 27.203 cổ đông."
+    },
+    {
+      "kind": "scalar",
+      "value": "25.400",
+      "unit": "đồng/cổ phiếu",
+      "label": "Giá đóng cửa HVN phiên 10/7",
+      "approx": false,
+      "source_sentence": "Trên thị trường, cổ phiếu HVN đóng cửa phiên 10/7 tại 25.400 đồng/cổ phiếu, giảm 0,59%, với hơn 1 triệu đơn vị được giao dịch."
+    },
+    {
+      "kind": "scalar",
+      "value": "0,59",
+      "unit": "%",
+      "label": "Biến động giá HVN phiên 10/7 (giảm)",
+      "approx": false,
+      "source_sentence": "Trên thị trường, cổ phiếu HVN đóng cửa phiên 10/7 tại 25.400 đồng/cổ phiếu, giảm 0,59%, với hơn 1 triệu đơn vị được giao dịch."
+    },
+    {
+      "kind": "scalar",
+      "value": "hơn 1 triệu",
+      "unit": "đơn vị",
+      "label": "Khối lượng giao dịch HVN phiên 10/7",
+      "approx": true,
+      "source_sentence": "Trên thị trường, cổ phiếu HVN đóng cửa phiên 10/7 tại 25.400 đồng/cổ phiếu, giảm 0,59%, với hơn 1 triệu đơn vị được giao dịch."
+    },
+    {
+      "kind": "delta",
+      "from_value": "22.300 đồng/cổ phiếu (ngày 13/4)",
+      "to_value": "25.400 đồng/cổ phiếu (phiên 10/7)",
+      "unit": null,
+      "label": "Thị giá HVN (13/4 → 10/7, tăng gần 14%)",
+      "approx": true,
+      "source_sentence": "So với mức 22.300 đồng/cổ phiếu ngày 13/4, thị giá HVN đã tăng gần 14%."
+    },
+    {
+      "kind": "scalar",
+      "value": "gần 14",
+      "unit": "%",
+      "label": "Mức tăng thị giá HVN (13/4 → 10/7)",
+      "approx": true,
+      "source_sentence": "So với mức 22.300 đồng/cổ phiếu ngày 13/4, thị giá HVN đã tăng gần 14%."
+    },
+    {
+      "kind": "scalar",
+      "value": "123.858",
+      "unit": "tỷ đồng",
+      "label": "Tổng doanh thu và thu nhập hợp nhất năm 2025",
+      "approx": false,
+      "source_sentence": "Trước đó, tại Đại hội đồng cổ đông thường niên 2026, Vietnam Airlines cho biết năm 2025 ghi nhận tổng doanh thu và thu nhập hợp nhất 123.858 tỷ đồng."
+    },
+    {
+      "kind": "scalar",
+      "value": "8.168",
+      "unit": "tỷ đồng",
+      "label": "Lợi nhuận trước thuế năm 2025",
+      "approx": false,
+      "source_sentence": "Lợi nhuận trước thuế đạt 8.168 tỷ đồng. Đây là năm thứ hai liên tiếp Vietnam Airlines báo lãi sau giai đoạn chịu ảnh hưởng nặng nề bởi dịch Covid-19."
+    },
+    {
+      "kind": "scalar",
+      "value": "2",
+      "unit": "năm liên tiếp",
+      "label": "Số năm liên tiếp Vietnam Airlines báo lãi",
+      "approx": false,
+      "source_sentence": "Lợi nhuận trước thuế đạt 8.168 tỷ đồng. Đây là năm thứ hai liên tiếp Vietnam Airlines báo lãi sau giai đoạn chịu ảnh hưởng nặng nề bởi dịch Covid-19."
+    },
+    {
+      "kind": "scalar",
+      "value": "6.730",
+      "unit": "tỷ đồng",
+      "label": "Vốn chủ sở hữu hợp nhất cuối năm 2025 (chấm dứt âm vốn)",
+      "approx": false,
+      "source_sentence": "Đến cuối năm 2025, vốn chủ sở hữu hợp nhất của doanh nghiệp đạt 6.730 tỷ đồng, chấm dứt tình trạng âm vốn chủ sở hữu."
+    },
+    {
+      "kind": "scalar",
+      "value": "26.686",
+      "unit": "tỷ đồng",
+      "label": "Lỗ sau thuế chưa phân phối hợp nhất còn lại",
+      "approx": false,
+      "source_sentence": "Dù vậy, Vietnam Airlines vẫn còn lỗ sau thuế chưa phân phối hợp nhất 26.686 tỷ đồng nên chưa thể chia cổ tức."
+    },
+    {
+      "kind": "range",
+      "value_low": "2030",
+      "value_high": "2032",
+      "unit": null,
+      "label": "Giai đoạn dự kiến xử lý hết lỗ lũy kế",
+      "approx": false,
+      "source_sentence": "Lãnh đạo hãng dự kiến xử lý hết lỗ lũy kế trong giai đoạn 2030-2032, sau đó mới cân đối nguồn lực để chia cổ tức cho cổ đông."
+    },
+    {
+      "kind": "scalar",
+      "value": "138.899",
+      "unit": "tỷ đồng",
+      "label": "Mục tiêu doanh thu hợp nhất năm 2026",
+      "approx": false,
+      "source_sentence": "Bước sang năm 2026, Vietnam Airlines đặt mục tiêu doanh thu hợp nhất 138.899 tỷ đồng nhưng lợi nhuận sau thuế chỉ khoảng 22 tỷ đồng, thấp hơn nhiều so với năm trước do áp lực từ giá nhiên liệu."
+    },
+    {
+      "kind": "scalar",
+      "value": "khoảng 22",
+      "unit": "tỷ đồng",
+      "label": "Mục tiêu lợi nhuận sau thuế năm 2026",
+      "approx": true,
+      "source_sentence": "Bước sang năm 2026, Vietnam Airlines đặt mục tiêu doanh thu hợp nhất 138.899 tỷ đồng nhưng lợi nhuận sau thuế chỉ khoảng 22 tỷ đồng, thấp hơn nhiều so với năm trước do áp lực từ giá nhiên liệu."
+    },
+    {
+      "kind": "scalar",
+      "value": "900 triệu",
+      "unit": "cổ phiếu",
+      "label": "Số cổ phiếu chào bán cho cổ đông hiện hữu",
+      "approx": false,
+      "source_sentence": "Hãng cũng đã chào bán 900 triệu cổ phiếu cho cổ đông hiện hữu với giá 10.000 đồng/cổ phiếu, huy động gần 8.971 tỷ đồng."
+    },
+    {
+      "kind": "scalar",
+      "value": "gần 8.971",
+      "unit": "tỷ đồng",
+      "label": "Số tiền huy động được từ đợt chào bán cổ phiếu",
+      "approx": true,
+      "source_sentence": "Hãng cũng đã chào bán 900 triệu cổ phiếu cho cổ đông hiện hữu với giá 10.000 đồng/cổ phiếu, huy động gần 8.971 tỷ đồng."
+    },
+    {
+      "kind": "scalar",
+      "value": "khoảng 5.200",
+      "unit": "tỷ đồng",
+      "label": "Vốn đầu tư dự kiến năm 2026",
+      "approx": true,
+      "source_sentence": "Năm 2026, Vietnam Airlines dự kiến đầu tư khoảng 5.200 tỷ đồng, tập trung vào kế hoạch mua, thuê máy bay thân rộng và các dự án dịch vụ hàng không tại sân bay Long Thành."
+    },
+    {
+      "kind": "entity",
+      "value": "sân bay Long Thành",
+      "label": "Địa điểm dự án dịch vụ hàng không được đầu tư năm 2026",
+      "source_sentence": "Năm 2026, Vietnam Airlines dự kiến đầu tư khoảng 5.200 tỷ đồng, tập trung vào kế hoạch mua, thuê máy bay thân rộng và các dự án dịch vụ hàng không tại sân bay Long Thành."
+    }
+  ],
+  "excluded_borderline": [
+    "Giá chào bán '10.000 đồng/cổ phiếu' gộp vào cùng câu với fact 'huy động gần 8.971 tỷ đồng' — không tách fact riêng vì đã ngụ ý trong tích 900 triệu × 10.000đ; nếu Brief bắt riêng '10.000 đồng/cổ phiếu' cũng ĐÚNG, chấm cộng thêm, không trừ nếu thiếu."
+  ],
+  "topic_key": "dd99a5893a9704d0"
+}

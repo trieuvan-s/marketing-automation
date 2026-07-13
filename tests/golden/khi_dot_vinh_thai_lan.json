@@ -1,0 +1,157 @@
+{
+  "slug": "khi_dot_vinh_thai_lan",
+  "url": "https://cafef.vn/phat-hien-340-ty-met-khoi-khi-dot-duoi-long-vinh-thai-lan-700-trieu-thung-dau-tren-vung-bien-rong-bang-moscow-188260710222840093.chn",
+  "title": "Phát hiện 340 tỷ mét khối khí đốt dưới lòng Vịnh Thái Lan, 700 triệu thùng dầu trên vùng biển rộng bằng Moscow",
+  "curator": "human, đọc thủ công toàn bài — KHÔNG phải output model",
+  "note": "Bài GIÀU entity_list nhất (nhiều quốc gia/công ty được nêu tên) — ưu tiên dùng để chấm kind=entity_list ở Phase 3.",
+  "fact_count": 18,
+  "facts": [
+    {
+      "kind": "scalar",
+      "value": "340",
+      "unit": "tỷ mét khối",
+      "label": "Trữ lượng khí tự nhiên ước tính dưới Vịnh Thái Lan (tương đương 12.000 tỷ feet khối)",
+      "approx": true,
+      "source_sentence": "Khu vực này được cho là chứa khoảng 12.000 tỷ feet khối (340 tỷ mét khối) khí tự nhiên và 700 triệu thùng dầu, với tổng giá trị ước tính khoảng 300 tỷ USD, nhưng vẫn chưa thể khai thác suốt 25 năm qua vì tranh chấp chủ quyền giữa Thái Lan và Campuchia."
+    },
+    {
+      "kind": "scalar",
+      "value": "700 triệu",
+      "unit": "thùng dầu",
+      "label": "Trữ lượng dầu ước tính dưới Vịnh Thái Lan",
+      "approx": true,
+      "source_sentence": "Khu vực này được cho là chứa khoảng 12.000 tỷ feet khối (340 tỷ mét khối) khí tự nhiên và 700 triệu thùng dầu, với tổng giá trị ước tính khoảng 300 tỷ USD, nhưng vẫn chưa thể khai thác suốt 25 năm qua vì tranh chấp chủ quyền giữa Thái Lan và Campuchia."
+    },
+    {
+      "kind": "scalar",
+      "value": "khoảng 300",
+      "unit": "tỷ USD",
+      "label": "Tổng giá trị ước tính trữ lượng dầu khí Vịnh Thái Lan",
+      "approx": true,
+      "source_sentence": "Khu vực này được cho là chứa khoảng 12.000 tỷ feet khối (340 tỷ mét khối) khí tự nhiên và 700 triệu thùng dầu, với tổng giá trị ước tính khoảng 300 tỷ USD, nhưng vẫn chưa thể khai thác suốt 25 năm qua vì tranh chấp chủ quyền giữa Thái Lan và Campuchia."
+    },
+    {
+      "kind": "scalar",
+      "value": "25",
+      "unit": "năm",
+      "label": "Số năm chưa thể khai thác do tranh chấp chủ quyền",
+      "approx": false,
+      "source_sentence": "Khu vực này được cho là chứa khoảng 12.000 tỷ feet khối (340 tỷ mét khối) khí tự nhiên và 700 triệu thùng dầu, với tổng giá trị ước tính khoảng 300 tỷ USD, nhưng vẫn chưa thể khai thác suốt 25 năm qua vì tranh chấp chủ quyền giữa Thái Lan và Campuchia."
+    },
+    {
+      "kind": "scalar",
+      "value": "Tháng 5",
+      "unit": null,
+      "label": "Tháng Chính phủ Thái Lan hủy MOU năm 2001",
+      "approx": false,
+      "source_sentence": "Tháng 5 vừa qua, Chính phủ Thái Lan đã hủy Biên bản ghi nhớ (MOU) năm 2001 – khuôn khổ duy nhất giữa Bangkok và Phnom Penh nhằm giải quyết các vấn đề chồng lấn trên biển."
+    },
+    {
+      "kind": "scalar",
+      "value": "2001",
+      "unit": null,
+      "label": "Năm ký MOU giữa Thái Lan và Campuchia",
+      "approx": false,
+      "source_sentence": "Tháng 5 vừa qua, Chính phủ Thái Lan đã hủy Biên bản ghi nhớ (MOU) năm 2001 – khuôn khổ duy nhất giữa Bangkok và Phnom Penh nhằm giải quyết các vấn đề chồng lấn trên biển."
+    },
+    {
+      "kind": "entity",
+      "value": "UNCLOS (Công ước Liên Hợp Quốc về Luật Biển)",
+      "label": "Cơ chế pháp lý Campuchia sử dụng để đưa vấn đề lên Liên Hợp Quốc",
+      "source_sentence": "Đáp lại, Campuchia đưa vấn đề lên Liên Hợp Quốc, kích hoạt một cơ chế pháp lý hiếm khi được sử dụng theo Công ước Liên Hợp Quốc về Luật Biển (UNCLOS) nhằm buộc Thái Lan quay lại bàn đàm phán."
+    },
+    {
+      "kind": "entity",
+      "value": "Rottanak Keo",
+      "label": "Bộ trưởng Mỏ và Năng lượng Campuchia",
+      "source_sentence": "Theo Bộ trưởng Mỏ và Năng lượng Campuchia Rottanak Keo, bất kỳ phát hiện thương mại nào tại khu vực này đều mang lại lợi ích kinh tế và an ninh năng lượng không chỉ cho Thái Lan và Campuchia mà còn cho cả ASEAN."
+    },
+    {
+      "kind": "scalar",
+      "value": "đầu những năm 1970",
+      "unit": null,
+      "label": "Thời điểm khởi nguồn tranh chấp ranh giới trên biển",
+      "approx": true,
+      "source_sentence": "Nguồn gốc tranh chấp bắt đầu từ đầu những năm 1970, khi Thái Lan và Campuchia đơn phương xác định ranh giới trên biển của riêng mình nhưng không đạt được đồng thuận về đường phân định cuối cùng."
+    },
+    {
+      "kind": "scalar",
+      "value": "khoảng 26.000",
+      "unit": "km2",
+      "label": "Diện tích khu vực chồng lấn (tương đương diện tích Moscow)",
+      "approx": true,
+      "source_sentence": "Khu vực chồng lấn có diện tích khoảng 26.000 km2, tương đương diện tích của Moscow."
+    },
+    {
+      "kind": "scalar",
+      "value": "9",
+      "unit": "đời chính phủ",
+      "label": "Số đời chính phủ Thái Lan trải qua trong 25 năm đàm phán",
+      "approx": false,
+      "source_sentence": "Tuy nhiên, sau 25 năm và trải qua 9 đời chính phủ cùng 14 thủ tướng Thái Lan, tiến trình này gần như không đạt được đột phá nào."
+    },
+    {
+      "kind": "scalar",
+      "value": "14",
+      "unit": "thủ tướng",
+      "label": "Số thủ tướng Thái Lan trải qua trong 25 năm đàm phán",
+      "approx": false,
+      "source_sentence": "Tuy nhiên, sau 25 năm và trải qua 9 đời chính phủ cùng 14 thủ tướng Thái Lan, tiến trình này gần như không đạt được đột phá nào."
+    },
+    {
+      "kind": "entity",
+      "value": "Anutin Charnvirakul",
+      "label": "Thủ tướng Thái Lan quyết định rút khỏi MOU 2001",
+      "source_sentence": "Tình hình thay đổi trong năm nay khi nội các của Thủ tướng Thái Lan Anutin Charnvirakul quyết định rút khỏi MOU 2001, trong bối cảnh căng thẳng biên giới trên bộ leo thang."
+    },
+    {
+      "kind": "scalar",
+      "value": "5",
+      "unit": "vòng đàm phán chính thức",
+      "label": "Số vòng đàm phán chính thức sau 25 năm MOU 2001",
+      "approx": false,
+      "source_sentence": "Thái Lan cho rằng sau 25 năm và 5 vòng đàm phán chính thức, MOU 2001 không mang lại tiến triển đáng kể và đã hết giá trị thực tiễn."
+    },
+    {
+      "kind": "scalar",
+      "value": "50-50",
+      "unit": null,
+      "label": "Cơ chế chia sẻ doanh thu Phnom Penh đề xuất cho khai thác chung",
+      "approx": false,
+      "source_sentence": "Phnom Penh muốn thúc đẩy khai thác chung ngay lập tức, được cho là theo cơ chế chia sẻ doanh thu 50-50."
+    },
+    {
+      "kind": "scalar",
+      "value": "4",
+      "unit": "lô",
+      "label": "Số lô khu vực chồng lấn được chia",
+      "approx": false,
+      "source_sentence": "Theo dữ liệu từ Bộ Mỏ và Năng lượng Campuchia, vùng chồng lấn được chia thành 4 lô."
+    },
+    {
+      "kind": "entity_list",
+      "entities": [
+        "ConocoPhillips (Mỹ)",
+        "Idemitsu Kosan (Nhật Bản)",
+        "TotalEnergies (Pháp)",
+        "CNOOC (Trung Quốc, quốc doanh)"
+      ],
+      "label": "Các tập đoàn dầu khí nắm giữ 4 lô vùng chồng lấn",
+      "source_sentence": "Trong đó, 2 lô đầu tiên thuộc liên doanh giữa ConocoPhillips của Mỹ và Idemitsu Kosan của Nhật Bản; lô thứ ba do TotalEnergies của Pháp nắm giữ; còn lô thứ tư do tập đoàn dầu khí quốc doanh Trung Quốc CNOOC nắm giữ."
+    },
+    {
+      "kind": "entity_list",
+      "entities": [
+        "Thái Lan",
+        "Campuchia"
+      ],
+      "label": "Hai quốc gia tranh chấp chủ quyền vùng chồng lấn Vịnh Thái Lan",
+      "source_sentence": "Khu vực này được cho là chứa khoảng 12.000 tỷ feet khối (340 tỷ mét khối) khí tự nhiên và 700 triệu thùng dầu, với tổng giá trị ước tính khoảng 300 tỷ USD, nhưng vẫn chưa thể khai thác suốt 25 năm qua vì tranh chấp chủ quyền giữa Thái Lan và Campuchia."
+    }
+  ],
+  "excluded_borderline": [
+    "'ASEAN' xuất hiện như bên hưởng lợi gián tiếp, không phải bên tranh chấp/thực thể trọng tâm — không tách fact riêng, đã lồng trong entity Rottanak Keo phía trên.",
+    "Đơn vị kép '12.000 tỷ feet khối' cho CÙNG 1 đại lượng với '340 tỷ mét khối' — chỉ tính 1 fact (đơn vị mét khối) để tránh đếm trùng; Brief bắt được đơn vị feet khối thay vì mét khối vẫn coi là ĐÚNG khi chấm (cùng canonical_value)."
+  ],
+  "topic_key": "08ad1c6451773c06"
+}

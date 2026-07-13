@@ -1,0 +1,233 @@
+{
+  "slug": "4_cang_bien_dac_biet",
+  "url": "https://cafef.vn/4-cang-bien-dac-biet-duoc-quy-hoach-den-nam-2050-188260709170702965.chn",
+  "title": "4 cảng biển đặc biệt được quy hoạch đến năm 2050",
+  "note": "BÀI CẢNG BIỂN THẬT (thay thế cang_bien_gdp — golden set Phase 0 đã neo NHẦM URL, sửa ở Phase 2b theo chỉ đạo user). Đây MỚI là bài đã sinh infographic '4 Cảng Biển Đặc Biệt' ở phiên trước, và là bài nêu tên cảng thật (Cần Giờ/Liên Chiểu/Nam Đồ Sơn/Cái Mép - Thị Vải...). Evidence fetch qua chính collector của pipeline ($0, tất định) — xem tests/golden/_raw/4_cang_bien_dac_biet.txt.",
+  "curator": "human, đọc thủ công toàn bài — KHÔNG phải output model",
+  "salience_note": "Bài THUẦN chính sách quy hoạch — KHÔNG có hội thảo/hiệp hội/người phát biểu nào được nêu tên -> MỌI fact entity/entity_list ở đây đều salience=\"subject\" (không có ca context nào trong bài này, khác cang_bien_gdp — 2 bài bổ sung nhau làm cặp đối chứng dương/âm cho Phase 2b).",
+  "fact_count": 22,
+  "facts": [
+    {
+      "kind": "range",
+      "value_low": "2021",
+      "value_high": "2030",
+      "unit": null,
+      "label": "Kỳ quy hoạch tổng thể kết cấu hạ tầng hàng hải",
+      "approx": false,
+      "source_sentence": "Bộ Xây dựng vừa Phê duyệt điều chỉnh Quy hoạch tổng thể kết cấu hạ tầng hàng hải thời kỳ 2021-2030, tầm nhìn đến năm 2050."
+    },
+    {
+      "kind": "scalar",
+      "value": "2050",
+      "unit": null,
+      "label": "Năm tầm nhìn quy hoạch hạ tầng hàng hải",
+      "approx": false,
+      "source_sentence": "Bộ Xây dựng vừa Phê duyệt điều chỉnh Quy hoạch tổng thể kết cấu hạ tầng hàng hải thời kỳ 2021-2030, tầm nhìn đến năm 2050."
+    },
+    {
+      "kind": "scalar",
+      "value": "5",
+      "unit": "lĩnh vực",
+      "label": "Số lĩnh vực vận tải được cập nhật dự báo nhu cầu",
+      "approx": false,
+      "source_sentence": "Quy hoạch điều chỉnh cập nhật lượng hàng, lượng hành khách, đội tàu theo dự báo nhu cầu vận tải chung cho 5 lĩnh vực."
+    },
+    {
+      "kind": "scalar",
+      "value": "3",
+      "unit": "khu công nghiệp tàu biển",
+      "label": "Số khu công nghiệp tàu biển bổ sung quy hoạch (Bắc/Trung/Nam)",
+      "approx": false,
+      "source_sentence": "Đáng chú ý, quy hoạch bổ sung các khu bến mới phục vụ công nghiệp, năng lượng (ngành thép, LNG), bổ sung định hướng quy hoạch 3 khu công nghiệp tàu biển tập trung phân bổ tại ba miền Bắc, Trung, Nam và cập nhật công năng bến cảng Hòn Khoai là bến cảng lưỡng dụng."
+    },
+    {
+      "kind": "entity",
+      "value": "Hòn Khoai",
+      "label": "Bến cảng được cập nhật công năng thành bến cảng lưỡng dụng",
+      "entity_type": "place",
+      "salience": "subject",
+      "source_sentence": "Đáng chú ý, quy hoạch bổ sung các khu bến mới phục vụ công nghiệp, năng lượng (ngành thép, LNG), bổ sung định hướng quy hoạch 3 khu công nghiệp tàu biển tập trung phân bổ tại ba miền Bắc, Trung, Nam và cập nhật công năng bến cảng Hòn Khoai là bến cảng lưỡng dụng."
+    },
+    {
+      "kind": "scalar",
+      "value": "2030",
+      "unit": null,
+      "label": "Năm mục tiêu hệ thống cảng biển đáp ứng lượng hàng/khách",
+      "approx": false,
+      "source_sentence": "Mục tiêu tới năm 2030, hệ thống cảng biển đáp ứng thông qua lượng hàng hóa từ 1.396 -1.656 triệu tấn (trong đó hàng container từ 48,6 - 57,4 triệu Teu, chưa gồm hàng trung chuyển quốc tế); hành khách từ 18,5 - 20,4 triệu lượt."
+    },
+    {
+      "kind": "range",
+      "value_low": "1.396",
+      "value_high": "1.656",
+      "unit": "triệu tấn",
+      "label": "Lượng hàng hóa mục tiêu qua cảng biển đến 2030",
+      "approx": false,
+      "source_sentence": "Mục tiêu tới năm 2030, hệ thống cảng biển đáp ứng thông qua lượng hàng hóa từ 1.396 -1.656 triệu tấn (trong đó hàng container từ 48,6 - 57,4 triệu Teu, chưa gồm hàng trung chuyển quốc tế); hành khách từ 18,5 - 20,4 triệu lượt."
+    },
+    {
+      "kind": "range",
+      "value_low": "48,6",
+      "value_high": "57,4",
+      "unit": "triệu Teu",
+      "label": "Lượng hàng container mục tiêu qua cảng biển đến 2030",
+      "approx": false,
+      "source_sentence": "Mục tiêu tới năm 2030, hệ thống cảng biển đáp ứng thông qua lượng hàng hóa từ 1.396 -1.656 triệu tấn (trong đó hàng container từ 48,6 - 57,4 triệu Teu, chưa gồm hàng trung chuyển quốc tế); hành khách từ 18,5 - 20,4 triệu lượt."
+    },
+    {
+      "kind": "range",
+      "value_low": "18,5",
+      "value_high": "20,4",
+      "unit": "triệu lượt",
+      "label": "Lượng hành khách mục tiêu qua cảng biển đến 2030",
+      "approx": false,
+      "source_sentence": "Mục tiêu tới năm 2030, hệ thống cảng biển đáp ứng thông qua lượng hàng hóa từ 1.396 -1.656 triệu tấn (trong đó hàng container từ 48,6 - 57,4 triệu Teu, chưa gồm hàng trung chuyển quốc tế); hành khách từ 18,5 - 20,4 triệu lượt."
+    },
+    {
+      "kind": "entity_list",
+      "entities": [
+        "Cần Giờ",
+        "Liên Chiểu",
+        "Nam Đồ Sơn"
+      ],
+      "label": "Khu bến cảng trung chuyển quốc tế/khu bến mới xây dựng",
+      "salience": "subject",
+      "source_sentence": "Xây dựng khu bến cảng trung chuyển quốc tế Cần Giờ (TP.HCM), khu bến Liên Chiểu (Đà Nẵng), khu bến Nam Đồ Sơn (Hải Phòng)."
+    },
+    {
+      "kind": "range",
+      "value_low": "4,3",
+      "value_high": "4,9",
+      "unit": "%/năm",
+      "label": "Tốc độ tăng trưởng bình quân hàng hóa qua cảng biển đến 2050",
+      "approx": true,
+      "source_sentence": "Tầm nhìn đến 2050, năng lực hệ thống cảng biển đáp ứng nhu cầu thông qua hàng hóa với tốc độ tăng trưởng bình quân khoảng từ 4,3- 4,9%/năm, hành khách tăng trưởng bình quân từ 1 - 1,4 %/năm."
+    },
+    {
+      "kind": "range",
+      "value_low": "1",
+      "value_high": "1,4",
+      "unit": "%/năm",
+      "label": "Tốc độ tăng trưởng bình quân hành khách qua cảng biển đến 2050",
+      "approx": false,
+      "source_sentence": "Tầm nhìn đến 2050, năng lực hệ thống cảng biển đáp ứng nhu cầu thông qua hàng hóa với tốc độ tăng trưởng bình quân khoảng từ 4,3- 4,9%/năm, hành khách tăng trưởng bình quân từ 1 - 1,4 %/năm."
+    },
+    {
+      "kind": "entity_list",
+      "entities": [
+        "Hải Phòng",
+        "cảng biển TPHCM"
+      ],
+      "label": "2 cảng biển đặc biệt",
+      "salience": "subject",
+      "source_sentence": "Quy hoạch 4 cảng biển đặc biệt Theo quy mô, chức năng, hệ thống cảng biển Việt Nam được phân loại gồm: Cảng biển đặc biệt (Hải Phòng và cảng biển TPHCM); 15 cảng biển loại I (cảng biển Quảng Ninh, Thanh Hóa, Nghệ An, Hà Tĩnh, Quảng Trị, Huế, Đà Nẵng, Quảng Ngãi, Gia Lai, Khánh Hòa, Lâm Đồng, Đồng Nai, Tây Ninh, Cần Thơ, Vĩnh Long); 6 cảng biển loại II (Hưng Yên, Ninh Bình, Đắk Lắk, Đồng Tháp, An Giang, Cà Mau)."
+    },
+    {
+      "kind": "scalar",
+      "value": "15",
+      "unit": "cảng biển loại I",
+      "label": "Số cảng biển loại I",
+      "approx": false,
+      "source_sentence": "Quy hoạch 4 cảng biển đặc biệt Theo quy mô, chức năng, hệ thống cảng biển Việt Nam được phân loại gồm: Cảng biển đặc biệt (Hải Phòng và cảng biển TPHCM); 15 cảng biển loại I (cảng biển Quảng Ninh, Thanh Hóa, Nghệ An, Hà Tĩnh, Quảng Trị, Huế, Đà Nẵng, Quảng Ngãi, Gia Lai, Khánh Hòa, Lâm Đồng, Đồng Nai, Tây Ninh, Cần Thơ, Vĩnh Long); 6 cảng biển loại II (Hưng Yên, Ninh Bình, Đắk Lắk, Đồng Tháp, An Giang, Cà Mau)."
+    },
+    {
+      "kind": "entity_list",
+      "entities": [
+        "Quảng Ninh",
+        "Thanh Hóa",
+        "Nghệ An",
+        "Hà Tĩnh",
+        "Quảng Trị",
+        "Huế",
+        "Đà Nẵng",
+        "Quảng Ngãi",
+        "Gia Lai",
+        "Khánh Hòa",
+        "Lâm Đồng",
+        "Đồng Nai",
+        "Tây Ninh",
+        "Cần Thơ",
+        "Vĩnh Long"
+      ],
+      "label": "15 cảng biển loại I",
+      "salience": "subject",
+      "source_sentence": "Quy hoạch 4 cảng biển đặc biệt Theo quy mô, chức năng, hệ thống cảng biển Việt Nam được phân loại gồm: Cảng biển đặc biệt (Hải Phòng và cảng biển TPHCM); 15 cảng biển loại I (cảng biển Quảng Ninh, Thanh Hóa, Nghệ An, Hà Tĩnh, Quảng Trị, Huế, Đà Nẵng, Quảng Ngãi, Gia Lai, Khánh Hòa, Lâm Đồng, Đồng Nai, Tây Ninh, Cần Thơ, Vĩnh Long); 6 cảng biển loại II (Hưng Yên, Ninh Bình, Đắk Lắk, Đồng Tháp, An Giang, Cà Mau)."
+    },
+    {
+      "kind": "scalar",
+      "value": "6",
+      "unit": "cảng biển loại II",
+      "label": "Số cảng biển loại II",
+      "approx": false,
+      "source_sentence": "Quy hoạch 4 cảng biển đặc biệt Theo quy mô, chức năng, hệ thống cảng biển Việt Nam được phân loại gồm: Cảng biển đặc biệt (Hải Phòng và cảng biển TPHCM); 15 cảng biển loại I (cảng biển Quảng Ninh, Thanh Hóa, Nghệ An, Hà Tĩnh, Quảng Trị, Huế, Đà Nẵng, Quảng Ngãi, Gia Lai, Khánh Hòa, Lâm Đồng, Đồng Nai, Tây Ninh, Cần Thơ, Vĩnh Long); 6 cảng biển loại II (Hưng Yên, Ninh Bình, Đắk Lắk, Đồng Tháp, An Giang, Cà Mau)."
+    },
+    {
+      "kind": "entity_list",
+      "entities": [
+        "Hưng Yên",
+        "Ninh Bình",
+        "Đắk Lắk",
+        "Đồng Tháp",
+        "An Giang",
+        "Cà Mau"
+      ],
+      "label": "6 cảng biển loại II",
+      "salience": "subject",
+      "source_sentence": "Quy hoạch 4 cảng biển đặc biệt Theo quy mô, chức năng, hệ thống cảng biển Việt Nam được phân loại gồm: Cảng biển đặc biệt (Hải Phòng và cảng biển TPHCM); 15 cảng biển loại I (cảng biển Quảng Ninh, Thanh Hóa, Nghệ An, Hà Tĩnh, Quảng Trị, Huế, Đà Nẵng, Quảng Ngãi, Gia Lai, Khánh Hòa, Lâm Đồng, Đồng Nai, Tây Ninh, Cần Thơ, Vĩnh Long); 6 cảng biển loại II (Hưng Yên, Ninh Bình, Đắk Lắk, Đồng Tháp, An Giang, Cà Mau)."
+    },
+    {
+      "kind": "entity_list",
+      "entities": [
+        "Thanh Hóa",
+        "Đà Nẵng",
+        "Khánh Hòa",
+        "Cần Thơ"
+      ],
+      "label": "Cảng biển quy hoạch tiềm năng thành cảng biển đặc biệt",
+      "salience": "subject",
+      "source_sentence": "Các cảng biển Thanh Hóa, Đà Nẵng, Khánh Hòa, Cần Thơ quy hoạch tiềm năng thành cảng biển đặc biệt."
+    },
+    {
+      "kind": "scalar",
+      "value": "19.800",
+      "unit": "ha",
+      "label": "Tổng nhu cầu sử dụng đất đến 2030",
+      "approx": true,
+      "source_sentence": "Đến năm 2030, tổng nhu cầu sử dụng đất khoảng 19.800ha và tổng nhu cầu sử dụng mặt nước khoảng 1.838.500ha."
+    },
+    {
+      "kind": "scalar",
+      "value": "1.838.500",
+      "unit": "ha",
+      "label": "Tổng nhu cầu sử dụng mặt nước đến 2030",
+      "approx": true,
+      "source_sentence": "Đến năm 2030, tổng nhu cầu sử dụng đất khoảng 19.800ha và tổng nhu cầu sử dụng mặt nước khoảng 1.838.500ha."
+    },
+    {
+      "kind": "scalar",
+      "value": "581.000",
+      "unit": "tỷ đồng",
+      "label": "Nhu cầu vốn đầu tư hệ thống cảng biển",
+      "approx": true,
+      "source_sentence": "Nhu cầu vốn đầu tư hệ thống cảng biển khoảng 581.000 tỷ đồng (chỉ bao gồm các bến cảng kinh doanh dịch vụ xếp dỡ hàng hóa) được huy động chủ yếu từ nguồn ngoài ngân sách và các nguồn vốn hợp pháp khác."
+    },
+    {
+      "kind": "entity_list",
+      "entities": [
+        "Cái Mép - Thị Vải",
+        "Cần Giờ",
+        "Liên Chiểu",
+        "Phù Mỹ",
+        "Bãi Gốc"
+      ],
+      "label": "Khu bến ưu tiên đầu tư bến cảng",
+      "salience": "subject",
+      "source_sentence": "Đối với bến cảng biển, ưu tiên đầu tư các bến tiếp theo thuộc khu bến Lạch Huyện; bến khởi động khu bến Nam Đồ Sơn (Hải Phòng) đồng bộ với đầu tư luồng sông Văn Úc - Nam Đồ Sơn và hệ thống đê chỉnh trị (giai đoạn khởi động); Các bến tại khu bến Cái Mép - Thị Vải (Bà Rịa - Vũng Tàu); khu bến cảng trung chuyển quốc tế Cần Giờ (TPHCM); các bến tại khu bến Liên Chiểu (Đà Nẵng), khu bến Phù Mỹ (Gia Lai), khu bến Bãi Gốc (Đắk Lắk)."
+    }
+  ],
+  "excluded_borderline": [
+    "Danh sách luồng/đê chắn sóng ưu tiên đầu tư kết cấu hạ tầng CÔNG CỘNG (Lạch Huyện, kênh Hà Nam, Văn Úc, Chanh, Cẩm Phả, Bắc/Nam Nghi Sơn, Cửa Lò, Vũng Áng, Chân Mây, Cửa Lở, Ba Ngòi, Vũng Tàu - Thị Vải, kênh Quan Chánh Bố) — RẤT dài, không tách hết thành entity_list riêng để golden set không phình quá mức cần thiết cho A/B; Brief bắt được thêm ở đây là ĐIỂM CỘNG (không sai), không bắt cũng không trừ nặng vì đã có entity_list #22 (khu bến ưu tiên đầu tư) làm đại diện đủ tốt cho recall.",
+    "'bến khởi động khu bến Nam Đồ Sơn... đồng bộ với đầu tư luồng sông Văn Úc - Nam Đồ Sơn' — Nam Đồ Sơn đã có trong fact #10 và #22 (nếu Brief gộp lại thay vì tách thêm 1 fact riêng, KHÔNG trừ điểm)."
+  ],
+  "topic_key": "23e2d5b67ef91360"
+}

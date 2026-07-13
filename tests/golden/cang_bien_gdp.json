@@ -1,0 +1,160 @@
+{
+  "slug": "cang_bien_gdp",
+  "url": "https://cafebiz.vn/tp-cang-la-noi-ban-bac-ve-linh-vuc-dong-gop-10-gdp-cua-vn-thu-hut-dai-bang-tu-my-tq-nhat-dau-tu-176260710154511812.chn",
+  "title": "TP cảng là nơi bàn bạc về lĩnh vực đóng góp 10% GDP của VN, thu hút “đại bàng” từ Mỹ, TQ, Nhật… đầu tư",
+  "note": "SỬA VAI TRÒ Ở PHASE 2b: đây KHÔNG phải 'bài cảng biển' — golden set Phase 0 đã neo NHẦM URL (nhầm bài KCN/GDP với bài quy hoạch cảng biển thật). Bài cảng biển ĐÚNG đã chuyển sang tests/golden/4_cang_bien_dac_biet.json. File này GIỮ LẠI có chủ đích làm CA ĐỐI CHỨNG ÂM (negative control) cho salience (Content Factory Phase 2b): nội dung THẬT là hội thảo khu công nghiệp (KCN) tại Hải Phòng, KHÔNG nêu tên cảng cụ thể nào — MỌI entity/entity_list ở bài này PHẢI salience=\"context\" (hội thảo/hiệp hội/người phát biểu), related/priority.primary PHẢI RỖNG khi chạy qua pipeline. Model nào 'sáng tạo' ra tên cảng cho bài này ở Phase 3 A/B là BỊA — trừ điểm nặng. Evidence fetch qua chính collector của pipeline ($0, tất định) — xem tests/golden/_raw/cang_bien_gdp.txt.",
+  "curator": "human, đọc thủ công toàn bài — KHÔNG phải output model",
+  "fact_count": 17,
+  "facts": [
+    {
+      "kind": "scalar",
+      "value": "400",
+      "unit": "KCN",
+      "label": "Số khu công nghiệp (KCN) hiện có cả nước",
+      "approx": true,
+      "source_sentence": "Theo số liệu từ Cục Thống kê, hiện nay có hơn 400 KCN và 1.000 cụm công nghiệp, đóng góp hơn 10% GDP, đồng thời tạo việc làm cho hàng triệu lao động và hút FDI mạnh mẽ."
+    },
+    {
+      "kind": "scalar",
+      "value": "1.000",
+      "unit": "cụm công nghiệp",
+      "label": "Số cụm công nghiệp hiện có cả nước",
+      "approx": false,
+      "source_sentence": "Theo số liệu từ Cục Thống kê, hiện nay có hơn 400 KCN và 1.000 cụm công nghiệp, đóng góp hơn 10% GDP, đồng thời tạo việc làm cho hàng triệu lao động và hút FDI mạnh mẽ."
+    },
+    {
+      "kind": "scalar",
+      "value": "10",
+      "unit": "%",
+      "label": "Tỷ trọng đóng góp GDP của KCN + cụm công nghiệp cả nước",
+      "approx": true,
+      "source_sentence": "Theo số liệu từ Cục Thống kê, hiện nay có hơn 400 KCN và 1.000 cụm công nghiệp, đóng góp hơn 10% GDP, đồng thời tạo việc làm cho hàng triệu lao động và hút FDI mạnh mẽ."
+    },
+    {
+      "kind": "scalar",
+      "value": "80.000",
+      "unit": "ha",
+      "label": "Dư địa đất công nghiệp còn lại",
+      "approx": false,
+      "source_sentence": "Với 80.000 ha dư địa trong tổng 180.000 ha đất công nghiệp, Việt Nam đang sở hữu tiềm năng để phát triển khu công nghiệp thế hệ mới, ứng dụng công nghệ cao, sản xuất thông minh, bền vững."
+    },
+    {
+      "kind": "scalar",
+      "value": "180.000",
+      "unit": "ha",
+      "label": "Tổng diện tích đất công nghiệp cả nước",
+      "approx": false,
+      "source_sentence": "Với 80.000 ha dư địa trong tổng 180.000 ha đất công nghiệp, Việt Nam đang sở hữu tiềm năng để phát triển khu công nghiệp thế hệ mới, ứng dụng công nghệ cao, sản xuất thông minh, bền vững."
+    },
+    {
+      "kind": "scalar",
+      "value": "10/7",
+      "unit": null,
+      "label": "Ngày khai mạc Vietnam Industrial Park Summit 2026",
+      "approx": false,
+      "source_sentence": "Hôm nay (10/7), tại Hải Phòng, Hội thảo và Triển lãm quốc tế thường niên về khu công nghiệp \" Diễn đàn Phát triển Khu Công nghiệp Việt Nam - Vietnam Industrial Park Summit 2026\" chính thức diễn ra, với chủ đề “Phát triển khu công nghiệp Việt Nam gắn với mục tiêu tăng trưởng công nghiệp quốc gia”."
+    },
+    {
+      "kind": "scalar",
+      "value": "10,8",
+      "unit": "%",
+      "label": "Tăng trưởng chỉ số IIP (sản xuất công nghiệp) 6 tháng đầu 2026 so với cùng kỳ",
+      "approx": false,
+      "source_sentence": "Trong 6 tháng đầu năm 2026, sản xuất công nghiệp tiếp tục ghi nhận tín hiệu tích cực với chỉ số IIP (chỉ số sản xuất công nghiệp) tăng 10,8% so với cùng kỳ."
+    },
+    {
+      "kind": "scalar",
+      "value": "11,4",
+      "unit": "%",
+      "label": "Tăng trưởng riêng ngành công nghiệp chế biến, chế tạo 6 tháng đầu 2026",
+      "approx": false,
+      "source_sentence": "Trong đó, riêng công nghiệp chế biến, chế tạo tăng 11,4%, tiếp tục giữ vai trò động lực then chốt của nền kinh tế."
+    },
+    {
+      "kind": "range",
+      "value_low": "70",
+      "value_high": "80",
+      "unit": "%",
+      "label": "Tỷ trọng vốn FDI đăng ký mới ngành chế biến, chế tạo tập trung vào KCN/khu kinh tế",
+      "approx": true,
+      "source_sentence": "Thực tế có khoảng 70 - 80% vốn FDI đăng ký mới của ngành công nghiệp chế biến, chế tạo tập trung vào khu công nghiệp, khu kinh tế."
+    },
+    {
+      "kind": "scalar",
+      "value": "20",
+      "unit": "%",
+      "label": "Đóng góp GDP của khu vực kinh tế có vốn đầu tư nước ngoài (FDI) trong KCN/khu kinh tế",
+      "approx": true,
+      "source_sentence": "Đáng chú ý là khu vực kinh tế có vốn đầu tư nước ngoài phần lớn hoạt động trong các khu công nghiệp, khu kinh tế hiện đóng góp khoảng 20% GDP, hơn 70% kim ngạch xuất khẩu cả nước."
+    },
+    {
+      "kind": "scalar",
+      "value": "70",
+      "unit": "%",
+      "label": "Tỷ trọng kim ngạch xuất khẩu cả nước từ khu vực FDI trong KCN/khu kinh tế",
+      "approx": true,
+      "source_sentence": "Đáng chú ý là khu vực kinh tế có vốn đầu tư nước ngoài phần lớn hoạt động trong các khu công nghiệp, khu kinh tế hiện đóng góp khoảng 20% GDP, hơn 70% kim ngạch xuất khẩu cả nước."
+    },
+    {
+      "kind": "scalar",
+      "value": "3,83 triệu",
+      "unit": "lao động",
+      "label": "Việc làm trực tiếp do KCN/khu kinh tế tạo ra",
+      "approx": true,
+      "source_sentence": "Riêng các khu công nghiệp, khu kinh tế tạo việc làm trực tiếp cho gần 3,83 triệu lao động."
+    },
+    {
+      "kind": "scalar",
+      "value": "14",
+      "unit": "tỷ USD",
+      "label": "Vốn lũy kế thu hút vào lĩnh vực bán dẫn",
+      "approx": true,
+      "source_sentence": "Trong đó, lĩnh vực bán dẫn đã thu hút lũy kế trên 14 tỷ USD với hơn 240 dự án, song song là làn sóng đầu tư mới vào trung tâm dữ liệu, AI và năng lượng tái tạo."
+    },
+    {
+      "kind": "scalar",
+      "value": "240",
+      "unit": "dự án",
+      "label": "Số dự án bán dẫn đã thu hút",
+      "approx": true,
+      "source_sentence": "Trong đó, lĩnh vực bán dẫn đã thu hút lũy kế trên 14 tỷ USD với hơn 240 dự án, song song là làn sóng đầu tư mới vào trung tâm dữ liệu, AI và năng lượng tái tạo."
+    },
+    {
+      "kind": "entity_list",
+      "entities": [
+        "Hàn Quốc",
+        "Nhật Bản",
+        "Singapore",
+        "Trung Quốc",
+        "Mỹ",
+        "châu Âu"
+      ],
+      "label": "Các quốc gia/khu vực nhà đầu tư coi KCN Việt Nam là điểm đến chiến lược",
+      "salience": "context",
+      "salience_reason": "Phase 2b: đây là bối cảnh xu hướng đầu tư vĩ mô (ai đang rót vốn), KHÔNG phải chủ thể/dự án cụ thể bài đang báo cáo — không có cảng/dự án nào được nêu tên trong bài này (xem note cấp file).",
+      "source_sentence": "Mặt khác, thực tế là các nhà đầu tư đến từ Hàn Quốc, Nhật Bản, Singapore, Trung Quốc, Mỹ và châu Âu tiếp tục coi khu công nghiệp Việt Nam là điểm đến chiến lược trong chuỗi cung ứng khu vực và toàn cầu."
+    },
+    {
+      "kind": "range",
+      "value_low": "2026",
+      "value_high": "2030",
+      "unit": null,
+      "label": "Giai đoạn mục tiêu tăng trưởng GDP bình quân từ 10%/năm trở lên",
+      "approx": false,
+      "source_sentence": "Lãnh đạo TP Hải Phòng cho rằng, trong giai đoạn từ 2026 - 2030, khi đất nước đặt mục tiêu tăng trưởng GDP bình quân từ 10%/năm trở lên, hệ thống khu công nghiệp cần tiếp tục đổi mới theo hướng đồng bộ về quy hoạch và hạ tầng, chuyển đổi xanh, chuyển đổi số, đồng thời nâng cao năng lực đón các dự án công nghệ cao, bán dẫn, đổi mới sáng tạo."
+    },
+    {
+      "kind": "scalar",
+      "value": "25",
+      "unit": "gian hàng",
+      "label": "Số gian hàng triển lãm bên lề hội thảo",
+      "approx": true,
+      "source_sentence": "Cùng với chương trình hội thảo là không gian triển lãm, quy tụ hơn 25 gian hàng"
+    }
+  ],
+  "excluded_borderline": [
+    "Mục tiêu GDP bình quân 10%/năm trở lên (giai đoạn 2026-2030) đã gộp vào fact range #2026-2030 ở trên thay vì tách riêng scalar '10%/năm' — tránh đếm trùng cùng 1 câu.",
+    "Tên diễn giả (TS Nguyễn Văn Khôi, TS Nguyễn Đức Hiển, Trần Văn Quân) và tên đơn vị triển lãm (IDICO, TONMAT, UNIDO, DEEP C, CMC Global, ...) là attribution/danh sách dài cho bài VIẾT (article), KHÔNG phải chất liệu infographic-worthy chính — để NGOÀI fact_count chính thức, ghi chú ở đây để Brief mới KHÔNG bị trừ điểm oan nếu bỏ qua, nhưng CŨNG không sai nếu Brief bắt được (đánh giá thủ công riêng nếu xảy ra)."
+  ],
+  "topic_key": "98628e1ec08c1972"
+}
