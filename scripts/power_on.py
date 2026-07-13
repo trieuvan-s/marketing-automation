@@ -38,7 +38,7 @@ from twmkt._encoding import ensure_utf8_stdio  # noqa: E402
 ensure_utf8_stdio()
 
 from twmkt import factory  # noqa: E402
-from twmkt.config import data_path, load_settings  # noqa: E402
+from twmkt.config import data_path, load_brand, load_settings  # noqa: E402
 from twmkt.schedule import ScheduleConfig, Scheduler  # noqa: E402
 
 
@@ -176,8 +176,9 @@ def main() -> None:
 
     settings = load_settings()
 
+    brand_name = str(load_brand().get("name") or "").strip() or "Marketing Automation"
     print("=" * 60)
-    print("  TURTLE WEALTH MARKETING — POWER ON")
+    print(f"  {brand_name.upper()} — POWER ON")
     print("=" * 60)
     print(factory.llm_status(settings).banner)
     print()

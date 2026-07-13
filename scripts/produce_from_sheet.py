@@ -314,7 +314,8 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
         # — phân biệt facts=[] RỖNG-HỢP-LỆ (Brief chạy trọn vẹn, xác nhận tin
         # thuần định tính) vs RỖNG-DO-HỎNG (LLM lỗi/timeout — cờ luôn False).
         brief_result = (run_brief(route_llm, evidence, model=factory.step_model(settings, "brief"),
-                                  fail_loud=factory.is_fail_loud_step(settings, "brief"))
+                                  fail_loud=factory.is_fail_loud_step(settings, "brief"),
+                                  settings=settings)
                        if write_article else BriefResult())
         brief = ProductionBrief(
             title=item["context"], hook=item["hook"], tickers=item["tickers"],

@@ -102,9 +102,21 @@ def test_load_settings_reads_keys():
 
 def test_settings_expands_env():
     from twmkt.config import _expand
-    os.environ["TWMKT_SHEET_ID"] = "SHEET_ABC"
-    data = _expand({"sheets": {"spreadsheet_id": "${TWMKT_SHEET_ID}"}})
-    assert data["sheets"]["spreadsheet_id"] == "SHEET_ABC"
+    # Dọn lại ENV sau test — bug hygiene THẬT phát hiện: để sót "SHEET_ABC" làm
+    # rò rỉ os.environ["TWMKT_SHEET_ID"] sang các test CHẠY SAU trong CÙNG tiến
+    # trình (_run_all() chạy mọi test chung 1 process), khiến resolve_sheet_id()
+    # (Content Factory Phase D) đọc nhầm giá trị test cũ thay vì Settings truyền
+    # vào — xem test_resolve_sheet_id_allow_production_true_returns_production.
+    old = os.environ.get("TWMKT_SHEET_ID")
+    try:
+        os.environ["TWMKT_SHEET_ID"] = "SHEET_ABC"
+        data = _expand({"sheets": {"spreadsheet_id": "${TWMKT_SHEET_ID}"}})
+        assert data["sheets"]["spreadsheet_id"] == "SHEET_ABC"
+    finally:
+        if old is None:
+            os.environ.pop("TWMKT_SHEET_ID", None)
+        else:
+            os.environ["TWMKT_SHEET_ID"] = old
 
 
 # --- Phase DATA-ROOT: gốc dữ liệu runtime DUY NHẤT, tách khỏi repo ----------
@@ -215,6 +227,74 @@ def test_load_brand_custom_path_parses_correctly():
     )
     brand = load_brand(path=tmp)
     assert brand["name"] == "Test Brand" and brand["colors"]["primary"] == "#123456"
+
+
+# =====================================================================
+# Content Factory Phase D — RÀO CHẮN MÔI TRƯỜNG: config.resolve_sheet_id()
+# BẮT BUỘC mọi luồng benchmark/A-B (Phase 3 trở đi) trỏ sheet TEST, KHÔNG dựa
+# vào trí nhớ người chạy — ép bằng CODE, không phải quy ước.
+# =====================================================================
+def test_resolve_sheet_id_default_blocks_production_when_no_test_sheet_configured():
+    """Nghiệm thu CHÍNH: chạy benchmark (allow_production=False, mặc định)
+    KHÔNG cấu hình sheet TEST -> PHẢI raise (KHÔNG BAO GIỜ lùi về production dù
+    production CÓ cấu hình sẵn) -> benchmark KHÔNG THỂ ghi vào sheet production."""
+    from twmkt.config import ProductionSheetBlocked, Settings, resolve_sheet_id
+
+    s = Settings({"sheets": {"spreadsheet_id": "PROD-ID-THAT-MUST-NOT-LEAK",
+                             "test_spreadsheet_id": ""}})
+    try:
+        resolve_sheet_id(s)   # allow_production mặc định False
+    except ProductionSheetBlocked:
+        pass
+    else:
+        raise AssertionError("resolve_sheet_id() PHẢI raise khi thiếu sheet TEST — "
+                             "không được lùi về production dù production đã cấu hình sẵn.")
+
+
+def test_resolve_sheet_id_default_returns_test_sheet_never_production():
+    from twmkt.config import Settings, resolve_sheet_id
+
+    s = Settings({"sheets": {"spreadsheet_id": "PROD-ID-THAT-MUST-NOT-LEAK",
+                             "test_spreadsheet_id": "TEST-SHEET-ID"}})
+    assert resolve_sheet_id(s) == "TEST-SHEET-ID"
+    assert resolve_sheet_id(s, allow_production=False) == "TEST-SHEET-ID"
+
+
+def test_resolve_sheet_id_allow_production_true_returns_production():
+    from twmkt.config import Settings, resolve_sheet_id
+
+    s = Settings({"sheets": {"spreadsheet_id": "PROD-ID", "test_spreadsheet_id": "TEST-ID"}})
+    assert resolve_sheet_id(s, allow_production=True) == "PROD-ID"
+
+
+def test_resolve_sheet_id_allow_production_true_but_missing_production_id_raises():
+    from twmkt.config import ProductionSheetBlocked, Settings, resolve_sheet_id
+
+    s = Settings({"sheets": {"spreadsheet_id": "", "test_spreadsheet_id": "TEST-ID"}})
+    try:
+        resolve_sheet_id(s, allow_production=True)
+    except ProductionSheetBlocked:
+        pass
+    else:
+        raise AssertionError("Thiếu spreadsheet_id production nhưng allow_production=True "
+                             "PHẢI raise, KHÔNG được lùi về sheet test.")
+
+
+def test_resolve_sheet_id_env_test_sheet_override():
+    import os
+
+    from twmkt.config import Settings, resolve_sheet_id
+
+    s = Settings({"sheets": {"spreadsheet_id": "PROD-ID", "test_spreadsheet_id": "TEST-FROM-YAML"}})
+    old = os.environ.get("TWMKT_TEST_SHEET_ID")
+    try:
+        os.environ["TWMKT_TEST_SHEET_ID"] = "TEST-FROM-ENV"
+        assert resolve_sheet_id(s) == "TEST-FROM-ENV"   # ENV đè settings.yaml
+    finally:
+        if old is None:
+            os.environ.pop("TWMKT_TEST_SHEET_ID", None)
+        else:
+            os.environ["TWMKT_TEST_SHEET_ID"] = old
 
 
 def test_build_store_file_resolves_under_data_root_not_hardcoded_storage():
@@ -381,6 +461,25 @@ def test_hook_feeds_producers_title_and_cta():
     article = next(d for d in st.drafts if d.fmt is ContentFormat.ARTICLE)
     assert article.title == st.hook.headlines[0]
     assert st.hook.cta in article.body
+
+
+def test_hook_default_cta_is_brand_driven_not_hardcoded_old_brand():
+    """Content Factory Phase D — hook.py._DEFAULT_CTA đọc brand.name từ
+    config/brand.yaml (MỘT NGUỒN), KHÔNG còn hằng số hard-code brand cũ."""
+    from twmkt.agents.hook import _DEFAULT_CTA, _BRAND_NAME
+
+    assert "turtle" not in _DEFAULT_CTA.lower()
+    assert _BRAND_NAME in _DEFAULT_CTA
+
+
+def test_producers_cta_and_disclaimer_are_brand_driven_not_hardcoded_old_brand():
+    """Content Factory Phase D — agents/producers.py (đường Hook/Luồng B, VẪN
+    LIVE qua orchestrator.all_producers()) cũng phải sạch brand cũ."""
+    from twmkt.agents.producers import _BRAND_NAME, _DEFAULT_CTA, _DISCLAIMER
+
+    assert "turtle" not in _DEFAULT_CTA.lower()
+    assert _BRAND_NAME in _DEFAULT_CTA
+    assert "turtle" not in _DISCLAIMER.lower()
 
 
 def test_hook_agent_offline_fallback_is_deterministic():
@@ -2567,7 +2666,7 @@ def test_production_agent_graceful_empty_llm():
         ProductionBrief(title="Tiêu đề bài", hook="Hook X", tickers=["HPG"],
                         evidence="Dữ kiện quan trọng.")))
     assert d.is_clean and "Tiêu đề bài" in d.body
-    assert "tự chịu trách nhiệm" in d.body.lower()
+    assert "không phải khuyến nghị" in d.body.lower()   # Content Factory Phase D: disclaimer rút gọn
 
 
 def test_domain_of_extracts_netloc():
@@ -4102,6 +4201,49 @@ def test_infographic_composer_empty_facts_returns_empty_spec_no_llm_call():
     assert "Số liệu" not in d.body
 
 
+# --- Content Factory Phase D: vá rò brand cũ (CTA/disclaimer brand-driven) ---
+def test_default_cta_reads_brand_name_from_config_not_hardcoded():
+    from twmkt.agents.production import _default_cta
+
+    assert _default_cta({"name": "FVA Capital"}) == "Theo dõi FVA Capital để cập nhật phân tích."
+    assert _default_cta({"name": "Brand Khác"}) == "Theo dõi Brand Khác để cập nhật phân tích."
+    # brand rỗng/thiếu name -> KHÔNG bịa tên nào (kể cả brand cũ hay mới), câu vẫn hợp lệ
+    assert _default_cta({}) == "Theo dõi để cập nhật phân tích."
+
+
+def test_default_disclaimer_reads_from_brand_yaml_footer():
+    from twmkt.agents.production import _default_disclaimer
+
+    assert _default_disclaimer({"footer": {"disclaimer": "Câu miễn trừ riêng."}}) == "Câu miễn trừ riêng."
+    # thiếu brand/footer -> lùi mượt về câu chung, KHÔNG hard-code brand
+    assert _default_disclaimer({}) == "Nội dung mang tính thông tin, không phải khuyến nghị đầu tư."
+
+
+def test_render_analysis_and_video_use_dynamic_cta_not_hardcoded_brand():
+    """Regression trực tiếp cho sự cố THẬT: render_analysis (article) VÀ
+    video_fields_from_data (video, cả đường LLM-thiếu-cta LẪN đường lùi mượt
+    hoàn toàn) đều PHẢI lấy CTA từ _default_cta() (brand.yaml), KHÔNG còn hằng
+    số hard-code brand cũ nào sống sót ở các đường gọi này."""
+    from twmkt.agents.production import (
+        ProductionBrief, _default_cta, render_analysis, video_fields_from_data,
+    )
+
+    brief = ProductionBrief(title="X", hook="", url="https://cafef.vn/x.chn", evidence="")
+    body = render_analysis("Tiêu đề", "Sapo", [{"heading": "H", "content": "C"}],
+                           "disclaimer", [], brief)
+    assert _default_cta() in body
+
+    # Video: LLM trả JSON nhưng THIẾU field "cta" -> fallback _default_cta()
+    _title, _dur, _scenes, cta, _disc = video_fields_from_data(
+        {"title": "T", "scenes": [{"t": "0-3s", "voiceover": "v"}]}, brief)
+    assert cta == _default_cta()
+
+    # Video: data=None (LLM hỏng hoàn toàn) -> đường lùi mượt CŨNG dùng _default_cta()
+    _title2, _dur2, _scenes2, cta2, disc2 = video_fields_from_data(None, brief)
+    assert cta2 == _default_cta()
+    assert disc2 != ""   # vẫn có disclaimer hợp lệ (brand-driven), không rỗng
+
+
 def test_infographic_composer_falls_back_to_deterministic_spec_when_llm_fails():
     """LLM composer trả rỗng/không parse được -> LÙI MƯỢT: spec TẤT ĐỊNH từ
     facts[] trực tiếp (không nén được chữ, nhưng vẫn đúng 8 trường + title !=
@@ -4125,6 +4267,21 @@ def test_infographic_composer_falls_back_to_deterministic_spec_when_llm_fails():
     assert set(all_labels) == {"Tăng trưởng doanh thu", "Lợi nhuận kỷ lục"}
     assert set(spec.keys()) == {"title", "subtitle", "hero", "market", "highlights",
                                 "related", "priority", "source", "render_hint"}
+
+
+def test_entity_names_from_facts_filters_by_subject_salience_only():
+    """Content Factory Phase 2b — nguồn 'related' ở đường LÙI MƯỢT (composer
+    LLM hỏng) CHỈ lấy salience="subject", loại "context" VÀ "" (dữ liệu cũ
+    chưa phân loại — an toàn hơn khi KHÔNG chắc chắn)."""
+    from twmkt.agents.production import _entity_names_from_facts
+    from twmkt.models import Fact
+
+    facts = [
+        Fact(value="", label="Cảng", shape="entity_list", entities=["Cần Giờ"], salience="subject"),
+        Fact(value="Hiệp hội BĐS", label="Đơn vị tổ chức", shape="entity", salience="context"),
+        Fact(value="Ban Chính sách", label="Đơn vị đồng tổ chức", shape="entity"),   # salience rỗng (dữ liệu cũ)
+    ]
+    assert _entity_names_from_facts(facts) == ["Cần Giờ"]
 
 
 def test_infographic_composer_title_never_equals_subtitle_even_if_llm_repeats():
@@ -4208,6 +4365,56 @@ def test_verify_fact_in_evidence_finds_sentence_or_none():
     assert verify_fact_in_evidence("", evidence) is None
 
 
+def test_verify_fact_in_evidence_matches_across_nfc_nfd_unicode_forms():
+    """BUG THẬT phát hiện qua round-trip trên bài cảng biển thật (Content
+    Factory Phase 2b): collector 1 số nguồn (cafef.vn) trả markdown với dấu
+    tiếng Việt ở dạng TỔ HỢP (NFD — "ó" = 'o' + dấu sắc rời, 2 code point)
+    trong khi LLM luôn trả NFC (1 code point). Trước fix: 15/15 tên tỉnh trong
+    1 entity_list chỉ còn sống sót "Gia Lai" (tên duy nhất không dấu tổ hợp) —
+    mọi tên có dấu ghép đều bị loại OAN vì so khớp chuỗi thô thất bại dù NHÌN
+    GIỐNG HỆT. value NFC phải khớp được evidence NFD và ngược lại."""
+    import unicodedata
+
+    from twmkt.agents.brief import verify_fact_in_evidence
+
+    value_nfc = unicodedata.normalize("NFC", "Thanh Hóa")
+    value_nfd = unicodedata.normalize("NFD", "Thanh Hóa")
+    assert value_nfc != value_nfd   # sanity: 2 dạng THẬT khác byte (test không vô nghĩa nếu bằng nhau)
+    evidence_nfd = unicodedata.normalize("NFD", "Danh sách gồm Thanh Hóa, Nghệ An và Hà Tĩnh.")
+    sent = verify_fact_in_evidence(value_nfc, evidence_nfd)
+    # sent trả về GIỮ NGUYÊN dạng Unicode của evidence đầu vào (hàm chỉ chuẩn
+    # hoá NỘI BỘ để SO KHỚP, không đổi dữ liệu trả về) — trong pipeline thật,
+    # facts_from_llm_output() đã chuẩn hoá source_text 1 LẦN trước khi gọi vào
+    # đây nên sent luôn là NFC; ở đây so bằng bản NFC hoá để kiểm đúng nội dung
+    # mà không phụ thuộc dạng byte cụ thể.
+    assert sent is not None
+    assert "Thanh Hóa" in unicodedata.normalize("NFC", sent)
+
+    # Chiều ngược lại: value NFD, evidence NFC — cũng phải khớp.
+    evidence_nfc = unicodedata.normalize("NFC", "Danh sách gồm Thanh Hóa, Nghệ An và Hà Tĩnh.")
+    assert verify_fact_in_evidence(value_nfd, evidence_nfc) is not None
+
+
+def test_facts_from_llm_output_entity_list_survives_nfd_evidence_full_list():
+    """Regression Ở CẤP fact — trước fix: 1 entity_list 3 phần tử với dấu tổ
+    hợp trong evidence (NFD) chỉ còn sống sót phần tử KHÔNG dấu ghép. Sau fix:
+    CẢ 3 phải sống sót."""
+    import json as _json
+    import unicodedata
+
+    from twmkt.agents.brief import facts_from_llm_output
+
+    evidence_nfd = unicodedata.normalize(
+        "NFD", "Xây dựng khu bến Cần Giờ, khu bến Liên Chiểu, khu bến Nam Đồ Sơn.")
+    raw = _json.dumps({"facts": [
+        {"shape": "entity_list", "label": "3 khu bến mới",
+         "entities": ["Cần Giờ", "Liên Chiểu", "Nam Đồ Sơn"], "salience": "subject"},
+    ]}, ensure_ascii=False)
+    facts = facts_from_llm_output(raw, evidence_nfd).facts
+    assert len(facts) == 1
+    assert facts[0].entities == ["Cần Giờ", "Liên Chiểu", "Nam Đồ Sơn"]
+
+
 def test_verify_fact_in_evidence_rejects_short_value_lodged_inside_longer_number():
     """Bug thật phát hiện qua round-trip: value NGẮN ("8") KHÔNG được khớp nhầm
     vào bên trong 1 số dài hơn ("8,18%") — phải đợi tới câu có "8" ĐỨNG RIÊNG."""
@@ -4265,6 +4472,236 @@ def test_facts_from_llm_output_empty_or_bad_json_returns_empty_list():
     assert facts_from_llm_output("", _SSI_EVIDENCE).facts == []
     assert facts_from_llm_output("không phải JSON", _SSI_EVIDENCE).facts == []
     assert facts_from_llm_output('{"facts": []}', _SSI_EVIDENCE).facts == []
+
+
+# =====================================================================
+# Content Factory Phase 2 — facts_from_llm_output() VÉT CẠN 5 shape (models.
+# FACT_SHAPES). Test theo shape: parse đúng + verify chống bịa RIÊNG cho từng
+# hình dạng (range/delta PHẢI 2 đầu CÙNG 1 câu; entity_list lọc từng phần tử;
+# entity verify như scalar). Thiếu/lạ "shape" -> lùi về "scalar" (tương thích
+# ngược, đã test ở các test_facts_from_llm_output_* phía trên — schema cũ
+# không có field "shape").
+# =====================================================================
+def test_facts_from_llm_output_range_shape_requires_both_bounds_same_sentence():
+    from twmkt.agents.brief import facts_from_llm_output
+    import json as _json
+
+    evidence = "Thực tế có khoảng 70 - 80% vốn FDI đăng ký mới tập trung vào KCN."
+    raw = _json.dumps({"facts": [
+        {"shape": "range", "value_low": "70", "value_high": "80", "unit": "%",
+         "label": "Vốn FDI chế biến, chế tạo vào KCN", "kind": "percent", "approx": True},
+    ]}, ensure_ascii=False)
+    facts = facts_from_llm_output(raw, evidence).facts
+    assert len(facts) == 1
+    f = facts[0]
+    assert f.shape == "range" and f.value_low == "70" and f.value_high == "80"
+    assert f.canonical_low == 70.0 and f.canonical_high == 80.0
+    assert "70 - 80%" in f.source
+
+
+def test_facts_from_llm_output_range_shape_rejects_bounds_from_different_sentences():
+    """Chống bịa: value_low và value_high đến từ 2 câu KHÔNG liên quan -> KHÔNG
+    được ghép thành 1 range — LOẠI cả fact."""
+    from twmkt.agents.brief import facts_from_llm_output
+    import json as _json
+
+    evidence = "Doanh nghiệp A có 70 nhân sự. Doanh nghiệp B lãi 80 tỷ đồng."
+    raw = _json.dumps({"facts": [
+        {"shape": "range", "value_low": "70", "value_high": "80", "unit": None,
+         "label": "Range bịa ghép 2 câu khác nhau"},
+    ]}, ensure_ascii=False)
+    assert facts_from_llm_output(raw, evidence).facts == []
+
+
+def test_facts_from_llm_output_delta_shape_numeric_from_to():
+    from twmkt.agents.brief import facts_from_llm_output
+    import json as _json
+
+    evidence = ("Doanh thu thuần quý 2/2026 chỉ đạt hơn 176 triệu đồng, giảm sâu "
+               "so với mức 16,3 tỷ đồng của cùng kỳ năm 2025.")
+    raw = _json.dumps({"facts": [
+        {"shape": "delta", "from_value": "16,3 tỷ đồng", "to_value": "176 triệu đồng",
+         "label": "Doanh thu quý 2 (2025 → 2026)", "kind": "money"},
+    ]}, ensure_ascii=False)
+    facts = facts_from_llm_output(raw, evidence).facts
+    assert len(facts) == 1
+    f = facts[0]
+    assert f.shape == "delta"
+    assert f.from_value == "16,3 tỷ đồng" and f.to_value == "176 triệu đồng"
+    assert f.canonical_from == 16.3e9 and f.canonical_to == 176e6
+
+
+def test_facts_from_llm_output_delta_shape_non_numeric_status_change():
+    """Delta KHÔNG PHẢI số (chuyển trạng thái) — canonical_from/to = None là
+    HỢP LỆ (không phải lỗi), miễn cả 2 vế đều verify được CÙNG câu."""
+    from twmkt.agents.brief import facts_from_llm_output
+    import json as _json
+
+    evidence = "Cùng thời điểm, HVN được chuyển từ diện kiểm soát sang diện cảnh báo."
+    raw = _json.dumps({"facts": [
+        {"shape": "delta", "from_value": "diện kiểm soát", "to_value": "diện cảnh báo",
+         "label": "Thay đổi phân loại giao dịch cổ phiếu HVN"},
+    ]}, ensure_ascii=False)
+    facts = facts_from_llm_output(raw, evidence).facts
+    assert len(facts) == 1
+    assert facts[0].canonical_from is None and facts[0].canonical_to is None
+    assert facts[0].from_value == "diện kiểm soát" and facts[0].to_value == "diện cảnh báo"
+
+
+def test_facts_from_llm_output_entity_list_shape_filters_unverified_members():
+    """Chống bịa: MỖI phần tử entity_list verify RIÊNG — tên KHÔNG có trong
+    evidence bị loại KHỎI DANH SÁCH (không loại cả fact, trừ khi rỗng sau lọc)."""
+    from twmkt.agents.brief import facts_from_llm_output
+    import json as _json
+
+    evidence = "Các nhà đầu tư đến từ Hàn Quốc, Nhật Bản và Mỹ tiếp tục coi Việt Nam là điểm đến."
+    raw = _json.dumps({"facts": [
+        {"shape": "entity_list", "label": "Quốc gia đầu tư",
+         "entities": ["Hàn Quốc", "Nhật Bản", "Mỹ", "Nga (bịa)"]},
+    ]}, ensure_ascii=False)
+    facts = facts_from_llm_output(raw, evidence).facts
+    assert len(facts) == 1
+    assert facts[0].entities == ["Hàn Quốc", "Nhật Bản", "Mỹ"]   # "Nga (bịa)" bị lọc
+
+
+def test_facts_from_llm_output_entity_list_shape_drops_fact_when_all_members_unverified():
+    from twmkt.agents.brief import facts_from_llm_output
+    import json as _json
+
+    evidence = "Không có quốc gia nào được nhắc tới trong câu này."
+    raw = _json.dumps({"facts": [
+        {"shape": "entity_list", "label": "Quốc gia bịa hoàn toàn",
+         "entities": ["Đức", "Ý"]},
+    ]}, ensure_ascii=False)
+    assert facts_from_llm_output(raw, evidence).facts == []
+
+
+def test_facts_from_llm_output_entity_shape_validates_entity_type_against_config_list():
+    from twmkt.agents.brief import facts_from_llm_output
+    import json as _json
+
+    evidence = "Ông Nguyễn Duy Linh, Tổng Giám đốc CTCP Chứng khoán SHS, cho biết..."
+    raw = _json.dumps({"facts": [
+        {"shape": "entity", "value": "SHS", "label": "Công ty chứng khoán", "entity_type": "company"},
+        {"shape": "entity", "value": "Nguyễn Duy Linh", "label": "Người phát biểu",
+         "entity_type": "loai-khong-hop-le"},
+    ]}, ensure_ascii=False)
+    facts = facts_from_llm_output(raw, evidence,
+                                  entity_types=["ticker", "company", "person", "other"]).facts
+    by_value = {f.value: f for f in facts}
+    assert by_value["SHS"].entity_type == "company"
+    assert by_value["Nguyễn Duy Linh"].entity_type == "other"   # loại lạ ngoài config -> "other"
+
+
+def test_facts_from_llm_output_entity_shape_drops_fabricated_name():
+    from twmkt.agents.brief import facts_from_llm_output
+    import json as _json
+
+    evidence = "Ông Nguyễn Duy Linh, Tổng Giám đốc SHS, cho biết có hai nguyên nhân chính."
+    raw = _json.dumps({"facts": [
+        {"shape": "entity", "value": "Warren Buffett", "label": "Người phát biểu bịa",
+         "entity_type": "person"},
+    ]}, ensure_ascii=False)
+    assert facts_from_llm_output(raw, evidence).facts == []
+
+
+# --- Content Factory Phase 2b: salience (chủ thể "subject" vs phông nền "context") ---
+def test_facts_from_llm_output_parses_salience_for_entity_and_entity_list():
+    from twmkt.agents.brief import facts_from_llm_output
+    import json as _json
+
+    evidence = ("4 cảng: Cần Giờ, Liên Chiểu được quy hoạch. Hội thảo do Hiệp hội "
+               "Bất động sản Việt Nam tổ chức tại Hải Phòng.")
+    raw = _json.dumps({"facts": [
+        {"shape": "entity_list", "label": "4 cảng được quy hoạch",
+         "entities": ["Cần Giờ", "Liên Chiểu"], "salience": "subject"},
+        {"shape": "entity", "value": "Hiệp hội Bất động sản Việt Nam",
+         "label": "Đơn vị tổ chức hội thảo", "entity_type": "policy", "salience": "context"},
+    ]}, ensure_ascii=False)
+    facts = facts_from_llm_output(raw, evidence,
+                                  entity_salience=["subject", "context"]).facts
+    by_label = {f.label: f for f in facts}
+    assert by_label["4 cảng được quy hoạch"].salience == "subject"
+    assert by_label["Đơn vị tổ chức hội thảo"].salience == "context"
+
+
+def test_facts_from_llm_output_salience_missing_or_invalid_defaults_to_context():
+    """FAIL-CLOSED: salience thiếu/lạ -> "context" (AN TOÀN — không tự lên
+    hình related/priority.primary nếu Brief quên gắn salience)."""
+    from twmkt.agents.brief import facts_from_llm_output
+    import json as _json
+
+    evidence = "SHS công bố báo cáo tài chính quý 2."
+    raw = _json.dumps({"facts": [
+        {"shape": "entity", "value": "SHS", "label": "Công ty chứng khoán",
+         "entity_type": "company"},   # thiếu salience
+        {"shape": "entity_list", "label": "X", "entities": ["SHS"], "salience": "khong-hop-le"},
+    ]}, ensure_ascii=False)
+    facts = facts_from_llm_output(raw, evidence).facts
+    assert all(f.salience == "context" for f in facts)
+
+
+def test_facts_from_llm_output_missing_shape_defaults_to_scalar():
+    """Tương thích ngược: LLM/test cũ không gửi field 'shape' -> lùi về scalar
+    (KHÔNG vỡ prompt/parser cũ nào chưa cập nhật)."""
+    from twmkt.agents.brief import facts_from_llm_output
+    import json as _json
+
+    raw = _json.dumps({"facts": [
+        {"value": "8,18%", "label": "GDP", "unit": "%", "raw": "8,18%"},
+    ]}, ensure_ascii=False)
+    facts = facts_from_llm_output(raw, _SSI_EVIDENCE).facts
+    assert len(facts) == 1 and facts[0].shape == "scalar"
+
+
+def test_facts_from_llm_output_mixed_shapes_and_scan_note_parsed():
+    from twmkt.agents.brief import facts_from_llm_output
+    import json as _json
+
+    evidence = ("Có hơn 400 KCN và 1.000 cụm công nghiệp. Thực tế có khoảng 70 - 80% "
+               "vốn FDI đăng ký mới tập trung vào KCN. Các nhà đầu tư đến từ Hàn Quốc, "
+               "Nhật Bản và Mỹ tiếp tục coi Việt Nam là điểm đến.")
+    raw = _json.dumps({
+        "facts": [
+            {"shape": "scalar", "value": "400", "unit": "KCN", "label": "Số KCN",
+             "kind": "count", "raw": "hơn 400 KCN"},
+            {"shape": "range", "value_low": "70", "value_high": "80", "unit": "%",
+             "label": "Vốn FDI vào KCN"},
+            {"shape": "entity_list", "label": "Quốc gia đầu tư",
+             "entities": ["Hàn Quốc", "Nhật Bản", "Mỹ"]},
+        ],
+        "no_numeric_content": False,
+        "scan_note": "Bài chỉ có 3 dữ kiện, đã quét hết toàn văn.",
+    }, ensure_ascii=False)
+    result = facts_from_llm_output(raw, evidence)
+    assert len(result.facts) == 3
+    shapes = sorted(f.shape for f in result.facts)
+    assert shapes == ["entity_list", "range", "scalar"]
+    assert result.scan_note == "Bài chỉ có 3 dữ kiện, đã quét hết toàn văn."
+
+
+def test_run_brief_reads_entity_types_from_settings_not_hardcoded():
+    """`settings` (tuỳ chọn) -> entity_types đọc từ guardrail.entity_types
+    (KHÔNG hard-code) — thiếu settings vẫn hoạt động (lùi về default nội bộ)."""
+    from twmkt.agents.brief import run_brief
+    import json as _json
+
+    class _FakeSettings:
+        def get(self, key, default=None):
+            if key == "guardrail.entity_types":
+                return ["company", "other"]
+            return default
+
+    class _FakeBriefLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            assert "company|other" in system   # entity_types từ settings LỌT vào system prompt
+            return _json.dumps({"facts": [
+                {"shape": "entity", "value": "SHS", "label": "Công ty", "entity_type": "company"},
+            ]})
+
+    evidence = "SHS công bố báo cáo."
+    facts = run_brief(_FakeBriefLLM(), evidence, settings=_FakeSettings()).facts
+    assert len(facts) == 1 and facts[0].entity_type == "company"
 
 
 def test_run_brief_passes_model_and_verifies_output():
@@ -5744,6 +6181,53 @@ def test_no_machine_write_path_touches_gate3():
         f"invariant 'chỉ người chọn dropdown mới được ghi Gate3': {offenders}")
 
 
+def test_no_old_brand_name_anywhere_in_product_code():
+    """KHÓA VĨNH VIỄN (Content Factory Phase D — vá rò brand) — sự cố THẬT:
+    video script sinh CTA mang brand CŨ (đã đổi tên từ lâu ở renderer, Phase
+    1.2) vì prompt CHƯA từng được quét — brand CŨ rò thẳng ra sản phẩm THẬT.
+
+    Quét TĨNH (không phải chạy LLM) toàn bộ src/, scripts/, prompts/, config/
+    (mọi file .py/.md/.yaml/.yml, kể cả docstring/comment/test fixture NẰM
+    TRONG các thư mục này — không có ngoại lệ, không phân biệt hoa/thường) tìm
+    MỌI biến thể brand cũ đã biết. Test này PHẢI ĐỎ NGAY nếu brand cũ tái xuất
+    hiện ở BẤT KỲ đâu trong 4 thư mục này, dù chỉ trong 1 dòng comment.
+
+    KHÔNG chặn "twmkt"/"TWMKT_*" — đó là tên package Python + tiền tố biến môi
+    trường (TWMKT_SHEET_ID, TWMKT_TELEGRAM_ENABLED...), KHÔNG phải brand hiển
+    thị cho người dùng, đã xác minh riêng (không phải phần bị cấm)."""
+    import re
+
+    banned_patterns = [
+        re.compile(r"turtle\s*wealth", re.IGNORECASE),
+        re.compile(r"\bturtle\b", re.IGNORECASE),
+        re.compile(r"\btwvn\b", re.IGNORECASE),
+        re.compile(r"vel\s*capital", re.IGNORECASE),
+    ]
+    scan_dirs = [os.path.join(REPO_ROOT, "src"), os.path.join(REPO_ROOT, "scripts"),
+                os.path.join(REPO_ROOT, "prompts"), os.path.join(REPO_ROOT, "config")]
+    scan_exts = (".py", ".md", ".yaml", ".yml")
+    offenders: list[str] = []
+    for base in scan_dirs:
+        for dirpath, dirs, filenames in os.walk(base):
+            dirs[:] = [d for d in dirs if d != "__pycache__"]
+            for fn in filenames:
+                if not fn.endswith(scan_exts):
+                    continue
+                path = os.path.join(dirpath, fn)
+                try:
+                    with open(path, encoding="utf-8") as f:
+                        text = f.read()
+                except (UnicodeDecodeError, OSError):
+                    continue
+                for pattern in banned_patterns:
+                    for m in pattern.finditer(text):
+                        line_no = text.count("\n", 0, m.start()) + 1
+                        offenders.append(f"{path}:{line_no} ({m.group(0)!r})")
+    assert offenders == [], (
+        f"Tìm thấy brand CŨ trong src/scripts/prompts/config — VI PHẠM invariant "
+        f"'không chuỗi brand cũ nào được tồn tại trong code sản phẩm': {offenders}")
+
+
 def test_facts_to_json_and_back_round_trip():
     from twmkt.sheets_board import facts_from_json, facts_to_json
     from twmkt.models import Fact
@@ -5756,6 +6240,116 @@ def test_facts_to_json_and_back_round_trip():
     assert len(back) == 1
     assert back[0].value == "8,18" and back[0].canonical_value == 8.18
     assert back[0].label == "GDP"
+
+
+# =====================================================================
+# Content Factory Phase 1 — Fact mở rộng scalar|range|delta|entity_list|entity
+# (models.FACT_SHAPES). Test round-trip từng shape qua facts_to_json/
+# facts_from_json (sheets_board.py, KHÔNG đổi hàm — Fact chỉ thêm field mới,
+# dataclasses.asdict/Fact(**item) tự xử lý) + tương thích ngược dữ liệu scalar
+# cũ (JSON KHÔNG có field "shape"/range/delta/entity vẫn đọc đúng, mặc định
+# shape="scalar").
+# =====================================================================
+def test_fact_scalar_shape_default_and_backward_compat_with_old_json():
+    """Dữ liệu Fact CŨ (trước Phase 1, JSON KHÔNG có field shape/range/delta/
+    entity nào) vẫn đọc đúng — shape mặc định 'scalar', KHÔNG vỡ, KHÔNG cần
+    migrate dữ liệu cũ trên Sheet thật."""
+    import json as _json
+
+    from twmkt.models import FACT_SHAPES, Fact
+    from twmkt.sheets_board import facts_from_json
+
+    assert "scalar" in FACT_SHAPES
+    f = Fact(value="8,18", label="GDP", unit="%", canonical_value=8.18)
+    assert f.shape == "scalar"   # mặc định, không cần truyền
+
+    old_json_no_shape_field = _json.dumps([{
+        "value": "8,18", "label": "GDP", "unit": "%", "source": "câu cũ",
+        "kind": "percent", "raw": "8,18%", "canonical_value": 8.18, "approx": False,
+    }], ensure_ascii=False)
+    back = facts_from_json(old_json_no_shape_field)
+    assert len(back) == 1
+    assert back[0].shape == "scalar" and back[0].canonical_value == 8.18
+
+
+def test_fact_range_shape_round_trip():
+    from twmkt.models import Fact
+    from twmkt.sheets_board import facts_from_json, facts_to_json
+
+    facts = [Fact(value="", label="Vốn FDI chế biến, chế tạo", unit="%", shape="range",
+                  value_low="70", value_high="80", canonical_low=70.0, canonical_high=80.0,
+                  approx=True, source="khoảng 70 - 80% vốn FDI...")]
+    raw = facts_to_json(facts)
+    back = facts_from_json(raw)
+    assert len(back) == 1
+    r = back[0]
+    assert r.shape == "range"
+    assert r.value_low == "70" and r.value_high == "80"
+    assert r.canonical_low == 70.0 and r.canonical_high == 80.0
+
+
+def test_fact_delta_shape_round_trip():
+    from twmkt.models import Fact
+    from twmkt.sheets_board import facts_from_json, facts_to_json
+
+    facts = [Fact(value="", label="Doanh thu quý 2 (2025 → 2026)", shape="delta",
+                  from_value="16,3 tỷ đồng", to_value="176 triệu đồng",
+                  canonical_from=16.3e9, canonical_to=176e6,
+                  source="giảm sâu so với mức 16,3 tỷ đồng của cùng kỳ...")]
+    raw = facts_to_json(facts)
+    back = facts_from_json(raw)
+    assert len(back) == 1
+    d = back[0]
+    assert d.shape == "delta"
+    assert d.from_value == "16,3 tỷ đồng" and d.to_value == "176 triệu đồng"
+    assert d.canonical_from == 16.3e9 and d.canonical_to == 176e6
+
+
+def test_fact_entity_list_shape_round_trip():
+    from twmkt.models import Fact
+    from twmkt.sheets_board import facts_from_json, facts_to_json
+
+    facts = [Fact(value="", label="Quốc gia đầu tư", shape="entity_list",
+                  entities=["Hàn Quốc", "Nhật Bản", "Mỹ"],
+                  source="các nhà đầu tư đến từ Hàn Quốc, Nhật Bản...")]
+    raw = facts_to_json(facts)
+    back = facts_from_json(raw)
+    assert len(back) == 1
+    assert back[0].shape == "entity_list"
+    assert back[0].entities == ["Hàn Quốc", "Nhật Bản", "Mỹ"]
+
+
+def test_fact_entity_shape_round_trip():
+    from twmkt.models import Fact
+    from twmkt.sheets_board import facts_from_json, facts_to_json
+
+    facts = [Fact(value="SHS", label="Công ty chứng khoán được trích dẫn", shape="entity",
+                  entity_type="company", source="ông Nguyễn Duy Linh, Tổng Giám đốc SHS...")]
+    raw = facts_to_json(facts)
+    back = facts_from_json(raw)
+    assert len(back) == 1
+    assert back[0].shape == "entity" and back[0].value == "SHS"
+    assert back[0].entity_type == "company"
+
+
+def test_fact_salience_round_trip_and_backward_compat_default_empty():
+    """Content Factory Phase 2b — salience round-trip qua facts_to_json/
+    facts_from_json; dữ liệu CŨ trước Phase 2b (JSON không có field salience)
+    -> mặc định "" (KHÔNG vỡ)."""
+    from twmkt.models import Fact
+    from twmkt.sheets_board import facts_from_json, facts_to_json
+
+    facts = [Fact(value="", label="4 cảng biển đặc biệt", shape="entity_list",
+                  entities=["Cần Giờ", "Liên Chiểu"], salience="subject")]
+    back = facts_from_json(facts_to_json(facts))
+    assert len(back) == 1 and back[0].salience == "subject"
+
+    import json as _json
+    old_json_no_salience = _json.dumps([{
+        "value": "SHS", "label": "Công ty", "shape": "entity", "entity_type": "company",
+    }], ensure_ascii=False)
+    back2 = facts_from_json(old_json_no_salience)
+    assert len(back2) == 1 and back2[0].salience == ""
 
 
 def test_facts_to_json_empty_list_returns_empty_string():
@@ -6017,6 +6611,35 @@ def test_make_notifier_selects_telegram_when_configured():
     n = make_notifier(s)
     assert isinstance(n, TelegramNotifier)
     assert n.bot_token == "123:abc" and n.chat_id == "999" and n.timeout_s == 7.0
+
+
+def test_make_notifier_env_flag_overrides_settings_enabled():
+    """Cờ thủ công TWMKT_TELEGRAM_ENABLED — bật/tắt nhanh KHÔNG cần sửa
+    settings.yaml, đè giá trị `enabled` trong config khi ENV có mặt."""
+    import os
+
+    from twmkt.utils.telegram_notifier import make_notifier, NullNotifier, TelegramNotifier
+
+    s_enabled = Settings({"notifications": {"telegram": {
+        "enabled": True, "bot_token": "123:abc", "chat_id": "999"}}})
+    s_disabled = Settings({"notifications": {"telegram": {
+        "enabled": False, "bot_token": "123:abc", "chat_id": "999"}}})
+
+    old = os.environ.get("TWMKT_TELEGRAM_ENABLED")
+    try:
+        os.environ["TWMKT_TELEGRAM_ENABLED"] = "0"
+        assert isinstance(make_notifier(s_enabled), NullNotifier)   # ENV=0 đè settings enabled=True
+
+        os.environ["TWMKT_TELEGRAM_ENABLED"] = "true"
+        assert isinstance(make_notifier(s_disabled), TelegramNotifier)   # ENV=true đè settings enabled=False
+
+        os.environ["TWMKT_TELEGRAM_ENABLED"] = "gia-tri-la"
+        assert isinstance(make_notifier(s_disabled), NullNotifier)   # ENV lạ -> lùi về settings.yaml như cũ
+    finally:
+        if old is None:
+            os.environ.pop("TWMKT_TELEGRAM_ENABLED", None)
+        else:
+            os.environ["TWMKT_TELEGRAM_ENABLED"] = old
 
 
 # --- Banner "LLM active" (lùi mượt CÓ CẢNH BÁO — không im lặng) -------------
@@ -6363,13 +6986,86 @@ def test_build_spec_from_content_maps_8field_to_scenes():
                                    source_url="https://x.vn", channel="linkedin_square")
     assert spec.topic_key == "tk-1" and spec.channel == "linkedin_square"
     assert spec.aspect == "1:1" and spec.title == "GDP tăng mạnh"
-    assert len(spec.scenes) == 4
+    # Content Factory Phase 2: scene thứ 5 route "related". Phase 2b: scene
+    # thứ 6 route "priority.primary" — cả 2 vào guardrail tên (xem
+    # test_build_spec_from_content_routes_related_into_entity_guardrail).
+    assert len(spec.scenes) == 6
     kinds = [s.visual_kind for s in spec.scenes]
-    assert kinds == ["title", "stat", "list", "quote"]
+    assert kinds == ["title", "stat", "list", "quote", "list", "list"]
     assert spec.scenes[0].slots["title"] == "GDP tăng mạnh"
     assert spec.scenes[1].slots["stats"][0]["value"] == "8,18%"
     assert spec.scenes[2].slots["items"][0]["label"] == "Thu ngân sách"
     assert spec.scenes[3].slots["lines"] == ["Tăng trưởng lan toả nhiều địa phương."]
+    assert spec.scenes[4].slots["related"] == []   # output không có "related" -> rỗng, KHÔNG lỗi
+    assert spec.scenes[5].slots["priority_primary"] == []   # output không có priority -> rỗng, KHÔNG lỗi
+
+
+def test_build_spec_from_content_routes_related_into_entity_guardrail():
+    """Content Factory Phase 2 constraint #1: 'related' (Output 8-field, TRƯỚC
+    ĐÂY bị bỏ qua khỏi scenes) giờ PHẢI được guardrail lần 2 quét — Composer
+    bịa 1 tên KHÔNG có trong facts[] phải bị verify_spec() bắt."""
+    from twmkt.media_factory.spec import build_spec_from_content, verify_spec
+    from twmkt.models import Fact
+
+    facts = [Fact(value="", label="4 cảng biển đặc biệt", shape="entity_list",
+                  entities=["Cần Giờ", "Liên Chiểu", "Nam Đồ Sơn", "Vân Phong"],
+                  source="4 cảng: Cần Giờ, Liên Chiểu, Nam Đồ Sơn, Vân Phong")]
+    output_clean = {"title": "4 Cảng Biển Đặc Biệt", "subtitle": "", "hero": [], "market": [],
+                    "related": ["Cần Giờ", "Vân Phong"]}
+    assert verify_spec(build_spec_from_content(output_clean, facts, topic_key="tk-1")) == []
+
+    output_bilia = {"title": "4 Cảng Biển Đặc Biệt", "subtitle": "", "hero": [], "market": [],
+                    "related": ["Cần Giờ", "Hải Phòng cũ"]}   # "Hải Phòng cũ" KHÔNG có trong facts[]
+    violations = verify_spec(build_spec_from_content(output_bilia, facts, topic_key="tk-1"))
+    assert len(violations) == 1
+    assert violations[0].token == "Hải Phòng cũ" and violations[0].reason == "unmatched_entity"
+
+
+def test_verify_spec_rejects_real_context_entity_leaking_into_related():
+    """Content Factory Phase 2b — TÁI HIỆN ĐÚNG lỗi THẬT phát hiện trên bài
+    cảng biển: 1 tên THẬT/verify được (không phải bịa) nhưng salience="context"
+    (hội thảo/hiệp hội — phông nền) lọt vào 'related' PHẢI bị guardrail chặn,
+    KHÁC với chặn bịa tên (đây là chặn SAI SALIENCE, tên hoàn toàn có thật)."""
+    from twmkt.media_factory.spec import build_spec_from_content, verify_spec
+    from twmkt.models import Fact
+
+    facts = [
+        Fact(value="", label="4 cảng được quy hoạch", shape="entity_list",
+            entities=["Cần Giờ", "Liên Chiểu"], salience="subject", source="..."),
+        Fact(value="Hiệp hội Bất động sản Việt Nam", label="Đơn vị tổ chức hội thảo",
+            shape="entity", entity_type="policy", salience="context", source="..."),
+    ]
+    output = {"title": "X", "subtitle": "", "hero": [], "market": [],
+             "related": ["Cần Giờ", "Hiệp hội Bất động sản Việt Nam"]}
+    violations = verify_spec(build_spec_from_content(output, facts, topic_key="tk-1"))
+    assert len(violations) == 1
+    assert violations[0].token == "Hiệp hội Bất động sản Việt Nam"
+    assert violations[0].reason == "unmatched_entity"   # THẬT nhưng sai salience -> vẫn coi là "chưa khớp"
+
+
+def test_verify_spec_priority_primary_accepts_stat_label_or_subject_entity_rejects_context():
+    """'priority_primary' (Phase 2b) khớp CẢ nhãn hero/market LẪN tên subject —
+    NHƯNG vẫn từ chối tên context, giống 'related'."""
+    from twmkt.media_factory.spec import ProductionScene, ProductionSpec, verify_spec
+    from twmkt.models import Fact
+
+    facts = [
+        Fact(value="10", label="GDP", unit="%", canonical_value=10.0, source="..."),
+        Fact(value="Hải Phòng", label="Địa điểm", shape="entity",
+            entity_type="place", salience="subject", source="..."),
+    ]
+    spec = ProductionSpec(
+        topic_key="tk-1", title="t", source_url="u", channel="facebook_feed", facts=facts,
+        scenes=[
+            ProductionScene(role="body", visual_kind="stat",
+                            slots={"stats": [{"label": "GDP", "value": "10%"}]}),
+            ProductionScene(role="body", visual_kind="list",
+                            slots={"priority_primary": ["GDP", "Hải Phòng", "Hiệp hội (context, bịa vị trí)"]}),
+        ],
+    )
+    violations = verify_spec(spec)
+    assert len(violations) == 1
+    assert violations[0].token == "Hiệp hội (context, bịa vị trí)"
 
 
 def test_build_spec_from_content_then_verify_catches_gate2_typo():
@@ -6399,6 +7095,165 @@ def test_verify_spec_no_numbers_no_facts_clean():
                                 slots={"title": "Không có số nào ở đây"})],
     )
     assert verify_spec(spec) == []
+
+
+# =====================================================================
+# Content Factory Phase 1 — verify_spec() mở rộng shape=range/delta/entity/
+# entity_list (media_factory/spec.py: _fact_matches, _check_plain_list_item_
+# entity). "vẫn bắt được số bịa" (Phase 1 nghiệm thu) test riêng ở cuối nhóm.
+# =====================================================================
+def test_verify_spec_range_shape_accepts_value_within_bounds():
+    from twmkt.media_factory.spec import ProductionScene, ProductionSpec, verify_spec
+    from twmkt.models import Fact
+
+    facts = [Fact(value="", label="Vốn FDI chế biến, chế tạo", unit="%", shape="range",
+                  value_low="70", value_high="80", canonical_low=70.0, canonical_high=80.0,
+                  source="...")]
+    spec = ProductionSpec(
+        topic_key="tk-1", title="t", source_url="u", channel="facebook_feed", facts=facts,
+        scenes=[ProductionScene(role="body", visual_kind="stat",
+                                slots={"stats": [{"label": "FDI", "value": "75%"}]})],
+    )
+    assert verify_spec(spec) == []   # 75 NẰM TRONG [70,80] -> khớp NGAY CẢ không có từ xấp xỉ
+
+
+def test_verify_spec_range_shape_flags_value_outside_bounds():
+    from twmkt.media_factory.spec import ProductionScene, ProductionSpec, verify_spec
+    from twmkt.models import Fact
+
+    facts = [Fact(value="", label="Vốn FDI chế biến, chế tạo", unit="%", shape="range",
+                  value_low="70", value_high="80", canonical_low=70.0, canonical_high=80.0,
+                  source="...")]
+    spec = ProductionSpec(
+        topic_key="tk-1", title="t", source_url="u", channel="facebook_feed", facts=facts,
+        scenes=[ProductionScene(role="body", visual_kind="stat",
+                                slots={"stats": [{"label": "FDI", "value": "95%"}]})],
+    )
+    violations = verify_spec(spec)
+    assert len(violations) == 1 and violations[0].token == "95%"   # NGOÀI [70,80] -> vẫn bắt được số bịa
+
+
+def test_verify_spec_range_shape_approx_word_widens_bounds():
+    from twmkt.media_factory.spec import ProductionScene, ProductionSpec, verify_spec
+    from twmkt.models import Fact
+
+    facts = [Fact(value="", label="Vốn FDI chế biến, chế tạo", unit="%", shape="range",
+                  value_low="70", value_high="80", canonical_low=70.0, canonical_high=80.0,
+                  approx=True, source="...")]
+    # 82% NGOÀI [70,80] nhưng SÁT biên + có từ "khoảng" ngay trước -> trong dung sai nới
+    # (slack = span(10) * 5% = 0.5 -> biên hiệu dụng [69.5, 80.5], 82 vẫn NGOÀI -> vẫn flag)
+    # đổi thành 80.3% để nằm trong slack, kiểm đúng ý "nới nhẹ nhờ từ xấp xỉ".
+    spec = ProductionSpec(
+        topic_key="tk-1", title="t", source_url="u", channel="facebook_feed", facts=facts,
+        scenes=[ProductionScene(role="body", visual_kind="stat",
+                                slots={"stats": [{"label": "FDI", "value": "khoảng 80,3%"}]})],
+    )
+    assert verify_spec(spec) == []
+
+
+def test_verify_spec_delta_shape_accepts_from_or_to_value():
+    from twmkt.media_factory.spec import ProductionScene, ProductionSpec, verify_spec
+    from twmkt.models import Fact
+
+    facts = [Fact(value="", label="Doanh thu quý 2 (2025 → 2026)", shape="delta",
+                  from_value="16,3 tỷ đồng", to_value="176 triệu đồng",
+                  canonical_from=16.3e9, canonical_to=176e6, source="...")]
+    spec = ProductionSpec(
+        topic_key="tk-1", title="t", source_url="u", channel="facebook_feed", facts=facts,
+        scenes=[ProductionScene(role="body", visual_kind="stat",
+                                slots={"stats": [{"label": "Q2/2025", "value": "16,3 tỷ đồng"},
+                                                {"label": "Q2/2026", "value": "176 triệu đồng"}]})],
+    )
+    assert verify_spec(spec) == []   # cả from VÀ to đều hợp lệ, không phải chỉ 1 trong 2
+
+
+def test_verify_spec_delta_shape_flags_number_matching_neither_from_nor_to():
+    from twmkt.media_factory.spec import ProductionScene, ProductionSpec, verify_spec
+    from twmkt.models import Fact
+
+    facts = [Fact(value="", label="Doanh thu quý 2 (2025 → 2026)", shape="delta",
+                  from_value="16,3 tỷ đồng", to_value="176 triệu đồng",
+                  canonical_from=16.3e9, canonical_to=176e6, source="...")]
+    spec = ProductionSpec(
+        topic_key="tk-1", title="t", source_url="u", channel="facebook_feed", facts=facts,
+        scenes=[ProductionScene(role="body", visual_kind="stat",
+                                slots={"stats": [{"label": "Q2/2027 (bịa)", "value": "50 tỷ đồng"}]})],
+    )
+    violations = verify_spec(spec)
+    assert len(violations) == 1 and violations[0].token == "50 tỷ đồng"
+
+
+def test_verify_spec_entity_list_slot_catches_fabricated_name():
+    """Slot key "related" (danh sách tên THUẦN, xem _ENTITY_LIST_SLOT_KEYS) —
+    tên KHỚP entity_list -> sạch; tên LẠ -> bịa, phải bắt được."""
+    from twmkt.media_factory.spec import ProductionScene, ProductionSpec, verify_spec
+    from twmkt.models import Fact
+
+    facts = [Fact(value="", label="Quốc gia đầu tư", shape="entity_list",
+                  entities=["Hàn Quốc", "Nhật Bản", "Mỹ"], source="...")]
+    spec = ProductionSpec(
+        topic_key="tk-1", title="t", source_url="u", channel="facebook_feed", facts=facts,
+        scenes=[ProductionScene(role="body", visual_kind="list",
+                                slots={"related": ["Hàn Quốc", "Nga"]})],   # "Nga" KHÔNG có trong facts
+    )
+    violations = verify_spec(spec)
+    assert len(violations) == 1
+    assert violations[0].token == "Nga" and violations[0].field == "related[1]"
+    assert violations[0].reason == "unmatched_entity"
+
+
+def test_verify_spec_entity_shape_matches_single_name():
+    from twmkt.media_factory.spec import ProductionScene, ProductionSpec, verify_spec
+    from twmkt.models import Fact
+
+    facts = [Fact(value="SHS", label="Công ty chứng khoán", shape="entity",
+                  entity_type="company", source="...")]
+    spec = ProductionSpec(
+        topic_key="tk-1", title="t", source_url="u", channel="facebook_feed", facts=facts,
+        scenes=[ProductionScene(role="body", visual_kind="list",
+                                slots={"related": ["SHS"]})],
+    )
+    assert verify_spec(spec) == []
+
+
+def test_check_plain_list_item_entity_ignores_prose_slot_keys():
+    """REGRESSION — false-positive THẬT phát hiện lúc build: "highlights"/
+    "lines" là PROSE (câu hoàn chỉnh), KHÔNG phải danh sách tên, dù CŨNG là
+    list[str] (field dạng "key[i]" giống entity_list). Câu KHÔNG có chữ số nào
+    (vd bình luận định tính) TUYỆT ĐỐI KHÔNG được flag là 'unmatched_entity' —
+    chỉ _ENTITY_LIST_SLOT_KEYS (names/entities/related) mới bị soi tên."""
+    from twmkt.media_factory.spec import build_spec_from_content, verify_spec
+
+    output = {
+        "title": "X", "subtitle": "Y",
+        "hero": [{"label": "A", "value": "4"}], "market": [],
+        "highlights": ["Doanh nghiệp đầu tiên báo lỗ trong ngành.",
+                       "Không có số nào ở câu này cả."],
+    }
+    spec = build_spec_from_content(output, [], topic_key="tk-1")
+    assert verify_spec(spec) == []
+
+
+def test_matches_canonical_fact_range_and_delta_shapes():
+    """Guardrail LẦN 1 (agents/production.py, chạy ngay sau Composer/Writer,
+    TRƯỚC verify_spec) — PHẢI nhất quán với verify_spec (guardrail lần 2): số
+    trong bài khớp range/delta cũng KHÔNG bị coi là bịa, số không khớp gì vẫn
+    bị bắt (Phase 1 nghiệm thu: "vẫn bắt được số bịa")."""
+    from twmkt.agents.production import unsupported_numbers
+    from twmkt.models import Fact
+
+    facts = [
+        Fact(value="", label="Vốn FDI", unit="%", shape="range",
+            canonical_low=70.0, canonical_high=80.0, source="..."),
+        Fact(value="", label="Doanh thu Q2 (2025→2026)", shape="delta",
+            canonical_from=16.3e9, canonical_to=176e6, source="..."),
+    ]
+    body_clean = "Vốn FDI đạt 75%, doanh thu quý 2/2026 chỉ còn 176 triệu đồng."
+    assert unsupported_numbers(body_clean, "evidence không chứa số này", facts) == []
+
+    body_bad = "Vốn FDI đạt 95% — con số bịa."
+    bad = unsupported_numbers(body_bad, "evidence không chứa số này", facts)
+    assert "95%" in bad
 
 
 # xfail: test biết trước ĐANG đỏ vì 1 phần việc CHƯA làm (không phải regression

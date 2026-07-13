@@ -32,5 +32,8 @@ brand:
 
   font_family: "Arial, 'Segoe UI', sans-serif"
 
+  # Content Factory Phase D — rút gọn (chỉ đạo user, thay bản dài cũ) — MỘT
+  # NGUỒN cho article/video/infographic (agents/production.py._default_
+  # disclaimer, render/infographic.py brand_kit_from_settings đều đọc TỪ ĐÂY).
   footer:
-    disclaimer: "Nội dung chỉ mang tính thông tin, không phải khuyến nghị đầu tư. Nhà đầu tư tự chịu trách nhiệm với quyết định của mình."
+    disclaimer: "Nội dung mang tính thông tin, không phải khuyến nghị đầu tư"

@@ -84,6 +84,44 @@ def load_settings(path: str | os.PathLike | None = None) -> Settings:
     return Settings(_expand(data))
 
 
+class ProductionSheetBlocked(SystemExit):
+    """Raise khi 1 luồng THỬ NGHIỆM (benchmark/A-B) cố đọc sheet production mà
+    KHÔNG có cờ allow_production=True tường minh — xem resolve_sheet_id()."""
+
+
+def resolve_sheet_id(settings: Settings, *, allow_production: bool = False) -> str:
+    """RÀO CHẮN MÔI TRƯỜNG (Content Factory Phase D) — chọn spreadsheet_id cho
+    CÁC LUỒNG THỬ NGHIỆM (benchmark/A-B/Phase 3 trở đi). KHÁC HẲN cách các
+    script sản xuất (produce_from_sheet.py, render_production_assets.py...) tự
+    đọc `os.environ.get("TWMKT_SHEET_ID") or settings.get("sheets.spreadsheet_
+    id")` trực tiếp — NHỮNG NƠI ĐÓ cố ý trỏ production, KHÔNG đổi.
+
+    MẶC ĐỊNH (`allow_production=False`, PHẢI LÀ MẶC ĐỊNH Ở MỌI NƠI GỌI — không
+    dựa vào trí nhớ người chạy): LUÔN đọc `sheets.test_spreadsheet_id` (hoặc
+    ENV `TWMKT_TEST_SHEET_ID`) — KHÔNG BAO GIỜ, DÙ TWMKT_SHEET_ID/sheets.
+    spreadsheet_id (production) CÓ SET SẴN TRONG MÔI TRƯỜNG, tự ý lùi về đó.
+    Thiếu cấu hình sheet TEST -> raise ProductionSheetBlocked (SystemExit) —
+    THÀ DỪNG HẲN còn hơn lỡ ghi nhầm production.
+
+    Chỉ trả sheet production khi `allow_production=True` ĐƯỢC TRUYỀN TƯỜNG
+    MINH bởi nơi gọi (vd cờ CLI `--production`, người vận hành phải tự gõ
+    thêm, KHÔNG BAO GIỜ là giá trị mặc định của cờ đó)."""
+    if allow_production:
+        sheet_id = (os.environ.get("TWMKT_SHEET_ID") or settings.get("sheets.spreadsheet_id") or "").strip()
+        if not sheet_id:
+            raise ProductionSheetBlocked(
+                "allow_production=True nhưng thiếu TWMKT_SHEET_ID / sheets.spreadsheet_id.")
+        return sheet_id
+    test_id = (os.environ.get("TWMKT_TEST_SHEET_ID") or settings.get("sheets.test_spreadsheet_id") or "").strip()
+    if not test_id:
+        raise ProductionSheetBlocked(
+            "Thiếu sheets.test_spreadsheet_id / ENV TWMKT_TEST_SHEET_ID — benchmark/A-B "
+            "PHẢI trỏ sheet TEST, KHÔNG tự ý lùi về sheet production. Tạo 1 Google Sheet "
+            "TEST riêng rồi set biến này, hoặc truyền allow_production=True (cờ --production) "
+            "nếu THẬT SỰ cần chạy trên production.")
+    return test_id
+
+
 DEFAULT_BRAND_PATH = "config/brand.yaml"
 
 
@@ -110,6 +148,19 @@ def load_brand(path: str | os.PathLike | None = None) -> dict:
         return {}
     brand = _expand(data).get("brand", {})
     return brand if isinstance(brand, dict) else {}
+
+
+def default_user_agent(*, version: str = "0.2", contact: str = "") -> str:
+    """User-Agent mặc định cho collector HTTP/RSS (crawl.user_agent trong
+    settings.yaml GHI ĐÈ giá trị này khi cấu hình) — tên bot ghép từ
+    brand.name (config/brand.yaml, MỘT NGUỒN — Content Factory Phase D, vá rò
+    brand cũ: hằng số hard-code cũ trong collectors/ không theo kịp lúc đổi
+    brand). ASCII-only (header HTTP không nhận ký tự ngoài ASCII/latin-1) — bỏ
+    dấu/khoảng trắng khỏi tên bằng cách chỉ giữ ký tự ASCII chữ/số."""
+    name = str(load_brand().get("name") or "").strip()
+    token = "".join(c for c in name if c.isascii() and c.isalnum()) or "Marketing"
+    ua = f"{token}MktBot/{version} (+marketing automation noi bo, thu thap tin tai chinh VN"
+    return f"{ua}; lien he: {contact})" if contact else f"{ua})"
 
 
 # =====================================================================

@@ -43,6 +43,7 @@ thừa: 8-field -> scenes -> verify -> [8-field lại] -> render).
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from ..models import Fact
@@ -98,17 +99,124 @@ class Violation:
 
 
 def _fact_matches(value: float, facts: list[Fact], *, approx: bool) -> bool:
+    """Content Factory Phase 1 — số TRONG BÀI khớp fact NẾU khớp BẤT KỲ trường
+    canonical_* nào có mặt trên fact đó (KHÔNG còn chỉ scalar): canonical_value
+    (shape=scalar) trong dung sai; NẰM TRONG [canonical_low, canonical_high]
+    (shape=range, biên nới thêm `span * tolerance` CHỈ khi có từ xấp xỉ — số
+    NẰM SẴN trong range luôn khớp dù không có từ xấp xỉ, đó là bản chất của
+    range); khớp canonical_from HOẶC canonical_to (shape=delta — number trước/
+    sau đều hợp lệ). shape=entity/entity_list KHÔNG có canonical_* số nào ->
+    tự động bỏ qua ở đây, xem _check_plain_list_item_entity cho tên."""
     tolerance = _APPROX_TOLERANCE if approx else 0.0
     for f in facts:
-        if f.canonical_value is None:
-            continue
-        denom = abs(f.canonical_value) or 1e-9
-        if abs(value - f.canonical_value) / denom <= tolerance:
-            return True
+        if f.canonical_value is not None:
+            denom = abs(f.canonical_value) or 1e-9
+            if abs(value - f.canonical_value) / denom <= tolerance:
+                return True
+        if f.canonical_low is not None and f.canonical_high is not None:
+            lo, hi = sorted((f.canonical_low, f.canonical_high))
+            slack = (hi - lo) * tolerance
+            if lo - slack <= value <= hi + slack:
+                return True
+        if f.canonical_from is not None:
+            denom = abs(f.canonical_from) or 1e-9
+            if abs(value - f.canonical_from) / denom <= tolerance:
+                return True
+        if f.canonical_to is not None:
+            denom = abs(f.canonical_to) or 1e-9
+            if abs(value - f.canonical_to) / denom <= tolerance:
+                return True
     return False
 
 
+def _known_entity_names(facts: list[Fact]) -> list[str]:
+    """Mọi TÊN đã biết VÀ ĐỦ ĐIỀU KIỆN lên hình (shape=entity: `value`;
+    shape=entity_list: từng phần tử `entities[]`) — chuẩn hoá thường/trim để
+    so khớp không phân biệt hoa/thường ở _check_plain_list_item_entity.
+
+    Content Factory Phase 2b — CHỈ salience="subject" (chủ thể tin) HOẶC ""
+    (dữ liệu CŨ trước Phase 2b, chưa phân loại — tương thích ngược ĐỌC, không
+    coi là vi phạm mới) mới được coi "đã biết" ở đây. salience="context"
+    (phông nền — hội thảo/hiệp hội/người phát biểu) bị LOẠI KHỎI danh sách này
+    NGAY CẢ KHI tên đó THẬT/verify được trong facts[] — đây chính là guardrail
+    "related/priority.primary CHỈ subject" (lỗi THẬT đã gặp: bài cảng biển
+    related bị lấp bởi tên hội thảo/hiệp hội thay vì tên cảng/dự án thật).
+    Composer nhét 1 tên context THẬT vào related vẫn bị flag ở ĐÂY — không chỉ
+    dựa vào lời dặn trong prompt."""
+    names: list[str] = []
+    for f in facts:
+        if f.salience == "context":
+            continue
+        if f.shape == "entity" and f.value.strip():
+            names.append(f.value.strip().lower())
+        elif f.shape == "entity_list":
+            names.extend(e.strip().lower() for e in f.entities if e.strip())
+    return names
+
+
+_PLAIN_LIST_ITEM_RE = re.compile(r"^(\w+)\[\d+\]$")
+
+# CHỈ những slot key này mới coi 1 phần tử CHUỖI THUẦN là TÊN thực thể cần đối
+# chiếu — "lines"/"highlights" (và các key khác ngoài danh sách) là PROSE (câu
+# hoàn chỉnh, vd "Doanh nghiệp đầu tiên báo lỗ trong ngành." — 0 chữ số nhưng
+# KHÔNG phải tên riêng), quét nhầm sẽ flag oan MỌI câu không có số (đã tái hiện
+# thật bằng test — xem test_check_plain_list_item_entity_ignores_prose_slot_keys).
+# "priority_primary" (Content Factory Phase 2b) khác 3 key kia — hỗn hợp NHÃN
+# hero/market (vd "GDP") LẪN tên thực thể subject (vd "Hải Phòng"), xem
+# _known_stat_labels + verify_spec.
+_ENTITY_LIST_SLOT_KEYS = frozenset({"names", "entities", "related", "priority_primary"})
+
+
+def _known_stat_labels(spec: "ProductionSpec") -> set[str]:
+    """Content Factory Phase 2b — mọi LABEL đã dùng ở hero/market (mọi scene,
+    field_path dạng "key[i].label") — nguồn khớp HỢP LỆ THỨ 2 cho slot
+    "priority_primary" (BÊN CẠNH _known_entity_names, xem _check_plain_list_
+    item_entity) vì Composer được phép nhét CẢ nhãn hero/market LẪN tên thực
+    thể subject vào priority.primary (KHÔNG chỉ tên). Hàm THUẦN."""
+    labels: set[str] = set()
+    for scene in spec.scenes:
+        for field_path, text in _iter_slot_texts(scene.slots):
+            if field_path.endswith(".label") and text:
+                labels.add(text.strip().lower())
+    return labels
+
+
+def _check_plain_list_item_entity(text: str, facts: list[Fact], scene_index: int,
+                                  field_name: str, extra_known: set[str] | None = None) -> list[Violation]:
+    """Guardrail TÊN thực thể (Content Factory Phase 1, shape=entity/entity_list
+    — "tên lạ = BỊA", nguy hiểm ngang bịa số). CHỈ áp cho `field_name` dạng
+    "key[i]" VỚI key thuộc _ENTITY_LIST_SLOT_KEYS (1 phần tử CHUỖI THUẦN trong
+    list ĐÍCH THỊ là danh sách tên, vd slots={"related": [...]})  — CỐ Ý KHÔNG
+    quét MỌI list THUẦN CHUỖI (vd "highlights"/"lines" là PROSE, không phải tên
+    riêng — quét nhầm gây false-positive nặng, xem docstring _ENTITY_LIST_
+    SLOT_KEYS) và KHÔNG quét prose tự do (title/subtitle) vì không có cách đáng
+    tin cậy phân biệt "tên riêng" với chữ thường trong tiếng Việt bằng regex
+    thuần. text CÓ số -> bỏ qua ở đây (đã qua _check_text ở trên). `extra_known`
+    (Phase 2b, dùng cho "priority_primary") — tập text HỢP LỆ BỔ SUNG ngoài tên
+    thực thể (vd nhãn hero/market, xem _known_stat_labels) — khớp EITHER bên.
+    FAIL-CLOSED giống _fact_matches: facts rỗng hoặc không có entity/entity_list
+    nào -> KHÔNG có gì để khớp -> LUÔN flag (nhất quán triết lý "rỗng = nghi
+    ngờ tối đa" của guardrail số, xem test_verify_spec_empty_facts_flags_
+    everything_with_numbers)."""
+    if not text or any(c.isdigit() for c in text):
+        return []
+    m = _PLAIN_LIST_ITEM_RE.match(field_name)
+    if not m or m.group(1) not in _ENTITY_LIST_SLOT_KEYS:
+        return []
+    low = text.strip().lower()
+    candidates = list(_known_entity_names(facts)) + list(extra_known or ())
+    for name in candidates:
+        if name and (name in low or low in name):
+            return []
+    return [Violation(scene_index, field_name, text, reason="unmatched_entity")]
+
+
 def _check_text(text: str, facts: list[Fact], scene_index: int, field_name: str) -> list[Violation]:
+    """Guardrail SỐ (Content Factory Phase 1 — nay khớp scalar/range/delta, xem
+    _fact_matches) trên 1 chuỗi text — dạng CHỮ SỐ (_DIGIT_MAGNITUDE_RE) LẪN
+    VIẾT BẰNG CHỮ (find_word_number_phrases). Guardrail TÊN (entity/entity_list)
+    tách riêng ở _check_plain_list_item_entity — gọi Ở NƠI KHÁC (verify_spec),
+    KHÔNG ở đây, vì chỉ áp cho field_name dạng "key[i]", không áp mọi text."""
     if not text:
         return []
     violations: list[Violation] = []
@@ -161,14 +269,24 @@ def _iter_slot_texts(slots: dict):
 
 
 def verify_spec(spec: ProductionSpec) -> list[Violation]:
-    """Guardrail LẦN 2 (quyết định #1 Phase 1.0) — mọi số (dạng chữ số LẪN
-    dạng chữ) trong `slots` và `voice_text` của MỌI scene phải khớp 1 mục
-    trong `spec.facts` (số học, dung sai xấp xỉ nếu có từ xấp xỉ đứng ngay
-    trước). Trả [] nếu spec SẠCH. Hàm THUẦN — không mạng, không LLM."""
+    """Guardrail LẦN 2 (quyết định #1 Phase 1.0; mở rộng Content Factory Phase
+    1 + 2b) — mọi SỐ (dạng chữ số LẪN dạng chữ, mọi shape scalar/range/delta)
+    trong `slots` và `voice_text` của MỌI scene phải khớp 1 mục trong
+    `spec.facts` (số học, dung sai xấp xỉ nếu có từ xấp xỉ đứng ngay trước, xem
+    _fact_matches); MỌI TÊN thực thể trong 1 phần tử list THUẦN CHUỖI (field
+    dạng "key[i]", vd slots={"related": [...]}) phải khớp 1 fact shape=entity/
+    entity_list salience="subject" nào đó (xem _check_plain_list_item_entity —
+    CỐ Ý không quét prose tự do, xem docstring hàm đó). Riêng slot
+    "priority_primary" CŨNG được khớp với nhãn hero/market (xem _known_stat_
+    labels) vì Composer được phép trộn nhãn + tên subject ở đó. Trả [] nếu
+    spec SẠCH. Hàm THUẦN — không mạng, không LLM."""
     violations: list[Violation] = []
+    stat_labels = _known_stat_labels(spec)
     for i, scene in enumerate(spec.scenes):
         for field_path, text in _iter_slot_texts(scene.slots):
             violations += _check_text(text, spec.facts, i, field_path)
+            extra = stat_labels if field_path.startswith("priority_primary[") else None
+            violations += _check_plain_list_item_entity(text, spec.facts, i, field_path, extra)
         if scene.voice_text:
             violations += _check_text(scene.voice_text, spec.facts, i, "voice_text")
     return violations
@@ -193,6 +311,21 @@ def build_spec_from_content(output_data: dict, facts: list[Fact], *, topic_key: 
                         slots={"items": output_data.get("market") or []}),
         ProductionScene(role="outro", visual_kind="quote",
                         slots={"lines": output_data.get("highlights") or []}),
+        # Content Factory Phase 2 — KÍCH HOẠT guardrail tên (media_factory/
+        # spec._check_plain_list_item_entity): "related" (Output 8-field, đã
+        # có sẵn nhưng TRƯỚC ĐÂY bị bỏ qua khỏi scenes -> guardrail lần 2 KHÔNG
+        # BAO GIỜ quét được) giờ route vào slot key "related" — TRÙNG tên với
+        # _ENTITY_LIST_SLOT_KEYS ở spec.py, để mỗi phần tử được đối chiếu với
+        # facts[] shape=entity/entity_list — Composer bịa 1 tên KHÔNG có trong
+        # facts[] sẽ bị verify_spec() bắt (Violation reason="unmatched_entity").
+        ProductionScene(role="body", visual_kind="list",
+                        slots={"related": output_data.get("related") or []}),
+        # Content Factory Phase 2b — cùng lý do trên, cho "priority.primary"
+        # (KHÔNG chỉ "related"): route vào slot key "priority_primary" ->
+        # verify_spec() khớp với TÊN subject (_known_entity_names) HOẶC nhãn
+        # hero/market (_known_stat_labels, Composer được phép trộn cả 2 ở đây).
+        ProductionScene(role="body", visual_kind="list",
+                        slots={"priority_primary": (output_data.get("priority") or {}).get("primary") or []}),
     ]
     aspect = (output_data.get("render_hint") or {}).get("ratio", "4:5")
     return ProductionSpec(

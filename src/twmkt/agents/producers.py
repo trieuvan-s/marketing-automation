@@ -9,16 +9,21 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from ..config import load_brand
 from ..models import ContentDraft, ContentFormat, ResearchBrief
 from .base import Agent
 
 if TYPE_CHECKING:
     from .hook import MarketingHook
 
-_DISCLAIMER = (
-    "Nội dung chỉ mang tính thông tin, không phải khuyến nghị đầu tư. "
-    "Nhà đầu tư tự chịu trách nhiệm với quyết định của mình."
-)
+# Content Factory Phase D (vá rò brand cũ) — tên/disclaimer đọc từ config/
+# brand.yaml (MỘT NGUỒN), KHÔNG hard-code brand nào (cũ hay mới) — cùng nếp
+# agents/production.py._BRAND_NAME/_default_disclaimer.
+_BRAND = load_brand()
+_BRAND_NAME = str(_BRAND.get("name") or "").strip() or "đội ngũ phân tích"
+_DEFAULT_CTA = f"Theo dõi {_BRAND_NAME} để cập nhật phân tích."
+_DISCLAIMER = (str((_BRAND.get("footer") or {}).get("disclaimer") or "").strip()
+              or "Nội dung mang tính thông tin, không phải khuyến nghị đầu tư.")
 
 
 class ArticleWriter(Agent):
@@ -77,11 +82,11 @@ class VideoScripter(Agent):
         if hook:
             hook_line = hook.angle or (hook.headlines[0] if hook.headlines else brief.topic)
             title = hook.headlines[0] if hook.headlines else f"[Video] {brief.topic}"
-            cta = hook.cta or "Theo dõi Turtle Wealth để cập nhật phân tích."
+            cta = hook.cta or _DEFAULT_CTA
         else:
             hook_line = self._ask(f"Viết câu hook 1 dòng cho video về: {brief.topic}")
             title = f"[Video] {brief.topic}"
-            cta = "Theo dõi Turtle Wealth để cập nhật phân tích."
+            cta = _DEFAULT_CTA
         scenes = "\n".join(
             f"[Cảnh {i+1}] {p}" for i, p in enumerate(brief.key_points[:3])
         )
@@ -106,7 +111,7 @@ class NewsletterBuilder(Agent):
             hook: "MarketingHook | None" = None) -> ContentDraft:
         points = "\n".join(f"• {p}" for p in brief.key_points)
         body = (
-            f"# Bản tin Turtle Wealth\n\n## {brief.topic}\n\n"
+            f"# Bản tin {_BRAND_NAME}\n\n## {brief.topic}\n\n"
             f"{brief.thesis}\n\n### Điểm chính\n{points}\n\n"
             f"Mã liên quan: {', '.join(brief.tickers) or 'N/A'}\n\n_{_DISCLAIMER}_"
         )

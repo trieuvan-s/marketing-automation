@@ -1,4 +1,5 @@
-"""twmkt — Turtle Wealth Marketing Automation (Phase 0 scaffold)."""
+"""twmkt — Marketing Automation (Phase 0 scaffold; brand identity lives in
+config/brand.yaml, MỘT NGUỒN — KHÔNG hard-code brand ở docstring này)."""
 from .orchestrator import MarketingPipeline, PipelineConfig
 from .models import Source, SourceType, ContentFormat, Stage, Decision
 

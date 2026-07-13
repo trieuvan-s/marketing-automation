@@ -22,7 +22,8 @@ LÙI MƯỢT: LLM trả rỗng/không parse được JSON -> dựng schema TẤT
 đã duyệt (KHÔNG crash, vẫn ra sản phẩm nháp đúng cấu trúc).
 
 SIGNATURE + BỐI CẢNH MỞ RỘNG: bài viết PHẢI có góc nhìn/nhận định riêng của
-Turtle Wealth (không tường thuật lại 1 bài báo) và xâu chuỗi thêm bối cảnh/tiền
+thương hiệu (tên đọc từ config/brand.yaml, KHÔNG hard-code — xem _BRAND_NAME),
+không tường thuật lại 1 bài báo, và xâu chuỗi thêm bối cảnh/tiền
 lệ liên quan đã research (brief.background) để người CHƯA đọc tin trước đó vẫn
 hiểu toàn cảnh. `evidence` = thân bài gốc (full-fetch, $0, tất định); `background`
 = tóm tắt nghiên cứu bổ sung — do Claude Code tự tìm (WebSearch) khi viết qua
@@ -69,17 +70,48 @@ from urllib.parse import urlparse
 
 from ._jsonparse import try_json_object
 from ._numeric import has_approx_word, parse_magnitude_token
+from ..config import load_brand
 from ..guardrails import compliance
 from ..models import ContentDraft, ContentFormat, Fact
 from .base import Agent, LLMClient
 from .voice import assemble_voice
 
-_DISCLAIMER = (
-    "Nội dung chỉ mang tính thông tin, không phải khuyến nghị đầu tư. "
-    "Nhà đầu tư tự chịu trách nhiệm với quyết định của mình."
-)
-_CTA = "Theo dõi Turtle Wealth để cập nhật phân tích."
+_FALLBACK_DISCLAIMER = "Nội dung mang tính thông tin, không phải khuyến nghị đầu tư."
+
+
+def _default_cta(brand: dict | None = None) -> str:
+    """CTA mặc định — Content Factory Phase D (vá rò brand cũ): tên thương
+    hiệu đọc từ config/brand.yaml (MỘT NGUỒN, qua config.load_brand()), TUYỆT
+    ĐỐI KHÔNG hard-code TÊN BRAND NÀO (cũ hay mới) ở đây — đổi brand chỉ sửa
+    brand.yaml, KHÔNG sửa prompt/code. Sự cố THẬT đã gặp: CTA mang brand CŨ
+    (đã đổi tên từ lâu) vẫn rò ra sản phẩm video THẬT vì hằng số hard-code ở
+    đây không theo kịp lúc chốt brand mới (Phase 1.2 chỉ vá renderer, CHƯA
+    quét hết prompt) — xem test_no_old_brand_name_anywhere_in_product_code."""
+    b = brand if brand is not None else load_brand()
+    name = str(b.get("name") or "").strip()
+    return f"Theo dõi {name} để cập nhật phân tích." if name else "Theo dõi để cập nhật phân tích."
+
+
+def _default_disclaimer(brand: dict | None = None) -> str:
+    """Disclaimer mặc định — đọc `footer.disclaimer` từ config/brand.yaml (MỘT
+    NGUỒN, cùng brand kit dùng bởi render/infographic.py). _FALLBACK_DISCLAIMER
+    CHỈ dùng khi CẢ brand.yaml lẫn key này đều thiếu (môi trường test/lỗi đọc
+    file) — không hard-code brand nào, chỉ là câu miễn trừ trách nhiệm chung."""
+    b = brand if brand is not None else load_brand()
+    footer = b.get("footer") or {}
+    return str(footer.get("disclaimer") or "").strip() or _FALLBACK_DISCLAIMER
+
+
 _JSON_ONLY = "\n\nCHỈ trả JSON đúng schema, KHÔNG markdown, KHÔNG lời dẫn."
+
+# PERSONA của AnalysisWriterAgent/VideoScriptAgent (system prompt, xem 2 class
+# bên dưới) đọc tên brand 1 LẦN lúc import module — CÙNG NẾP với mọi `system`
+# khác trong file này (hằng số string tĩnh, đối chiếu 1-1 với prompts/*.v1.md
+# qua test_prompts_*_file_matches_code_default_no_drift, xem tests/test_
+# pipeline.py) — KHÔNG đổi sang property/method động (sẽ vỡ đối chiếu chuỗi
+# tĩnh đó). Đổi brand.yaml rồi restart tiến trình là đủ, khớp cách load_settings()
+# cũng chỉ đọc 1 lần mỗi lượt chạy script.
+_BRAND_NAME = str(load_brand().get("name") or "").strip() or "đội ngũ phân tích"
 
 # Phase 4.13 Mục B — dùng CHUNG cho AnalysisWriterAgent + InfographicSpecAgent
 # (composer), tránh trôi giữa 2 nơi. Xem docstring module đầu file.
@@ -167,21 +199,39 @@ _APPROX_LOOKBACK = 12               # số ký tự nhìn NGƯỢC trước toke
 
 def _matches_canonical_fact(tok: str, body: str, start: int, facts: list[Fact],
                             tolerance: float) -> bool:
-    """Mục C (Phase 4.8): số TRONG BÀI (`tok`, tại vị trí `start`) HỢP LỆ nếu
-    có ÍT NHẤT 1 fact.canonical_value lệch ≤ `tolerance` (0 = khớp chính xác;
-    nới lên `tolerance` CHỈ được gọi khi `tok` trong bài đi kèm từ xấp xỉ ngay
-    trước nó — xem apply_guardrails/unsupported_numbers). So khớp SỐ HỌC tất
-    định (agents/_numeric.py) — guardrail luôn là CODE, KHÔNG bao giờ để AI
-    phán 1 số là an toàn."""
+    """Mục C (Phase 4.8; mở rộng Content Factory Phase 1 — range/delta): số
+    TRONG BÀI (`tok`, tại vị trí `start`) HỢP LỆ nếu khớp BẤT KỲ trường
+    canonical_* nào có mặt trên 1 fact: canonical_value (shape=scalar) lệch ≤
+    `tolerance`; NẰM TRONG [canonical_low, canonical_high] (shape=range, biên
+    nới thêm theo `tolerance` CHỈ khi có từ xấp xỉ — số NẰM SẴN trong range
+    khớp dù không có từ xấp xỉ, đúng bản chất range, khớp media_factory/
+    spec._fact_matches cho NHẤT QUÁN 2 lượt guardrail); khớp canonical_from
+    HOẶC canonical_to (shape=delta). `tolerance` = 0 (khớp chính xác) CHỈ nới
+    lên khi `tok` trong bài đi kèm từ xấp xỉ ngay trước nó — xem apply_
+    guardrails/unsupported_numbers. shape=entity/entity_list KHÔNG có
+    canonical_* số nào -> tự động bỏ qua ở đây (guardrail TÊN chưa có ở lượt
+    1, xem media_factory/spec._check_plain_list_item_entity cho lượt 2). So
+    khớp SỐ HỌC tất định (agents/_numeric.py) — guardrail luôn là CODE, KHÔNG
+    bao giờ để AI phán 1 số là an toàn."""
     val = parse_magnitude_token(tok)
     if val is None:
         return False
     effective_tolerance = tolerance if has_approx_word(body[max(0, start - _APPROX_LOOKBACK):start]) else 0.0
     for f in facts:
-        if f.canonical_value is None or f.canonical_value == 0:
-            continue
-        if abs(val - f.canonical_value) / abs(f.canonical_value) <= effective_tolerance:
-            return True
+        if f.canonical_value is not None and f.canonical_value != 0:
+            if abs(val - f.canonical_value) / abs(f.canonical_value) <= effective_tolerance:
+                return True
+        if f.canonical_low is not None and f.canonical_high is not None:
+            lo, hi = sorted((f.canonical_low, f.canonical_high))
+            slack = (hi - lo) * effective_tolerance
+            if lo - slack <= val <= hi + slack:
+                return True
+        if f.canonical_from is not None and f.canonical_from != 0:
+            if abs(val - f.canonical_from) / abs(f.canonical_from) <= effective_tolerance:
+                return True
+        if f.canonical_to is not None and f.canonical_to != 0:
+            if abs(val - f.canonical_to) / abs(f.canonical_to) <= effective_tolerance:
+                return True
     return False
 
 
@@ -237,7 +287,7 @@ class AnalysisWriterAgent(Agent):
     role = "AnalysisWriter"
     prompt_name = "analysis"          # khớp tab PROMPTS.Name + prompts/analysis.<v>.md
     system = (
-        "PERSONA: Bạn là cây bút phân tích trưởng của Turtle Wealth — giọng SẮC,\n"
+        f"PERSONA: Bạn là cây bút phân tích trưởng của {_BRAND_NAME} — giọng SẮC,\n"
         "có QUAN ĐIỂM riêng (trung lập về khuyến nghị mua/bán, nhưng KHÔNG lấp\n"
         "lửng khi gọi tên vấn đề). Bạn KHÔNG tường thuật lại 1 bài báo — bạn TỔNG\n"
         "HỢP, xâu chuỗi sự kiện hiện tại với bối cảnh/tiền lệ liên quan để người\n"
@@ -253,6 +303,8 @@ class AnalysisWriterAgent(Agent):
         "  không chỉ liệt kê dữ kiện.\n"
         "- BÁM SỐ LIỆU trong evidence/bối cảnh được cung cấp — KHÔNG bịa số.\n"
         "- KHÔNG khuyến nghị mua/bán.\n"
+        f'- "disclaimer": PHẢI dùng ĐÚNG NGUYÊN VĂN "{_default_disclaimer()}" (KHÔNG viết '
+        "lại/diễn giải/thêm bớt chữ nào — đây là câu miễn trừ trách nhiệm CHUẨN, đã duyệt).\n"
         + _NUMBER_DISCIPLINE +
         '\nTrả về DUY NHẤT JSON: {"title": str, "sapo": str, '
         '"sections": [{"heading": str, "content": str}], '
@@ -294,7 +346,7 @@ def analysis_fields_from_data(data: dict | None, brief: ProductionBrief):
             {"heading": str(s.get("heading", "")).strip(), "content": str(s.get("content", "")).strip()}
             for s in (data.get("sections") or []) if isinstance(s, dict)
         ]
-        disclaimer = str(data.get("disclaimer") or _DISCLAIMER).strip()
+        disclaimer = str(data.get("disclaimer") or _default_disclaimer()).strip()
         sources = [str(u).strip() for u in (data.get("sources") or []) if str(u).strip()]
         if sections:
             return title, sapo, sections, disclaimer, sources
@@ -311,7 +363,7 @@ def analysis_fields_from_data(data: dict | None, brief: ProductionBrief):
         sections.append({"heading": "Bối cảnh mở rộng", "content": _soft_truncate(brief.background, 600)})
     sections.append({"heading": "Hàm ý với nhà đầu tư",
                      "content": f"Mã liên quan: {_tickers_line(brief)}."})
-    return title, sapo, sections, _DISCLAIMER, ([brief.url] if brief.url else [])
+    return title, sapo, sections, _default_disclaimer(), ([brief.url] if brief.url else [])
 
 
 def render_analysis(title, sapo, sections, disclaimer, sources, brief: ProductionBrief) -> str:
@@ -326,7 +378,7 @@ def render_analysis(title, sapo, sections, disclaimer, sources, brief: Productio
     for u in sources:
         if u and u != brief.url:
             body.append(f"Xem thêm: {u}")
-    body += ["", _CTA, "", f"_{disclaimer}_"]
+    body += ["", _default_cta(), "", f"_{disclaimer}_"]
     return "\n".join(body)
 
 
@@ -347,7 +399,7 @@ class VideoScriptAgent(Agent):
     role = "VideoScripter"
     prompt_name = "video"
     system = (
-        "PERSONA: Bạn viết kịch bản video ngắn (~45-60s) cho kênh Turtle Wealth —\n"
+        f"PERSONA: Bạn viết kịch bản video ngắn (~45-60s) cho kênh {_BRAND_NAME} —\n"
         "giọng SẮC, có góc nhìn riêng, KHÔNG đọc lại tin như phát thanh viên. Xâu\n"
         "chuỗi sự kiện với bối cảnh/tiền lệ liên quan (nếu có 'Bối cảnh mở rộng')\n"
         "để người xem CHƯA theo dõi tin trước đó vẫn hiểu toàn cảnh — đây là điểm\n"
@@ -356,7 +408,9 @@ class VideoScriptAgent(Agent):
         "tóm tắt) -> 3 beat nội dung (mỗi beat 1 ý + số liệu từ evidence/bối cảnh,\n"
         "PHẢI có góc nhìn/so sánh, không chỉ thuật lại) -> CTA. Mỗi cảnh: lời thoại\n"
         "(voiceover) tự nhiên, chữ trên hình (on-screen text) ngắn, gợi ý hình ảnh.\n"
-        "Kết bằng disclaimer 1 dòng. KHÔNG bịa số, KHÔNG hô hào mua.\n"
+        f'Kết bằng disclaimer: PHẢI dùng ĐÚNG NGUYÊN VĂN "{_default_disclaimer()}" '
+        "(KHÔNG viết lại/diễn giải/thêm bớt chữ nào — đây là câu miễn trừ trách nhiệm "
+        "CHUẨN, đã duyệt). KHÔNG bịa số, KHÔNG hô hào mua.\n"
         'Trả về DUY NHẤT JSON: {"title": str, "duration_sec": int, '
         '"scenes": [{"t": str, "voiceover": str, "on_screen_text": str, "visual_hint": str}], '
         '"cta": str, "disclaimer": str}.'
@@ -400,8 +454,8 @@ def video_fields_from_data(data: dict | None, brief: ProductionBrief):
              "visual_hint": str(sc.get("visual_hint", "")).strip()}
             for sc in (data.get("scenes") or []) if isinstance(sc, dict)
         ]
-        cta = str(data.get("cta") or _CTA).strip()
-        disclaimer = str(data.get("disclaimer") or _DISCLAIMER).strip()
+        cta = str(data.get("cta") or _default_cta()).strip()
+        disclaimer = str(data.get("disclaimer") or _default_disclaimer()).strip()
         if scenes:
             return title, duration, scenes, cta, disclaimer
     # LÙI MƯỢT: kịch bản tất định 3-4 cảnh từ dữ kiện đã duyệt.
@@ -415,7 +469,7 @@ def video_fields_from_data(data: dict | None, brief: ProductionBrief):
                        "on_screen_text": "", "visual_hint": ""})
     scenes.append({"t": "45-55s", "voiceover": f"Hàm ý cho nhà đầu tư với {_tickers_line(brief)}.",
                    "on_screen_text": "", "visual_hint": ""})
-    return title, 60, scenes, _CTA, _DISCLAIMER
+    return title, 60, scenes, _default_cta(), _default_disclaimer()
 
 
 def render_video(title, duration, scenes, cta, disclaimer, brief: ProductionBrief) -> str:
@@ -479,10 +533,27 @@ _INFOGRAPHIC_COMPOSER_SYSTEM = (
     "- market: các số còn lại (cũng phải NÉN như hero).\n"
     "- highlights: 1-3 câu góc-nhìn NGẮN (KHÔNG phải 1 đoạn takeaway dài, "
     "KHÔNG cắt cụt giữa câu — mỗi câu phải TRỌN VẸN).\n"
-    "- related: mã cổ phiếu liên quan.\n"
-    "- priority: {\"primary\": [...nhãn quan trọng nhất...], \"secondary\": "
-    "[...], \"minor\": [...]} — PHÂN theo NHÃN (label) đã dùng ở hero/market, "
-    "dựa trên mức độ phục vụ luận điểm chính (khung bài đã cho).\n"
+    "- related: TÊN thực thể thật liên quan trực tiếp (địa danh/dự án/công ty/"
+    "mã CK/chính sách) — LẤY TỪ facts[] có [entity]/[entity_list] (xem nhãn "
+    "[shape:salience] đầu mỗi dòng fact), GHÉP tên NGUYÊN VĂN. TUYỆT ĐỐI KHÔNG "
+    "tự bịa thêm tên nào KHÔNG có trong facts[] — dòng nào trong 'related' "
+    "không khớp facts[] SẼ BỊ GUARDRAIL LẦN 2 CHẶN (xem media_factory/spec.py). "
+    "CHỈ LẤY entity/entity_list có salience=\"subject\" — TUYỆT ĐỐI KHÔNG lấy "
+    "salience=\"context\" (Content Factory Phase 2b — lỗi THẬT đã gặp: related "
+    "bị lấp bởi tên hội thảo/hiệp hội/viện nghiên cứu thay vì tên cảng/dự án "
+    "thật). facts[] không có entity/entity_list salience=subject nào -> để "
+    "related rỗng [], KHÔNG lùi về mã CK/tên context khi không chắc chắn.\n"
+    "- priority: {\"primary\": [...nhãn/tên quan trọng nhất...], \"secondary\": "
+    "[...], \"minor\": [...]} — \"primary\" CHỈ được chứa nhãn (label) đã dùng "
+    "ở hero/market VÀ/HOẶC tên thực thể salience=\"subject\" đã đưa vào "
+    "related (KHÔNG bao giờ salience=\"context\") — \"secondary\"/\"minor\" có "
+    "thể chứa nhãn context (hội thảo/hiệp hội...) nếu cần, dựa trên mức độ "
+    "phục vụ luận điểm chính (khung bài đã cho). MỌI mục trong \"primary\" LẤY "
+    "TỪ hero/market PHẢI LẶP LẠI NGUYÊN VĂN chuỗi label đã dùng ở đó — TUYỆT "
+    "ĐỐI KHÔNG viết tắt/diễn giải lại (vd đã dùng label \"Khu công nghiệp\" ở "
+    "market thì priority.primary PHẢI ghi lại đúng \"Khu công nghiệp\", KHÔNG "
+    "được rút gọn thành \"KCN\") — guardrail lần 2 so khớp CHUỖI, viết tắt sẽ "
+    "bị chặn NHẦM dù không phải bịa.\n"
     "- title KHÁC subtitle: title = tiêu đề GỌN; subtitle = 1 CÂU GÓC NHÌN "
     "(KHÔNG được lặp lại y hệt title).\n"
     "- render_hint (TÁCH RIÊNG khỏi 8 trường data, chỉ là gợi ý style MỀM): "
@@ -503,18 +574,46 @@ _DEFAULT_RENDER_HINT = {"theme": "dark", "palette": "navy-gold", "ratio": "4:5"}
 
 
 def _fact_display_value(f: Fact) -> str:
-    """Số hiển thị của 1 fact — ưu tiên `raw` (nguyên văn evidence), lùi về
-    value+unit ghép. Hàm nhỏ tách riêng để tránh f-string lồng nhau khó đọc."""
-    return f.raw or f"{f.value}{f.unit or ''}"
+    """Số/tên hiển thị của 1 fact cho Composer đọc — Content Factory Phase 2:
+    khác nhau THEO SHAPE (models.FACT_SHAPES), KHÔNG còn chỉ scalar. `raw`
+    (nguyên văn evidence) ưu tiên cho scalar; range/delta ghép 2 đầu; entity_
+    list liệt kê ĐỦ mọi thành viên (Composer PHẢI thấy hết để điền 'related'
+    — thiếu 1 tên là mất nguyên liệu, xem _INFOGRAPHIC_COMPOSER_SYSTEM); entity
+    là 1 tên đơn."""
+    if f.shape == "range":
+        return f"{f.value_low} - {f.value_high}{f.unit or ''}"
+    if f.shape == "delta":
+        return f"{f.from_value} → {f.to_value}"
+    if f.shape == "entity_list":
+        return ", ".join(f.entities)
+    if f.shape == "entity":
+        return f.value
+    return f.raw or f"{f.value}{f.unit or ''}"   # shape == "scalar" (mặc định, dữ liệu cũ)
+
+
+def _fact_tag(f: Fact) -> str:
+    """Nhãn đầu dòng fact cho Composer đọc — [shape] (scalar/range/delta), hoặc
+    [shape:salience] cho entity/entity_list (Content Factory Phase 2b — Composer
+    PHẢI thấy salience ngay trên dòng để lọc related/priority.primary, không
+    phải suy đoán)."""
+    if f.shape in ("entity", "entity_list"):
+        return f"{f.shape}:{f.salience or 'context'}"   # salience rỗng (dữ liệu cũ) -> hiển thị NHƯ context, AN TOÀN hơn
+    return f.shape
 
 
 def build_infographic_composer_prompt(brief: ProductionBrief, decision=None) -> str:
     """Prompt (user turn) cho Infographic Composer — facts[] (KHÔNG phải
     evidence thô) là NGUYÊN LIỆU chính, kèm khung bài (RouterDecision đã đóng
     băng, agents/route_once.py) để composer biết nhấn số nào theo đúng luận
-    điểm article/video của CÙNG chủ đề đang dùng (nhất quán multi-content)."""
+    điểm article/video của CÙNG chủ đề đang dùng (nhất quán multi-content).
+    Content Factory Phase 2: mỗi dòng gắn nhãn [shape] (KHÔNG phải [kind] như
+    cũ) — Composer cần biết HÌNH DẠNG fact để biết cách dùng (vd entity_list
+    -> nguồn cho 'related', KHÔNG phải 1 con số cho hero/market). Phase 2b:
+    entity/entity_list thêm ":salience" ([entity_list:subject] vs
+    [entity_list:context]) — Composer lọc related/priority.primary CHỈ theo
+    subject, xem _INFOGRAPHIC_COMPOSER_SYSTEM."""
     facts_lines = "\n".join(
-        f"- [{f.kind}] {f.label}: {_fact_display_value(f)}" for f in brief.facts
+        f"- [{_fact_tag(f)}] {f.label}: {_fact_display_value(f)}" for f in brief.facts
     )
     structure = str(getattr(decision, "structure", None) or "S1").strip().upper()
     parts = [
@@ -557,13 +656,39 @@ def _stat_from_fact(f: Fact) -> dict:
     return {"label": f.label, "value": _fact_display_value(f)}
 
 
+def _entity_names_from_facts(facts: list[Fact]) -> list[str]:
+    """Content Factory Phase 2 (+ 2b — salience) — mọi TÊN thật CHỦ THỂ
+    (salience="subject", KHÔNG phải "context"/phông nền — hội thảo/hiệp hội/
+    người phát biểu; xem models.Fact.salience) đã verify sẵn ở Brief (agents/
+    brief.py, KHÔNG bịa) — nguồn DUY NHẤT cho 'related' ở đường lùi mượt (KHÔNG
+    LLM, xem _empty_infographic_spec/_fallback_infographic_spec). CỐ Ý loại
+    salience="" (dữ liệu CŨ trước Phase 2b, chưa phân loại) — KHÔNG đủ chắc
+    chắn để lên hình 'related' cho luồng MỚI, dù verify_spec vẫn coi salience
+    rỗng là khớp hợp lệ khi ĐỐI CHIẾU (tương thích ngược đọc, không tương
+    thích ngược CHỌN). Giữ thứ tự xuất hiện, khử trùng."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for f in facts:
+        if f.salience != "subject":
+            continue
+        names = f.entities if f.shape == "entity_list" else ([f.value] if f.shape == "entity" and f.value else [])
+        for n in names:
+            if n and n not in seen:
+                seen.add(n)
+                out.append(n)
+    return out
+
+
 def _empty_infographic_spec(brief: ProductionBrief) -> dict:
     """facts[] RỖNG (Brief lỗi/timeout) -> spec RỖNG CÓ CHỦ Ý — KHÔNG bịa (giữ
     nguyên triết lý Phase 4.10; caller (scripts/produce_from_sheet.run) đánh
-    dấu NEEDS_HUMAN cho dòng này)."""
+    dấu NEEDS_HUMAN cho dòng này). facts[] rỗng -> _entity_names_from_facts
+    cũng rỗng -> related lùi về brief.tickers (mã CK từ CONTEXT, KHÔNG phải
+    bịa — vẫn là dữ liệu THẬT, chỉ là nguồn khác)."""
     return {
         "title": brief.hook or brief.title, "subtitle": "",
-        "hero": [], "market": [], "highlights": [], "related": list(brief.tickers),
+        "hero": [], "market": [], "highlights": [],
+        "related": _entity_names_from_facts(brief.facts) or list(brief.tickers),
         "priority": {"primary": [], "secondary": [], "minor": []},
         "source": domain_of(brief.url), "render_hint": dict(_DEFAULT_RENDER_HINT),
     }
@@ -574,17 +699,20 @@ def _fallback_infographic_spec(brief: ProductionBrief) -> dict:
     facts[] (KHÔNG nén được chữ vì không có LLM ở bước lùi mượt — value dài
     hơn bản composer thật, nhưng vẫn ĐÚNG số/KHÔNG bịa, và vẫn đủ 8 trường +
     title != subtitle). Fact ưu tiên (_pick_emphasis_index) lên `hero`; còn
-    lại (tối đa 5 fact) vào `market`."""
+    lại (tối đa 5 fact) vào `market`. `related` (Content Factory Phase 2) lấy
+    từ MỌI fact entity/entity_list (không chỉ 5 fact đầu — related không giới
+    hạn như hero/market), lùi về brief.tickers nếu Brief không trích được tên nào."""
     facts = brief.facts[:5]
     idx = _pick_emphasis_index(facts)
     hero = [_stat_from_fact(f) for i, f in enumerate(facts) if i == idx]
     market = [_stat_from_fact(f) for i, f in enumerate(facts) if i != idx]
     title = brief.hook or brief.title
     subtitle = facts[idx].label if facts and facts[idx].label != title else ""
+    related = _entity_names_from_facts(brief.facts) or list(brief.tickers)
     return {
         "title": title, "subtitle": subtitle, "hero": hero, "market": market,
         "highlights": [f"{f.label}: {_fact_display_value(f)}" for f in facts[:2]],
-        "related": list(brief.tickers),
+        "related": related,
         "priority": {"primary": [s["label"] for s in hero],
                      "secondary": [s["label"] for s in market], "minor": []},
         "source": domain_of(brief.url), "render_hint": dict(_DEFAULT_RENDER_HINT),
@@ -606,7 +734,9 @@ def infographic_spec_from_data(data: dict | None, brief: ProductionBrief) -> dic
                 # cùng triết lý "không tin field rời LLM" như driver_count.
                 subtitle = brief.title if brief.title != title else ""
             highlights = [str(h).strip() for h in (data.get("highlights") or []) if str(h).strip()]
-            related = [str(t).strip() for t in (data.get("related") or brief.tickers) if str(t).strip()]
+            related = [str(t).strip() for t in
+                      (data.get("related") or _entity_names_from_facts(brief.facts) or brief.tickers)
+                      if str(t).strip()]
             return {
                 "title": title, "subtitle": subtitle, "hero": hero, "market": market,
                 "highlights": highlights, "related": related,

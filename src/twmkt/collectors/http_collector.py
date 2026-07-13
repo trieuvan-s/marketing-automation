@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 
+from ..config import default_user_agent
 from ..models import RawDocument, Source, SourceType
 from .base import Collector
 
@@ -47,10 +48,9 @@ _DEFAULT_TICKER_BOX_SELECTOR = ".chisochungkhoan"
 _TICKER_BOX_CODE_RE = re.compile(r"^\s*([A-Z0-9]{3})\s*:")
 # ASCII-only: header HTTP (httpx/urllib) không chấp nhận giá trị ngoài
 # ASCII/latin-1 -> dấu tiếng Việt trong User-Agent sẽ crash lúc dựng client.
-_DEFAULT_USER_AGENT = (
-    "TurtleWealthMktBot/0.2 (+marketing automation noi bo, thu thap tin tai "
-    "chinh VN; lien he: trieuvanstock@gmail.com)"
-)
+# Tên bot đọc từ config/brand.yaml (MỘT NGUỒN, Content Factory Phase D — vá rò
+# brand cũ), KHÔNG hard-code — xem config.default_user_agent().
+_DEFAULT_USER_AGENT = default_user_agent(contact="trieuvanstock@gmail.com")
 
 
 @dataclass(frozen=True)

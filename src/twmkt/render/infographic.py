@@ -39,7 +39,7 @@ import textwrap
 
 # Lùi mượt CUỐI CÙNG nếu CẢ settings.yaml LẪN config/brand.yaml đều thiếu key
 # (vd môi trường test dựng Settings({}) trần, hoặc brand.yaml bị xoá nhầm) —
-# KHÔNG còn brand cũ "Turtle Wealth VN" (đã chốt FVA Capital, xem
+# KHÔNG còn brand cũ (đã chốt brand mới, xem config/brand.yaml +
 # PROJECT_HANDOFF_P5.md §1); giữ palette navy/gold hiện có (gần đúng logo
 # thật, xem config/brand.yaml ghi chú màu ước).
 _DEFAULT_BRAND = {
@@ -58,11 +58,9 @@ _DEFAULT_BRAND = {
 # tự gắn. Phase 1.2: ưu tiên đọc config/brand.yaml (footer.disclaimer) qua
 # brand_kit_from_settings(); hằng số này CHỈ còn là lùi-mượt-cuối-cùng khi
 # brand.yaml thiếu/lỗi (KHÔNG import ngược agents/production, giữ render độc
-# lập — trùng nội dung agents/production._DISCLAIMER có chủ đích).
-_RENDER_DISCLAIMER = (
-    "Nội dung chỉ mang tính thông tin, không phải khuyến nghị đầu tư. "
-    "Nhà đầu tư tự chịu trách nhiệm với quyết định của mình."
-)
+# lập — trùng nội dung agents/production._FALLBACK_DISCLAIMER có chủ đích, xem
+# Content Factory Phase D — disclaimer rút gọn).
+_RENDER_DISCLAIMER = "Nội dung mang tính thông tin, không phải khuyến nghị đầu tư."
 
 
 def brand_kit_from_settings(settings) -> dict:

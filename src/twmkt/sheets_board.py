@@ -30,7 +30,13 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from .config import load_brand
 from .models import Source, SourceType
+
+# Content Factory Phase D (vá rò brand cũ) — tên brand đọc từ config/brand.yaml
+# (MỘT NGUỒN), KHÔNG hard-code brand nào (cũ hay mới) — cùng nếp agents/
+# production.py._BRAND_NAME.
+_BRAND_NAME = str(load_brand().get("name") or "").strip() or "đội ngũ phân tích"
 
 # =====================================================================
 # Retry quota 429 — bọc MỌI lệnh gọi gspread (không riêng ApprovalGate).
@@ -169,7 +175,7 @@ CONTEXT_HEADER = ["Timestamp", "Hot%", "Score", "Group", "Topic", "Context", "Ho
 # "engine" TẠM (haiku|sonnet|mock) — đối chiếu model NÀO thực sự chạy cho mỗi
 # dòng log, xem factory.model_engine_label(). Rỗng nếu dòng log không gắn LLM.
 LOG_HEADER = ["timestamp", "level", "message", "engine"]
-README_HEADER = ["Turtle Wealth — Bảng duyệt nội dung (Sheets là UI, thay được)"]
+README_HEADER = [f"{_BRAND_NAME} — Bảng duyệt nội dung (Sheets là UI, thay được)"]
 # CONTENT — SẢN PHẨM sinh SAU cổng 1 (giai đoạn Production): 1 dòng/(bài × định
 # dạng). Timestamp ĐẦU TIÊN. Status = PENDING|RUNNING|DONE|ERROR (tất định, kết
 # quả sản xuất — dropdown do format_board đặt). "Approve(gate 2)" = CỔNG DUYỆT
@@ -971,7 +977,7 @@ def prompt_versions_from_rows(rows: list[list[str]]) -> dict[str, str]:
 # Toàn bộ chỉ đổi ĐỊNH DẠNG, KHÔNG đổi dữ liệu. Idempotent: banding &
 # conditional format được XÓA cái cũ trước khi thêm lại (dựa metadata).
 # =====================================================================
-# Bảng màu (tông xanh Turtle Wealth), lưu hex -> chuyển sang {red,green,blue} 0..1.
+# Bảng màu (tông xanh đậm), lưu hex -> chuyển sang {red,green,blue} 0..1.
 _C_HEADER_BG = "#0F5132"   # xanh đậm header
 _C_HEADER_FG = "#FFFFFF"
 _C_BAND = "#F3F3F3"        # xám nhạt hàng xen kẽ

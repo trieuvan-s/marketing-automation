@@ -1,4 +1,5 @@
-"""Shared data contracts for the Turtle Wealth marketing pipeline.
+"""Shared data contracts for the marketing automation pipeline (brand identity
+lives in config/brand.yaml, MỘT NGUỒN — KHÔNG hard-code brand ở docstring này).
 
 Mọi giai đoạn trao đổi dữ liệu qua các dataclass tất định ở đây. Không giai
 đoạn nào được "nói chuyện tự do" với giai đoạn khác — chỉ qua các contract này.
@@ -125,41 +126,116 @@ class ResearchBrief:
 # giữ fact — không loại chỉ vì kind lạ).
 FACT_KINDS = ("percent", "money", "count", "growth", "date", "ranking", "target", "other")
 
+# Content Factory Phase 1 (chặn gốc (b) — "Fact schema không chứa nổi khoảng/
+# biến thiên/danh sách thực thể"). CẤU TRÚC dữ liệu 1 Fact — KHÁC `kind` ở trên
+# (đó là DANH MỤC ngữ nghĩa percent/money/...; `shape` là HÌNH DẠNG dữ liệu).
+# ĐẶT TÊN "shape" thay vì tái dùng chữ "kind" từ yêu cầu gốc — CỐ Ý: `Fact.kind`
+# đã mang nghĩa khác (percent|money|...) từ trước, dùng khắp Brief prompt/
+# guardrail/280+ test hiện có — tái dùng "kind" cho nghĩa MỚI sẽ đụng độ, đổi
+# nghĩa field cũ âm thầm. `shape` mặc định "scalar" -> dữ liệu Fact cũ (không
+# field này trong JSON) tự hiểu là scalar, tương thích ngược 100% — xem
+# facts_from_json (sheets_board.py) và test_fact_scalar_shape_backward_compat.
+FACT_SHAPES = ("scalar", "range", "delta", "entity_list", "entity")
+
 
 @dataclass
 class Fact:
-    """1 số liệu/tuyên bố định lượng đã trích + gắn NHÃN NGHĨA từ evidence thô —
-    sinh bởi bước Research/Brief (agents/brief.py, model alias 'brief' = Haiku,
-    xem factory.make_llm/step_model). THAY THẾ nhãn vô nghĩa "Số liệu N" của
+    """1 dữ kiện đã trích + gắn NHÃN NGHĨA từ evidence thô — sinh bởi bước
+    Research/Brief (agents/brief.py, model alias 'brief' = Haiku, xem factory.
+    make_llm/step_model). THAY THẾ nhãn vô nghĩa "Số liệu N" của
     InfographicSpecAgent cũ (regex mù trên text thô).
 
     KHÔNG hợp nhất với ResearchBrief (đường Hook/Luồng B RAG giữ nguyên, không
     đụng) — Fact/facts[] CHỈ dùng cho ProductionBrief (agents/production.py).
 
-    Ràng buộc chống bịa: mỗi Fact PHẢI verify được — `value` xuất hiện NGUYÊN
-    VĂN trong `source` (1 câu evidence thật). Fact nào không verify được bị loại
+    Content Factory Phase 1 — 1 DATACLASS PHẲNG cho CẢ 5 `shape` (KHÔNG phải
+    Union kiểu-riêng-từng-shape/isinstance dispatch) — CỐ Ý: giữ nguyên phong
+    cách flat-dataclass + `dataclasses.asdict()`/`Fact(**item)` round-trip JSON
+    (facts_to_json/facts_from_json, sheets_board.py) đã dùng khắp codebase,
+    tránh 1 đợt refactor lớn/rủi ro chỉ để đổi hình dạng union. Field nào không
+    áp dụng cho `shape` hiện tại thì để rỗng/None — xem "field theo shape" dưới.
+
+    Ràng buộc chống bịa (MỌI shape): mỗi Fact PHẢI verify được — value chính
+    (value/value_low+value_high/from_value+to_value/entities[]/value tuỳ shape)
+    xuất hiện NGUYÊN VĂN trong `source`. Fact nào không verify được bị loại
     ngay ở agents/brief.facts_from_llm_output(), KHÔNG bao giờ tồn tại instance
     Fact "bịa".
 
     PHASE 4.8 MỤC C — SỐ CANONICAL: nguyên tắc "AI hiểu ở Brief, CODE phán ở
     Guardrail" — sự giòn với NGÔN NGỮ số ("gần 600 tỷ"/"585 tỉ"/"585 tỷ đồng"
     cùng 1 số thật) được xử ở khâu TRÍCH (agents/brief.py, AI nhận diện biến
-    thể cách viết); guardrail (agents/production.unsupported_numbers) chỉ làm
-    PHÉP TÍNH SỐ HỌC TẤT ĐỊNH trên `canonical_value` — KHÔNG BAO GIỜ để AI làm
-    quan toà phán 1 số là an toàn.
+    thể cách viết); guardrail (agents/production.unsupported_numbers,
+    media_factory/spec.verify_spec) chỉ làm PHÉP TÍNH SỐ HỌC TẤT ĐỊNH trên các
+    trường canonical_* — KHÔNG BAO GIỜ để AI làm quan toà phán 1 số là an toàn.
+    Cùng nguyên tắc áp cho `shape="entity"/"entity_list"` — TÊN xuất hiện ở
+    Composer/Writer PHẢI khớp `value`/1 phần tử `entities[]` nào đó, tên lạ =
+    BỊA (nguy hiểm ngang bịa số, xem media_factory/spec.py).
     """
-    value: str            # "8,18", "8", "1.200" — nguyên văn số trong evidence (KHÔNG kèm unit)
-    label: str             # "GDP 6T/2026", "LNTT MB" — nhãn CÓ NGHĨA, không phải "Số liệu N"
+    value: str             # scalar: "8,18"/"8"/"1.200" (nguyên văn số, KHÔNG kèm unit).
+                            # entity: TÊN thực thể đơn ("SHS", "Nghị quyết 57", "Rottanak Keo").
+                            # range/delta/entity_list: RỖNG — dùng field riêng bên dưới.
+    label: str              # "GDP 6T/2026", "LNTT MB" — nhãn CÓ NGHĨA, không phải "Số liệu N"
     unit: str | None = None    # "%", "tỷ đồng"... None nếu value không đi kèm đơn vị (vd đếm)
-    source: str = ""       # câu evidence gốc chứa value (audit/verify)
-    kind: str = "other"    # xem FACT_KINDS — percent|money|count|growth|date|ranking|target|other
+    source: str = ""       # CÂU NGUYÊN VĂN trong bài chứa dữ kiện (audit/verify) — ĐÂY LÀ
+                            # "source_sentence" bắt buộc theo Content Factory Phase 1, KHÔNG
+                            # thêm field trùng tên — mọi shape đều BẮT BUỘC field này khác rỗng
+                            # (enforce ở agents/brief.facts_from_llm_output, không phải ở đây).
+    kind: str = "other"    # DANH MỤC ngữ nghĩa — xem FACT_KINDS (percent|money|count|growth|
+                            # date|ranking|target|other). KHÔNG đổi nghĩa Phase 1 — xem "shape"
+                            # bên dưới cho HÌNH DẠNG dữ liệu (scalar|range|delta|entity_list|entity).
+    shape: str = "scalar"   # Content Factory Phase 1 — xem FACT_SHAPES + docstring module.
     raw: str = ""                          # cụm NGUYÊN VĂN (value+unit, kể cả từ xấp xỉ nếu có) —
                                             # PHẢI là substring THẬT của evidence+background, xem
                                             # agents/brief.facts_from_llm_output (không thì LOẠI fact)
-    canonical_value: float | None = None   # số máy đọc được, CODE tính từ value+unit (agents/
-                                            # _numeric.parse_magnitude_token) — vd "585 tỷ" -> 585e9
+    canonical_value: float | None = None   # scalar: số máy đọc được, CODE tính từ value+unit
+                                            # (agents/_numeric.parse_magnitude_token) — vd "585 tỷ" -> 585e9
     approx: bool = False                   # true nếu raw có từ xấp xỉ (gần/khoảng/xấp xỉ/hơn/
                                             # trên/dưới) — agents/_numeric.has_approx_word
+
+    # --- field CHỈ dùng khi shape="range" (vd "1.396 – 1.656 triệu tấn") ---
+    value_low: str = ""
+    value_high: str = ""
+    canonical_low: float | None = None
+    canonical_high: float | None = None
+
+    # --- field CHỈ dùng khi shape="delta" (vd "giảm từ 36 xuống 23 cảng",
+    # hoặc chuyển trạng thái KHÔNG PHẢI số — "từ diện kiểm soát sang cảnh báo") ---
+    from_value: str = ""
+    to_value: str = ""
+    canonical_from: float | None = None    # None nếu from_value không phải số (vd tên trạng thái)
+    canonical_to: float | None = None      # None nếu to_value không phải số
+
+    # --- field CHỈ dùng khi shape="entity_list" (TẬP HỢP có tính TRỌN VẸN —
+    # vd "4 cảng: Thanh Hóa, Đà Nẵng, Khánh Hòa, Cần Thơ"; guardrail: thành
+    # viên phải nằm trong tập, thêm thành viên lạ = BỊA, xem media_factory/spec.py) ---
+    entities: list[str] = field(default_factory=list)
+
+    # --- field CHỈ dùng khi shape="entity" (1 thực thể ĐƠN có tên, KHÔNG hàm ý
+    # tập hợp — vd mã CK/công ty/chính sách/địa danh/dự án/người đơn lẻ) ---
+    entity_type: str = ""  # ticker | company | policy | place | person | project | other —
+                            # nguồn giá trị hợp lệ từ config (KHÔNG hard-code, xem Phase 2/
+                            # config/settings.yaml), quyết định Composer/renderer hiển thị ra
+                            # sao (mã CK -> badge, chính sách -> nhãn, địa danh -> điểm trên
+                            # bản đồ...).
+
+    # --- field CHỈ dùng khi shape="entity"/"entity_list" (Content Factory
+    # Phase 2b — "vét cạn nhưng không phân biệt chủ thể với phông nền": bài
+    # cảng biển thật cho thấy related/priority.primary bị lấp đầy bởi TÊN HỘI
+    # THẢO/HIỆP HỘI/VIỆN NGHIÊN CỨU (phông nền — nguồn phát ngôn/bối cảnh sự
+    # kiện) thay vì tên CẢNG/DỰ ÁN THẬT (chủ thể tin) — guardrail lần 2 KHÔNG
+    # sai (không tên nào bịa), nhưng Composer không có cách phân biệt "thứ bài
+    # nói VỀ" khỏi "nơi/ai nói ra nó") ---
+    salience: str = ""     # "subject" (chủ thể — cảng/mã CK/công ty/dự án LÀ trọng tâm
+                            # bài) | "context" (phông nền — hội thảo/cơ quan/người phát
+                            # biểu/hiệp hội/viện nghiên cứu). Giá trị hợp lệ từ config
+                            # (guardrail.entity_salience, KHÔNG hard-code, xem agents/
+                            # brief.py). "" (rỗng) = dữ liệu CŨ trước Phase 2b, KHÔNG có
+                            # salience — media_factory/spec.py coi TƯƠNG ĐƯƠNG "subject"
+                            # khi ĐỐI CHIẾU tên hợp lệ (tương thích ngược, không bịa flag
+                            # cho dữ liệu cũ), nhưng KHÔNG được Composer/fallback CHỌN
+                            # vào related/priority.primary cho luồng MỚI (chỉ "subject"
+                            # tường minh mới được chọn — xem agents/production.
+                            # _entity_names_from_facts).
 
 
 @dataclass

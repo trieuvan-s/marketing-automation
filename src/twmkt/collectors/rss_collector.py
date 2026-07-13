@@ -22,17 +22,16 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from xml.etree import ElementTree as ET
 
+from ..config import default_user_agent
 from ..models import RawDocument, Source
 from .base import Collector
 
 # ASCII-only: urllib.request (stdlib) đòi header giá trị latin-1/ASCII, KHÔNG
 # chấp nhận dấu tiếng Việt (khác httpx dùng ở http_collector.py — mã hóa khoan
 # dung hơn). Đây là lý do RssCollector không tái dùng thẳng hằng số user agent
-# có dấu của http_collector.py.
-_DEFAULT_USER_AGENT = (
-    "TurtleWealthMktBot/0.2 (+marketing automation noi bo, thu thap tin tai "
-    "chinh VN; lien he: trieuvanstock@gmail.com)"
-)
+# có dấu của http_collector.py. Tên bot đọc từ config/brand.yaml (MỘT NGUỒN,
+# Content Factory Phase D — vá rò brand cũ), KHÔNG hard-code.
+_DEFAULT_USER_AGENT = default_user_agent(contact="trieuvanstock@gmail.com")
 _DEFAULT_TIMEOUT_S = 20.0
 _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
@@ -133,7 +132,7 @@ class RssCollector(Collector):
     def _fetch(self, url: str) -> str | None:
         # Header HTTP (stdlib urllib) chỉ chấp nhận ASCII/latin-1 -> ép an toàn
         # phòng khi crawl.user_agent lỡ có dấu tiếng Việt (không raise, chỉ bỏ dấu).
-        ua = self.user_agent.encode("ascii", errors="ignore").decode("ascii") or "TurtleWealthMktBot/0.2"
+        ua = self.user_agent.encode("ascii", errors="ignore").decode("ascii") or _DEFAULT_USER_AGENT
         req = urllib.request.Request(url, headers={"User-Agent": ua})
         try:
             with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:  # noqa: S310

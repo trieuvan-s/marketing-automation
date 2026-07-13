@@ -9,10 +9,15 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from ..config import load_brand
 from ._jsonparse import try_json_object as _try_json
 from .base import Agent
 
-_DEFAULT_CTA = "Theo dõi Turtle Wealth để cập nhật phân tích."
+# Content Factory Phase D (vá rò brand cũ) — tên brand đọc từ config/brand.yaml
+# (MỘT NGUỒN), KHÔNG hard-code brand nào (cũ hay mới) — xem agents/production.py
+# ._BRAND_NAME cho cùng nếp + lý do đọc 1 LẦN lúc import module.
+_BRAND_NAME = str(load_brand().get("name") or "").strip() or "đội ngũ phân tích"
+_DEFAULT_CTA = f"Theo dõi {_BRAND_NAME} để cập nhật phân tích."
 
 # dữ kiện gây chú ý: số tiền/%/kỷ lục
 _NUM_RE = re.compile(r"(\d[\d.,]*\s*(?:%|tỷ|nghìn tỷ|triệu|usd|đồng)|kỷ lục|cao nhất|thấp nhất)",
@@ -30,7 +35,7 @@ class MarketingHook:
 
 
 _SYSTEM = (
-    "PERSONA: Bạn là Trưởng nhóm nội dung mạng xã hội của Turtle Wealth — quỹ đầu "
+    f"PERSONA: Bạn là Trưởng nhóm nội dung mạng xã hội của {_BRAND_NAME} — quỹ đầu "
     "tư giá trị cho nhà đầu tư cá nhân Việt Nam. Giọng: sắc bén, đáng tin, đi thẳng "
     "vào dữ kiện; văn phong người-thật, không PR sáo rỗng. Mục tiêu: viết HOOK khiến "
     "nhà đầu tư DỪNG LƯỚT và muốn đọc tiếp.\n"
@@ -46,14 +51,13 @@ _SYSTEM = (
     'Output: {"angle":"Dẫn bằng mức lãi cao nhất 8 quý của HPG để soi động lực '
     'thép","headlines":["HPG lãi quý 3 tăng 40% — cao nhất 8 quý","Điều gì kéo lợi '
     'nhuận Hòa Phát lên đỉnh 2 năm?","Thép hồi phục hay chỉ nền thấp cùng kỳ?"],'
-    '"audience":"nhà đầu tư cá nhân","emotion":"tò mò","cta":"Theo dõi Turtle Wealth '
-    'để cập nhật phân tích."}\n'
+    f'"audience":"nhà đầu tư cá nhân","emotion":"tò mò","cta":"{_DEFAULT_CTA}"' + '}\n'
     "Input: Tiêu đề bài: Nhập siêu 13,8 tỷ USD sau 5 tháng | Mã: (không)\n"
     'Output: {"angle":"Dẫn bằng con số nhập siêu 13,8 tỷ USD để nói về áp lực tỷ '
     'giá","headlines":["Nhập siêu 13,8 tỷ USD sau 5 tháng: điều ít ai để ý","Con số '
     '13,8 tỷ USD nói gì về tỷ giá cuối năm?","Xuất khẩu mạnh nhưng vì sao vẫn nhập '
-    'siêu?"],"audience":"nhà đầu tư cá nhân","emotion":"lo ngại","cta":"Theo dõi '
-    'Turtle Wealth để cập nhật phân tích."}\n'
+    'siêu?"],"audience":"nhà đầu tư cá nhân","emotion":"lo ngại",'
+    f'"cta":"{_DEFAULT_CTA}"' + '}\n'
     'Trả về DUY NHẤT JSON: {"angle": str, "headlines": [3 chuỗi], "audience": str, '
     '"emotion": str, "cta": str}. Không thêm chữ nào ngoài JSON.'
 )

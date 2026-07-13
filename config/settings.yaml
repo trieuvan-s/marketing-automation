@@ -5,7 +5,7 @@
 # =====================================================================
 
 project:
-  name: "Turtle Wealth Marketing"
+  name: "FVA Capital Marketing"   # metadata mô tả, KHÔNG code nào đọc field này — brand SẢN PHẨM THẬT lấy từ config/brand.yaml (MỘT NGUỒN)
   version: "0.2.0"
 
 paths:
@@ -191,7 +191,7 @@ crawl:
   concurrency: 1
   max_retries: 3
   backoff_base_s: 2.0
-  user_agent: "TurtleWealthBot/0.2 (+contact: trieuvanstock@gmail.com)"
+  user_agent: "FVACapitalBot/0.2 (+contact: trieuvanstock@gmail.com)"   # đổi brand: sửa Ở ĐÂY (collectors/ đọc config.default_user_agent() nếu để trống)
   stealth: true
   # Selector mặc định (dùng khi source không tự khai) + box nhiễu cần loại.
   article_url_pattern: "-\\d{6,}\\.chn$"
@@ -364,6 +364,9 @@ writer:
 # 1 chiều, KHÔNG chặn luồng chính — báo qua Telegram khi bắt đầu xử lý/đổi nội
 # dung/duyệt xong Gate 2/lỗi. bot_token/chat_id qua ${ENV} (secrets/.env),
 # KHÔNG hardcode giá trị thật ở đây. Thiếu ENV/enabled=false -> no-op êm.
+# CỜ THỦ CÔNG nhanh (không cần sửa/commit file này): ENV TWMKT_TELEGRAM_ENABLED
+# = 1/true/yes/on (bật) | 0/false/no/off (tắt) — đè `enabled` bên dưới khi có
+# mặt, xem make_notifier() trong telegram_notifier.py.
 notifications:
   telegram:
     enabled: true
@@ -393,6 +396,20 @@ router:
 # CHỈ KHI số trong bài đi kèm từ xấp xỉ (gần/khoảng/xấp xỉ/hơn/trên/dưới).
 guardrail:
   approx_tolerance_pct: 5
+  # Content Factory Phase 1 — giá trị hợp lệ cho Fact.entity_type (shape="entity",
+  # models.py) khi Brief gắn nhãn 1 thực thể ĐƠN có tên (models.FACT_SHAPES).
+  # Quyết định Composer/renderer hiển thị (mã CK -> badge, chính sách -> nhãn,
+  # địa danh -> điểm trên bản đồ...) — đọc từ ĐÂY (settings.get("guardrail.
+  # entity_types"), cùng kiểu llm.step_models/fail_loud_steps), KHÔNG hard-code
+  # trong agents/brief.py. Loại lạ ngoài danh sách -> "other"
+  # (KHÔNG loại bỏ Fact, xem agents/brief.facts_from_llm_output Phase 2).
+  entity_types: ["ticker", "company", "policy", "place", "person", "project", "other"]
+  # Content Factory Phase 2b — giá trị hợp lệ cho Fact.salience (shape="entity"/
+  # "entity_list") — "subject" (chủ thể tin, LÊN HÌNH related/priority.primary)
+  # | "context" (phông nền/nguồn phát ngôn, CHỈ lưu để truy vết, KHÔNG lên
+  # hình). Đọc từ ĐÂY (settings.get("guardrail.entity_salience")), KHÔNG
+  # hard-code trong agents/brief.py.
+  entity_salience: ["subject", "context"]
 
 # --- Voice-lock ĐỘNG (xem docs/voice_examples.md, agents/voice.assemble_voice) --
 # $0 (chỉ đọc file cục bộ, không thêm lệnh gọi API). Phase 4: khung/hook/anchor
@@ -416,6 +433,13 @@ sheets:
   # Ưu tiên biến môi trường nếu đặt; nếu không, dùng giá trị dưới đây.
   spreadsheet_id: "157b9WY9cpgLvzNP2TH8loN-6AiEy6YXmGpFdObYhNwo"
   creds_path: "secrets/sa.json"        # forward slash chạy cả Windows/Linux
+  # RÀO CHẮN MÔI TRƯỜNG (Content Factory Phase D) — sheet RIÊNG cho benchmark/
+  # A-B/thử nghiệm (Phase 3 trở đi), TÁCH KHỎI spreadsheet_id (production) ở
+  # trên. config.resolve_sheet_id(settings, allow_production=...) MẶC ĐỊNH LUÔN
+  # đọc key này (hoặc ENV TWMKT_TEST_SHEET_ID) — KHÔNG BAO GIỜ ngầm định lùi về
+  # spreadsheet_id production dù đã set sẵn trong môi trường. Tạo 1 Google Sheet
+  # TEST riêng (khác hẳn Sheet production ở trên) rồi điền ID vào đây/ENV.
+  test_spreadsheet_id: ""
   research_worksheet: "ResearchReview"
   content_worksheet: "ContentReview"
   poll_interval_s: 15
