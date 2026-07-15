@@ -366,3 +366,65 @@ LLMClient.complete(system, prompt, *, model=None, fail_loud=False)   # mở rộ
    (brand kit FVA + wire vào pipeline), hay thiết kế lại từ đầu.
 4. Nếu muốn dọn nốt 7 dòng title-chip còn lại (§7) — dùng lại `sheets_board.extract_cell_url()`/
    `fetch_context_source_cells()` đã có, không cần xây lại.
+
+---
+
+## 10. Lưu trữ — nội dung đã DI CHUYỂN khỏi `CLAUDE.md` (kỷ luật tài liệu, task ACTIVE_TASK doc-only)
+
+`CLAUDE.md` được rút gọn chỉ còn quy tắc chung + ranh giới kiến trúc đã CHỐT (trỏ
+sang `docs/MODULE_INDEX.md` cho bản đồ code, sang đây cho quyết định/lịch sử).
+Phần dưới đây là **NGUYÊN VĂN** `CLAUDE.md` bản GỐC (Phase 0, trước Milestone
+(a)) — **ĐÃ SUPERSEDE HOÀN TOÀN**, giữ lại chỉ vì lý do lịch sử (không xoá
+thông tin, chỉ di chuyển). Kiến trúc THẬT hiện tại xem §3-§5 phía trên — bản
+gốc dưới đây nhắc tới `ervn`/LangGraph/Qdrant/React UI là lộ trình đã BỎ, không
+áp dụng.
+
+> ### CLAUDE.md gốc (Phase 0 — LỊCH SỬ, không còn phản ánh kiến trúc hiện tại)
+>
+> #### Dự án
+> Marketing Automation cho Turtle Wealth VN: thu thập thông tin (tài chính, doanh
+> nghiệp, chính sách, thế giới) → chuẩn hóa & lưu trữ → **người duyệt** → sản xuất
+> nội dung số (bài viết, infographic, kịch bản video, newsletter) → **người duyệt**
+> → phân phối MXH. Mục tiêu: kênh vệ tinh tăng độ phủ.
+>
+> Đây là **service độc lập**. KHÔNG gộp với hệ Research (`ervn` đã tách sang project
+> khác). Nếu cần dữ liệu nghiên cứu, tiêu thụ qua contract `ResearchBrief` —
+> KHÔNG reintroduce `ervn` vào repo này.
+>
+> #### Nguyên tắc bất di bất dịch
+> 1. **Tất định trước, LLM sau.** Crawl/dedup/chuẩn hóa/chunk/compliance/vector
+>    search = Python thuần ($0 token). LLM chỉ chạm ở Researcher (gửi *chunk liên
+>    quan*) và các producer viết-bằng-LLM.
+> 2. **LLM đắt chỉ chạy SAU cổng duyệt 1.** Đừng sinh nội dung cho chủ đề chưa
+>    được người duyệt.
+> 3. **Adapter ở mọi điểm nối ngoài**: collectors, publishers, embedder, vector
+>    store, LLM. Thêm nguồn/nền tảng = thêm adapter, không sửa lõi.
+> 4. **Giữ demo offline chạy được** (`python -m twmkt.demo`, $0 token) và **mọi
+>    thay đổi phải kèm test**. Chạy `python tests/test_pipeline.py` trước khi commit.
+> 5. Nội dung tài chính: giữ guardrail compliance; không nới lỏng claim cấm.
+>
+> #### Tầng token (rẻ → đắt)
+> Tầng 0 (free): crawl, curation, chunk, embedding local, vector search, infographic
+> spec, newsletter. Tầng 1 (rẻ): Haiku cho triage/tóm tắt nếu cần. Tầng 2 (đắt):
+> Sonnet cho viết bài & kịch bản, chỉ sau cổng 1.
+>
+> #### Chạy
+> ```
+> cd src && python -m twmkt.demo
+> python tests/test_pipeline.py     # hoặc python -m pytest
+> ```
+>
+> #### Lộ trình khi lên production
+> MockCollector→Crawl4aiCollector; HashingEmbedder→SentenceTransformer local;
+> InMemoryVectorStore→Qdrant; MockLLM→AnthropicLLM (Haiku/Sonnet theo tầng);
+> orchestrator→LangGraph StateGraph; AutoApproveGate→cổng duyệt React UI;
+> ConsolePublisher→adapter nền tảng thật.
+>
+> **Đối chiếu với thực tế hiện tại (đã CHỐT, khác bản gốc trên):** KHÔNG dùng
+> LangGraph/Qdrant/React UI — kiến trúc thật là Google Sheets control-plane
+> (`sheets_board.py`) + 2 Gate trên Sheet + `ClaudeCodeLLM`/`AnthropicLLM`/
+> `MockLLM` (`agents/base.py`). "Tầng token" khái niệm vẫn đúng tinh thần nhưng
+> tên bước đã đổi (Brief=Haiku, Router=Haiku, Writer=Sonnet — xem §5.6). "Cổng
+> duyệt 1" = Gate 1 (CONTEXT.Status); Luồng B (`orchestrator.py`+`demo.py`) là
+> nơi DUY NHẤT còn khớp gần đúng với mô tả gốc này (offline, 2 gate, không dùng
+> sản xuất thật).

@@ -4641,6 +4641,50 @@ def test_facts_from_llm_output_salience_missing_or_invalid_defaults_to_context()
     assert all(f.salience == "context" for f in facts)
 
 
+def test_brief_system_prompt_teaches_event_name_and_location_are_context_not_subject():
+    """Phase 3.1b — regression cho lỗi THẬT đo được qua benchmark lặp lại 10
+    lượt trên bài đối chứng âm cang_bien_gdp: tên sự kiện/diễn đàn bị gán
+    nhầm salience="subject" 4/10 lượt (Sonnet 2/5, Opus 2/5) dù chỉ là bối
+    cảnh; "Hải Phòng" (địa điểm tổ chức, ca gốc Phase 3.1) không lặp lại lần
+    nào (0/10) nhưng vẫn giữ làm ví dụ neo. Xác nhận prompt dạy RÕ cả 2 tín
+    hiệu (tên sự kiện + địa điểm tổ chức) đều là context, kèm câu hỏi tự vấn
+    trước khi gán subject và cảnh báo tần suất-xuất-hiện không phải tín hiệu
+    chủ thể."""
+    from twmkt.agents.brief import _system_prompt
+
+    system = _system_prompt()
+    low = system.lower()
+    assert "hải phòng" in low
+    assert "diễn đàn" in low and "summit" in low
+    assert "tần suất xuất hiện không phải tín hiệu" in low
+    assert "chủ đề tin" in low or "chủ thể" in low
+
+
+def test_facts_from_llm_output_preserves_context_salience_for_event_and_location():
+    """Tái hiện DỮ LIỆU THẬT ca cang_bien_gdp (Phase 3.1b): LLM trả 'Hải
+    Phòng' (địa điểm tổ chức) và tên sự kiện với salience="context" (hành vi
+    ĐÚNG sau khi siết prompt) -> facts_from_llm_output PHẢI giữ nguyên
+    "context" cho cả 2, KHÔNG tự ý nâng cấp/hạ cấp salience."""
+    from twmkt.agents.brief import facts_from_llm_output
+    import json as _json
+
+    evidence = ("Hôm nay (10/7), tại Hải Phòng, Hội thảo và Triển lãm quốc tế "
+               "thường niên về khu công nghiệp \"Diễn đàn Phát triển Khu Công "
+               "nghiệp Việt Nam - Vietnam Industrial Park Summit 2026\" đã diễn ra.")
+    raw = _json.dumps({"facts": [
+        {"shape": "entity", "value": "Hải Phòng", "label": "Địa điểm tổ chức hội thảo",
+         "entity_type": "place", "salience": "context"},
+        {"shape": "entity",
+         "value": "Diễn đàn Phát triển Khu Công nghiệp Việt Nam - Vietnam Industrial Park Summit 2026",
+         "label": "Tên sự kiện", "entity_type": "other", "salience": "context"},
+    ]}, ensure_ascii=False)
+    facts = facts_from_llm_output(raw, evidence).facts
+    by_value = {f.value: f.salience for f in facts}
+    assert by_value.get("Hải Phòng") == "context"
+    assert by_value.get(
+        "Diễn đàn Phát triển Khu Công nghiệp Việt Nam - Vietnam Industrial Park Summit 2026") == "context"
+
+
 def test_facts_from_llm_output_missing_shape_defaults_to_scalar():
     """Tương thích ngược: LLM/test cũ không gửi field 'shape' -> lùi về scalar
     (KHÔNG vỡ prompt/parser cũ nào chưa cập nhật)."""
