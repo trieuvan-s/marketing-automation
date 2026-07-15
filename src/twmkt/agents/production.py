@@ -66,11 +66,12 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.parse import urlparse
 
 from ._jsonparse import try_json_object
 from ._numeric import has_approx_word, parse_magnitude_token
-from ..config import load_brand
+from ..config import load_brand, load_settings
 from ..guardrails import compliance
 from ..models import ContentDraft, ContentFormat, Fact
 from .base import Agent, LLMClient
@@ -100,6 +101,42 @@ def _default_disclaimer(brand: dict | None = None) -> str:
     b = brand if brand is not None else load_brand()
     footer = b.get("footer") or {}
     return str(footer.get("disclaimer") or "").strip() or _FALLBACK_DISCLAIMER
+
+
+# ACTIVE_TASK — Tích hợp CONTENT_WRITER_RULES: đọc prompts/content_writer_
+# rules.md TẠI THỜI ĐIỂM GỌI (không cache import-time, CÙNG NẾP với agents/
+# voice.assemble_voice đọc docs/voice_examples.md mỗi lần gọi) — sửa rule
+# trong file .md KHÔNG cần sửa code. Trích ĐÚNG các mục §-số nguyên thuộc
+# nhóm (a) PROMPT (Phase 1 phân loại: §2 nguyên tắc viết cốt lõi dùng chung +
+# §3 Article + §4 Video + §5 Infographic) — GHÉP NGUYÊN VĂN, KHÔNG diễn giải
+# lại/tóm tắt (file rules là NGUỒN CHUẨN). §1 (quyết định model)/§6-§9
+# (checklist/reject-conditions/meta) KHÔNG nhúng ở đây — đó là input cho
+# validator (guardrails/) và bước tự-review, không phải nội dung DẠY VĂN.
+_CONTENT_WRITER_RULES_SECTION_RE = re.compile(r"(?m)^# (\d+)\. ")
+
+
+def _load_content_writer_rules(*, sections: tuple[str, ...], settings=None) -> str:
+    """Đọc + trích các mục `sections` (số §, vd ("2","3") cho Article) từ
+    `prompts/content_writer_rules.md` (đường dẫn qua config, KHÔNG hard-code —
+    `writer.content_rules_path`). File thiếu/đọc lỗi -> "" (LÙI MƯỢT, agent
+    vẫn chạy bằng persona/schema gốc, KHÔNG crash) + 1 dòng cảnh báo console.
+    Hàm THUẦN ngoại trừ đọc đĩa — test được bằng cách trỏ `settings` tới file
+    tạm, không cần LLM thật."""
+    settings = settings or load_settings()
+    path = Path(settings.get("writer.content_rules_path", "prompts/content_writer_rules.md"))
+    if not path.exists():
+        print(f"[CẢNH BÁO] không thấy {path} -> bỏ qua CONTENT_WRITER_RULES (rỗng).")
+        return ""
+    text = path.read_text(encoding="utf-8")
+    matches = list(_CONTENT_WRITER_RULES_SECTION_RE.finditer(text))
+    blocks: list[str] = []
+    for i, m in enumerate(matches):
+        if m.group(1) not in sections:
+            continue
+        start = m.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        blocks.append(text[start:end].rstrip())
+    return "\n\n".join(blocks)
 
 
 _JSON_ONLY = "\n\nCHỈ trả JSON đúng schema, KHÔNG markdown, KHÔNG lời dẫn."
@@ -316,6 +353,9 @@ class AnalysisWriterAgent(Agent):
         # đường LEGACY này — xem agents/writer.py cho đường MỚI có router thật).
         voice = assemble_voice(None)
         extra = f"\n\n---\n\nVOICE-LOCK (giọng văn bắt buộc):\n{voice}" if voice else ""
+        rules = _load_content_writer_rules(sections=("2", "3"))
+        if rules:
+            extra += f"\n\n---\n\nCONTENT_WRITER_RULES (bắt buộc, nguồn chuẩn):\n{rules}"
         data = try_json_object(self._ask(build_analysis_prompt(brief), extra_system=extra))
         title, sapo, sections, disclaimer, sources = analysis_fields_from_data(data, brief)
         body = render_analysis(title, sapo, sections, disclaimer, sources, brief)
@@ -427,6 +467,9 @@ class VideoScriptAgent(Agent):
         voice = assemble_voice(decision)
         extra = (f"\n\n---\n\nVOICE-LOCK (giọng văn bắt buộc):\n{voice}" if voice else "")
         extra += _VIDEO_TTS_GUIDANCE
+        rules = _load_content_writer_rules(sections=("2", "4"))
+        if rules:
+            extra += f"\n\n---\n\nCONTENT_WRITER_RULES (bắt buộc, nguồn chuẩn):\n{rules}"
         data = try_json_object(self._ask(build_video_prompt(brief), extra_system=extra))
         title, duration, scenes, cta, disclaimer = video_fields_from_data(data, brief)
         body = render_video(title, duration, scenes, cta, disclaimer, brief)
@@ -773,7 +816,11 @@ class InfographicSpecAgent(Agent):
         if not brief.facts:
             spec = _empty_infographic_spec(brief)
         else:
-            data = try_json_object(self._ask(build_infographic_composer_prompt(brief, decision)))
+            rules = _load_content_writer_rules(sections=("2", "5"))
+            extra = (f"\n\n---\n\nCONTENT_WRITER_RULES (bắt buộc, nguồn chuẩn):\n{rules}"
+                    if rules else "")
+            data = try_json_object(self._ask(build_infographic_composer_prompt(brief, decision),
+                                             extra_system=extra))
             spec = infographic_spec_from_data(data, brief)
         return ContentDraft(fmt=ContentFormat.INFOGRAPHIC,
                             title=f"[Infographic] {brief.title}",

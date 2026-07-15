@@ -1,0 +1,82 @@
+{
+  "title": "4 cảng biển đặc biệt được quy hoạch đến năm 2050",
+  "subtitle": "Quy hoạch nâng bốn cảng lên nhóm đặc biệt, mở rộng năng lực thông qua đến 2030",
+  "hero": [
+    {
+      "label": "Cảng biển đặc biệt (quy hoạch)",
+      "value": "4 cảng"
+    },
+    {
+      "label": "Container qua cảng 2030",
+      "value": "48,6–57,4 triệu TEU"
+    },
+    {
+      "label": "Tăng trưởng hàng hóa/năm",
+      "value": "4,3–4,9%/năm"
+    }
+  ],
+  "market": [
+    {
+      "label": "Hàng hóa qua cảng 2030",
+      "value": "1.396–1.656 triệu tấn"
+    },
+    {
+      "label": "Hành khách qua cảng 2030",
+      "value": "18,5–20,4 triệu lượt"
+    },
+    {
+      "label": "Tăng trưởng hành khách/năm",
+      "value": "1–1,4%/năm"
+    },
+    {
+      "label": "Cảng biển loại I",
+      "value": "15 cảng"
+    },
+    {
+      "label": "Cảng biển loại II",
+      "value": "6 cảng"
+    }
+  ],
+  "highlights": [
+    "Bốn cảng Thanh Hóa, Đà Nẵng, Khánh Hòa, Cần Thơ được quy hoạch nâng lên nhóm đặc biệt.",
+    "Giai đoạn 2021–2030 xây khu bến trung chuyển quốc tế tại Cần Giờ, Liên Chiểu, Nam Đồ Sơn.",
+    "Đến 2030 hệ thống cảng hướng mục tiêu 48,6–57,4 triệu TEU container thông qua."
+  ],
+  "related": [
+    "Thanh Hóa",
+    "Đà Nẵng",
+    "Khánh Hòa",
+    "Cần Thơ",
+    "Cần Giờ",
+    "Liên Chiểu",
+    "Nam Đồ Sơn"
+  ],
+  "priority": {
+    "primary": [
+      "Cảng biển đặc biệt (quy hoạch)",
+      "Container qua cảng 2030",
+      "Tăng trưởng hàng hóa/năm",
+      "Thanh Hóa",
+      "Đà Nẵng"
+    ],
+    "secondary": [
+      "Hàng hóa qua cảng 2030",
+      "Hành khách qua cảng 2030",
+      "Khánh Hòa",
+      "Cần Thơ",
+      "Cần Giờ",
+      "Liên Chiểu",
+      "Nam Đồ Sơn"
+    ],
+    "minor": [
+      "Cảng biển loại I",
+      "Cảng biển loại II"
+    ]
+  },
+  "source": "cafef.vn",
+  "render_hint": {
+    "theme": "dark",
+    "palette": "{'background': '#0B1F2A', 'primary': '#0EA5E9', 'secondary': '#14B8A6', 'accent': '#F59E0B', 'text': '#F1F5F9', 'muted_text': '#94A3B8'}",
+    "ratio": "4:5"
+  }
+}

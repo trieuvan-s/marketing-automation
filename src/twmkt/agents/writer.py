@@ -50,8 +50,9 @@ from typing import Callable
 from ._jsonparse import try_json_object
 from .base import LLMCallError, LLMClient
 from .production import (
-    AnalysisWriterAgent, ProductionBrief, analysis_fields_from_data,
-    apply_guardrails, build_analysis_prompt, render_analysis,
+    AnalysisWriterAgent, ProductionBrief, _load_content_writer_rules,
+    analysis_fields_from_data, apply_guardrails, build_analysis_prompt,
+    render_analysis,
 )
 from .voice import assemble_voice
 from ..config import Settings, load_settings
@@ -62,12 +63,20 @@ _PERSONA = AnalysisWriterAgent.system   # persona + QUY TẮC BẮT BUỘC + sch
 
 def build_writer_system(decision=None) -> str:
     """Persona/schema (CHUNG) + voice-lock ĐỘNG (theo `decision`, xem
-    agents/voice.assemble_voice — decision=None -> fallback an toàn S1+H3+D).
-    Hàm THUẦN (không mạng) — tách riêng để test được không cần LLM thật."""
+    agents/voice.assemble_voice — decision=None -> fallback an toàn S1+H3+D) +
+    CONTENT_WRITER_RULES (ACTIVE_TASK — tích hợp rules file, §2+§3, đọc
+    RUNTIME qua production._load_content_writer_rules — ĐÂY là đường Article
+    THẬT đang chạy sản xuất, xem scripts/produce_from_sheet.run() ->
+    run_writer_with_retry() -> run_writer() -> hàm này). Hàm THUẦN (không
+    mạng ngoài đọc file) — tách riêng để test được không cần LLM thật."""
     voice = assemble_voice(decision)
-    if not voice:
-        return _PERSONA
-    return f"{_PERSONA}\n\n---\n\nVOICE-LOCK (giọng văn bắt buộc):\n{voice}"
+    system = _PERSONA
+    if voice:
+        system += f"\n\n---\n\nVOICE-LOCK (giọng văn bắt buộc):\n{voice}"
+    rules = _load_content_writer_rules(sections=("2", "3"))
+    if rules:
+        system += f"\n\n---\n\nCONTENT_WRITER_RULES (bắt buộc, nguồn chuẩn):\n{rules}"
+    return system
 
 
 def run_writer(llm: LLMClient, brief: ProductionBrief, decision=None, *,

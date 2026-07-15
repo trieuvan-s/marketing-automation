@@ -27,3 +27,11 @@ secrets/
 # Golden set (Phase 3 A/B) — THƯỚC ĐO facts người liệt kê tay, PHẢI ở trong git
 # (khác tests/golden/_raw/*.txt — dữ liệu vận hành, .txt không bị *.json chặn).
 !tests/golden/*.json
+
+# Generated reports
+reports/*
+
+# Keep acceptance evidence
+!reports/TEST_RESULT.md
+!reports/phase2_verify/
+!reports/phase2_verify/**

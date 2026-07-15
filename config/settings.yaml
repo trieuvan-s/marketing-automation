@@ -343,8 +343,14 @@ llm:
   step_models:
     brief: "haiku"                  # Research/Brief — rẻ, chỉ trích + gắn nhãn
     router: "haiku"                 # StructureRouter — phân loại/chọn khung, rẻ
-    writer: "sonnet"                # Writer (article/video) — tầng đắt, chất lượng cao
-    composer: "haiku"               # Infographic Composer (Phase 4.11) — nén facts[] -> spec, LLM Loại B rẻ
+    # ACTIVE_TASK (tích hợp CONTENT_WRITER_RULES) — CHỐT Opus cho writer/
+    # composer theo prompts/content_writer_rules.md §1 (luận điểm/phân tích/
+    # giọng văn tốt hơn) + SỐ LIỆU THẬT đo Phase 3.2 (A/B Sonnet vs Opus, 3
+    # bài, xem reports/ab_writer_20260715.md): Opus 0 vi phạm guardrail cả 6
+    # bản, 8/8 field, latency THẤP HƠN Sonnet trong lượt đo — không chỉ vì
+    # rules file yêu cầu. KHÔNG hạ lại Sonnet nếu không kèm số liệu A/B mới.
+    writer: "opus"                  # Writer (article/video) — Opus
+    composer: "opus"                # Infographic Composer — Opus, ép nén ngắn như haiku qua prompt (§1)
   # Bước nào PHẢI fail-loud (raise LLMCallError khi lỗi thay vì lùi mượt trả "")
   # — Writer sinh nội dung thật, KHÔNG được âm thầm ghi CONTENT rỗng. Bước phụ
   # (hook/enrich/brief-label) KHÔNG liệt ở đây -> giữ lùi mượt như trước.
