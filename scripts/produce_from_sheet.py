@@ -516,7 +516,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
     # xuống Sheet; lần chạy sau đọc lại đúng khoá này qua item["topic_key"]).
     board.set_topic_key_values(topic_key_updates)
     if written:
-        board.regroup_and_merge_content()   # merge dọc Timestamp+Context khi >= 2 loại
+        board.regroup_and_band_content()   # to nen/vien xen ke theo nhom TopicKey (Sheet UI cleanup Phase 1)
         notifier.notify("gate2_done", written=written, approved=len(approved))
     u = content_llm.usage.as_dict()
     board.log("INFO", f"TỔNG Production: approved {len(approved)} / sinh mới {produced} / "
@@ -717,7 +717,7 @@ def run_draft(*, limit: int = 5, setup: bool = False) -> dict:
     board.mark_execute_done(done_rows)
     board.set_topic_key_values(topic_key_updates)   # Phase 1R.2: persist khoá MỚI gán
     if written:
-        board.regroup_and_merge_content()   # merge dọc Timestamp+Context khi >= 2 loại
+        board.regroup_and_band_content()   # to nen/vien xen ke theo nhom TopicKey (Sheet UI cleanup Phase 1)
     print(f"[draft] infographic sinh ngay: {infographic_done} | "
           f"yêu cầu article/video chuẩn bị: {prepared} (xem {drafts_dir}) | "
           f"Execute=DONE {len(done_rows)} dòng")
@@ -830,7 +830,7 @@ def run_ingest(*, setup: bool = False) -> dict:
     written = board.append_content_rows(rows)
     board.mark_execute_done(done_rows)
     if written:
-        board.regroup_and_merge_content()   # merge dọc Timestamp+Context khi >= 2 loại
+        board.regroup_and_band_content()   # to nen/vien xen ke theo nhom TopicKey (Sheet UI cleanup Phase 1)
     print(f"[ingest] sản phẩm mới: {ingested} | bỏ qua (đã có): {skipped} | "
           f"dính compliance: {flagged} | còn chờ Claude viết: {pending} | ghi CONTENT {written} | "
           f"Execute=DONE {len(done_rows)} dòng")

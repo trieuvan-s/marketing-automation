@@ -49,8 +49,10 @@ python tests/test_pipeline.py       # full suite (hoặc python -m pytest)
    → trả nguyên, KHÔNG BAO GIỜ tính lại. Không có URL → surrogate `uuid4`.
 3. **Membership đọc TRỰC TIẾP cột Sheet, không Source-text/row-index.** CONTEXT
    và CONTENT đều upsert theo `TopicKey` đọc từ Sheet — KHÔNG bằng Source-text
-   sống (trôi khi 2 lượt crawl ghi khác nhau), KHÔNG bằng vị trí dòng (trôi khi
-   `mergeCells` xoá giá trị ô — xem `sheets_board.regroup_and_merge_content()`).
+   sống (trôi khi 2 lượt crawl ghi khác nhau), KHÔNG bằng vị trí dòng (dữ liệu
+   CŨ trước Sheet UI cleanup Phase 1 có thể trôi vì `mergeCells` từng xoá giá
+   trị ô — cơ chế này đã bỏ hẳn, ghi mới dùng băng màu/viền theo TopicKey, xem
+   `sheets_board.regroup_and_band_content()`).
 4. **TopicKey định danh THEO-TỪNG-BÀI, không mang tính ngữ nghĩa.** Không gom
    "cùng sự kiện, nhiều nguồn" vào 1 khoá — đó là tầng StoryKey CAO HƠN, CHƯA
    XÂY. `cluster_by_event()` (`curation/enrich.py`) chỉ gộp CÙNG LƯỢT crawl

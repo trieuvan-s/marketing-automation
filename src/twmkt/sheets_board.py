@@ -170,23 +170,40 @@ PROMPTS_HEADER = ["Name", "Version", "Enable"]
 # KHÔNG lệch số cột của MỌI code/test hiện có đang truy cập theo VỊ TRÍ (vd
 # `row[3]` = Status ở CONTENT) — bài học từ chính lần soát Phase 1 này. CONTENT
 # tra cứu chủ đề qua cột này TỪ PHASE 2 trở đi (Phase 1 chỉ thêm cột + backfill).
+# Sheet UI cleanup Phase 3 — hằng số tên 3 cột GATE (người duyệt), thay literal
+# rải rác ở ~20 điểm đọc/ghi khắp file này (bài học set_content_cell Gate3
+# guard: quên đồng bộ 1 nơi sẽ làm mất invariant trong im lặng, không test nào
+# bắt được nếu literal cũ vẫn "hợp lệ cú pháp" ở chỗ quên sửa). CHỈ đại diện 3
+# cột NGƯỜI DUYỆT — KHÔNG dùng cho CONTENT.Status (kết quả sản xuất tất định,
+# khái niệm KHÁC, vẫn giữ tên "Status", KHÔNG đổi ở Phase 3 này).
+GATE1_COL = "Duyệt Context"    # CONTEXT — trước đây "Status" (cổng 1)
+GATE2_COL = "Duyệt Content"    # CONTENT — trước đây "Approve(gate 2)" (cổng 2)
+GATE3_COL = "Duyệt Public"     # CONTENT — trước đây "Gate3" (cổng 3)
+_GATE1_KEY = GATE1_COL.lower()   # dùng cho .index()/so sánh header đã lowercase
+_GATE2_KEY = GATE2_COL.lower()
+_GATE3_KEY = GATE3_COL.lower()
+
 CONTEXT_HEADER = ["Timestamp", "Hot%", "Score", "Group", "Topic", "Context", "Hook",
-                  "Source", "Status", "Execute", "tickers", "Notes", "TopicKey"]
+                  "Source", GATE1_COL, "Execute", "tickers", "Notes", "TopicKey"]
 # "engine" TẠM (haiku|sonnet|mock) — đối chiếu model NÀO thực sự chạy cho mỗi
 # dòng log, xem factory.model_engine_label(). Rỗng nếu dòng log không gắn LLM.
 LOG_HEADER = ["timestamp", "level", "message", "engine"]
 README_HEADER = [f"{_BRAND_NAME} — Bảng duyệt nội dung (Sheets là UI, thay được)"]
 # CONTENT — SẢN PHẨM sinh SAU cổng 1 (giai đoạn Production): 1 dòng/(bài × định
 # dạng). Timestamp ĐẦU TIÊN. Status = PENDING|RUNNING|DONE|ERROR (tất định, kết
-# quả sản xuất — dropdown do format_board đặt). "Approve(gate 2)" = CỔNG DUYỆT
-# NỘI DUNG (PENDING|APPROVE|REJECT, dropdown) — THAY cho tab ContentReview cũ
-# (đã xoá); người duyệt chọn ngay trên dòng sản phẩm, không cần tab riêng.
+# quả sản xuất — dropdown do format_board đặt, KHÔNG phải cổng người duyệt,
+# KHÔNG đổi tên ở Sheet UI cleanup Phase 3 — khác GATE2_COL "Duyệt Content" bên
+# dưới dù trước đây từng dễ nhầm vì cùng chữ "Status"). GATE2_COL ("Duyệt
+# Content", trước đây "Approve(gate 2)") = CỔNG DUYỆT NỘI DUNG (PENDING|APPROVE|
+# REJECT, dropdown) — THAY cho tab ContentReview cũ (đã xoá); người duyệt chọn
+# ngay trên dòng sản phẩm, không cần tab riêng.
 # LỚP 5 (Phase 1) — TopicKey CUỐI CÙNG (append, KHÔNG chen giữa — xem lý do ở
 # comment CONTEXT_HEADER phía trên: giữ nguyên vị trí cột hiện có, tránh lệch
-# mọi code/test truy cập theo index, vd `row[3]` = Status). BẮT BUỘC KHÔNG được
-# liệt vào SheetsBoard._CONTENT_MERGE_COLS (chỉ "timestamp"/"context" bị
-# merge-xoá) — đây là cột SỐNG SÓT qua merge, neo lại danh tính chủ đề cho dòng
-# con dù Context/Timestamp của nó đã bị mergeCells xoá rỗng.
+# mọi code/test truy cập theo index, vd `row[3]` = Status). Ghi MỚI (Sheet UI
+# cleanup Phase 1 trở đi) KHÔNG còn mergeCells nên KHÔNG dòng nào bị xoá rỗng
+# nữa (xem regroup_and_band_content) — TopicKey vẫn là cột neo danh tính chủ đề
+# đáng tin nhất cho dữ liệu CŨ (trước Phase 1) từng bị mergeCells xoá Context/
+# Timestamp ở dòng con.
 #
 # PRODUCTION FACTORY Phase 1.3 — 3 cột MỚI (append CUỐI, cùng lý do TopicKey ở
 # trên):
@@ -199,16 +216,60 @@ README_HEADER = [f"{_BRAND_NAME} — Bảng duyệt nội dung (Sheets là UI, t
 #                 media_factory/spec.py) — người sửa Output ở Gate 2 có thể gõ
 #                 nhầm số, nhưng KHÔNG được tự sửa facts[] (nếu cần sửa facts,
 #                 phải quay lại re-route/re-brief, không sửa tay cột này).
-#   "AssetPath" — đường dẫn file asset đã render (SVG) — MÁY-SỞ-HỮU, rỗng nếu
-#                 chưa render hoặc NEEDS_HUMAN (xem Notes).
-#   "Gate3"     — CỔNG DUYỆT ASSET cuối (PENDING|APPROVE|REJECT, dropdown,
-#                 NGƯỜI sở hữu — khác Facts/AssetPath) — duyệt ảnh/media THẬT
-#                 trước khi publish, KHÁC Gate 2 (duyệt NỘI DUNG/văn bản).
+#   "AssetPath" — đường dẫn/link tới file/kho lưu trữ đầu ra đã render — MÁY
+#                 GHI (rỗng nếu chưa render hoặc NEEDS_HUMAN, xem Notes), NGƯỜI
+#                 KHÔNG tự sửa tay, nhưng HIỂN THỊ (không ẩn — Sheet UI cleanup
+#                 Phase 6: từng ẩn ở Phase 4 cùng nhóm máy-sở-hữu, sau đó HIỆN
+#                 LẠI vì đây chính là nơi người bấm vào để mở thư mục/kho lưu
+#                 trữ output — quyết định của Lead: không thêm cột "Data URL"
+#                 mới vì trùng vai trò, xem _MACHINE_OWNED_COLS bên dưới).
+#   GATE3_COL   — "Duyệt Public" (trước đây "Gate3") — CỔNG DUYỆT ASSET cuối
+#                 (PENDING|APPROVE|REJECT, dropdown, NGƯỜI sở hữu — khác Facts/
+#                 AssetPath) — duyệt ảnh/media THẬT trước khi publish, KHÁC
+#                 GATE2_COL (duyệt NỘI DUNG/văn bản).
+#
+# SHEET UI CLEANUP PHASE 6 — 2 cột MỚI cuối cùng (append, cùng lý do vị trí ở
+# trên — KHÔNG chen giữa các cột hiện có TRỪ khi đã tính kỹ ảnh hưởng chỉ số
+# cột ẩn, xem bên dưới):
+#   "Social Link"    — NGƯỜI điền tay, KHÔNG khoá (link bài đã đăng lên mạng
+#                       xã hội) — chèn TRƯỚC GATE3_COL (không phải append tận
+#                       cùng) một cách CÓ CHỦ Ý: TopicKey/Facts (2 cột còn ẩn,
+#                       _MACHINE_OWNED_COLS) đứng TRƯỚC AssetPath và GIỮ
+#                       NGUYÊN CHỈ SỐ CỘT — hiddenByUser gắn theo chỉ số, KHÔNG
+#                       theo tên, nên chèn cột mới TRƯỚC 2 cột còn ẩn sẽ vô
+#                       tình làm hiddenByUser ẩn NHẦM cột khác. Chèn SAU
+#                       AssetPath (không còn ẩn) là an toàn.
+#   "Posting Status"  — NGƯỜI điền tay, KHÔNG khoá, dropdown (Đã đăng|Lỗi|
+#                       Đang chờ) — SAU GATE3_COL (cổng duyệt cuối, hợp lý về
+#                       thứ tự: duyệt xong mới tới trạng thái đăng).
 CONTENT_HEADER = ["Timestamp", "Context", "Type", "Status", "Output", "Notes",
-                  "Approve(gate 2)", "TopicKey", "Facts", "AssetPath", "Gate3"]
+                  GATE2_COL, "TopicKey", "Facts", "AssetPath", "Social Link",
+                  GATE3_COL, "Posting Status"]
+
+# Sheet UI cleanup Phase 4 — cột MÁY-SỞ-HỮU (người không nên sửa tay): TopicKey
+# (CONTEXT + CONTENT), Facts (chỉ CONTENT). CHỈ ẨN (hideColumn), KHÔNG chuyển
+# tab/xoá — đọc lại bất kỳ lúc nào qua --show-machine-cols. Xem
+# SheetsBoard.set_machine_columns_hidden() — ĐỘC LẬP HOÀN TOÀN với ensure_tabs()/
+# migrate_rows() (xác nhận Phase 4: hideColumn không đổi giá trị ô nào nên
+# KHÔNG kích hoạt _headers_need_setup(), xem docstring hàm đó).
+#
+# Sheet UI cleanup Phase 6 — "assetpath" ĐÃ BỊ RÚT khỏi CONTENT (quyết định
+# Lead: AssetPath đóng vai "Data URL" — link mở thư mục/kho lưu trữ output cho
+# NGƯỜI bấm vào, nên phải HIỂN THỊ, không còn ẩn theo nhóm máy-sở-hữu). Máy vẫn
+# là bên GHI giá trị cột này (người không tự gõ tay), chỉ khác là không ẩn nữa.
+_MACHINE_OWNED_COLS: dict[str, tuple[str, ...]] = {
+    "CONTEXT": ("topickey",),
+    "CONTENT": ("topickey", "facts"),
+}
+
+# Sheet UI cleanup Phase 6b — AssetPath (CONTENT) giờ HIỂN THỊ (không ẩn) nên
+# khoá bằng Protected Range thay vì hideColumn. Xem SheetsBoard.
+# protect_asset_path_column(); mô tả dùng làm khoá idempotent (tránh tạo
+# trùng protection nếu chạy script nhiều lần).
+_ASSET_PATH_PROTECTION_DESC = "AssetPath - MÁY-GHI, khoá sửa tay (Sheet UI cleanup Phase 6b)"
 
 # 8 tab dựng lần đầu (tên : header). Thứ tự = thứ tự tab hiển thị. ResearchReview/
-# ContentReview đã GỘP vào CONTEXT.Status / CONTENT."Approve(gate 2)" -> xoá khỏi
+# ContentReview đã GỘP vào CONTEXT.GATE1_COL / CONTENT.GATE2_COL -> xoá khỏi
 # danh sách (ensure_tabs tự dọn tab cũ còn sót trên Sheet, xem _LEGACY_TABS).
 TABS: dict[str, list[str]] = {
     "README": README_HEADER,
@@ -231,10 +292,19 @@ _LEGACY_TABS = {"Sheet1", "ResearchReview", "ContentReview"}
 # TopicKey (Phase 1) -> "" khi migrate (dòng CŨ chưa có khoá) — CHỦ Ý: backfill
 # tính khoá THẬT là bước RIÊNG (backfill_context_topic_keys/backfill_content_
 # topic_keys), migrate_rows() chỉ lo dịch chuyển SCHEMA, không tính khoá.
+# Sheet UI cleanup Phase 3 — BÀI HỌC THẬT (tự gây ra + tự phát hiện + tự sửa
+# ngay trong phiên đổi tên này): migrate_rows() map dữ liệu THEO TÊN CỘT — 1
+# cột bị ĐỔI TÊN (không phải thêm mới) trông giống hệt "cột mới" với hàm này,
+# nên GIÁ TRỊ THẬT (vd Duyệt Context=APPROVE của người đã duyệt) bị đè về
+# default nếu Sheet nào đó vẫn còn header CŨ ("Status") lúc migrate chạy lại.
+# Listed ở đây CHỈ để tránh default rỗng mập mờ (về "PENDING" — trạng thái AN
+# TOÀN nhất, giống default context_row() tự đặt) — KHÔNG khôi phục được lựa
+# chọn APPROVE/REJECT thật đã mất (phải sửa tay nếu gặp lại, như phiên này).
 _MIGRATE_DEFAULTS: dict[str, dict[str, str]] = {
-    "CONTEXT": {"Execute": "", "TopicKey": ""},
-    "CONTENT": {"Approve(gate 2)": "PENDING", "TopicKey": "",
-               "Facts": "", "AssetPath": "", "Gate3": "PENDING"},
+    "CONTEXT": {"Execute": "", "TopicKey": "", GATE1_COL: "PENDING"},
+    "CONTENT": {GATE2_COL: "PENDING", "TopicKey": "",
+               "Facts": "", "AssetPath": "", "Social Link": "",
+               GATE3_COL: "PENDING", "Posting Status": ""},
 }
 
 _README_ROWS = [
@@ -243,12 +313,12 @@ _README_ROWS = [
     ["3) Chỉnh Field/Topic/từ khóa phân loại ở tab TAXONOMY (đọc LIVE mỗi lần chạy)."],
     ["4) Chạy scripts/review_to_sheet.py — bot phát hiện (RSS)/crawl (HTML) thật, "
      "gộp bài trùng giữa các nguồn, UPSERT vào CONTEXT theo url (bài đã có GIỮ NGUYÊN)."],
-    ["5) Duyệt ở cột Status của CONTEXT: APPROVE / REJECT (mặc định PENDING). "
+    [f"5) Duyệt ở cột {GATE1_COL} của CONTEXT: APPROVE / REJECT (mặc định PENDING). "
      "APPROVE -> tự đặt Execute=RUN (chờ sản xuất)."],
-    ["6) scripts/produce_from_sheet.py --draft/--ingest chạy lịch 30'/lần (power_on.py): "
-     "CHỈ xử lý dòng Status=APPROVE và Execute=RUN, xong đặt Execute=DONE (idempotent), "
+    [f"6) scripts/produce_from_sheet.py --draft/--ingest chạy lịch 30'/lần (power_on.py): "
+     f"CHỈ xử lý dòng {GATE1_COL}=APPROVE và Execute=RUN, xong đặt Execute=DONE (idempotent), "
      "ghi tab CONTENT."],
-    ["7) Duyệt nội dung (cổng 2) ở cột \"Approve(gate 2)\" của tab CONTENT: APPROVE / REJECT."],
+    [f"7) Duyệt nội dung (cổng 2) ở cột \"{GATE2_COL}\" của tab CONTENT: APPROVE / REJECT."],
     ["8) Đổi văn phong agent sản xuất: sửa prompts/<Name>.<Version>.md rồi trỏ Version ở tab PROMPTS."],
     ["Cột SOURCES: " + " | ".join(SOURCES_HEADER)],
     ["Cột CONTEXT: " + " | ".join(CONTEXT_HEADER)],
@@ -488,13 +558,19 @@ def content_row(*, context: str, type_: str, status: str, output: str,
                 facts: str = "", asset_path: str = "",
                 ts: str | None = None) -> list[str]:
     """1 hàng CONTENT ĐÚNG thứ tự CONTENT_HEADER (Timestamp|Context|Type|Status|
-    Output|Notes|Approve(gate 2)|TopicKey|Facts|AssetPath|Gate3). Status: DONE
-    (sạch)|ERROR (lỗi/compliance) — kết quả sản xuất, tất định. Approve(gate 2):
-    cổng NGƯỜI duyệt nội dung (PENDING mặc định, thay tab ContentReview cũ).
-    `topic_key` (Lớp 5 Phase 1) — caller tự tính + truyền vào. `facts` (Phase
-    1.3, JSON — dùng `facts_to_json()`) — snapshot facts[] MÁY-SỞ-HỮU, xem
-    comment CONTENT_HEADER. `asset_path` (Phase 1.3) — rỗng mặc định (chưa
-    render).
+    Output|Notes|Approve(gate 2)|TopicKey|Facts|AssetPath|Social Link|Gate3|
+    Posting Status). Status: DONE (sạch)|ERROR (lỗi/compliance) — kết quả sản
+    xuất, tất định. Approve(gate 2): cổng NGƯỜI duyệt nội dung (PENDING mặc
+    định, thay tab ContentReview cũ). `topic_key` (Lớp 5 Phase 1) — caller tự
+    tính + truyền vào. `facts` (Phase 1.3, JSON — dùng `facts_to_json()`) —
+    snapshot facts[] MÁY-SỞ-HỮU, xem comment CONTENT_HEADER. `asset_path`
+    (Phase 1.3) — rỗng mặc định (chưa render); Sheet UI cleanup Phase 6: hiển
+    thị (không còn ẩn), đóng vai link mở thư mục/kho lưu trữ output.
+
+    "Social Link" và "Posting Status" (Sheet UI cleanup Phase 6) KHÔNG có tham
+    số ở đây — CỐ Ý, giống Gate3: cả 2 đều do NGƯỜI điền tay trực tiếp trên
+    Sheet (link bài đã đăng / trạng thái đăng), luôn rỗng cho hàng MỚI do máy
+    ghi.
 
     INVARIANT (sự cố THẬT trên Sheet production, xem PROJECT_HANDOFF_P5.md):
     Gate3 KHÔNG có tham số ở đây — CỐ Ý, KHÔNG phải thiếu sót. Gate3 là cổng
@@ -504,7 +580,7 @@ def content_row(*, context: str, type_: str, status: str, output: str,
     test_no_machine_write_path_touches_gate3 (tests/test_pipeline.py) — khoá
     bất biến này VĨNH VIỄN, KHÔNG thêm lại tham số gate3 ở đây dù có lý do gì."""
     return [ts or _now_ddmmyyyy(), context, type_, status, output, notes, approve,
-           topic_key, facts, asset_path, "PENDING"]
+           topic_key, facts, asset_path, "", "PENDING", ""]
 
 
 def facts_to_json(facts: list) -> str:
@@ -549,77 +625,78 @@ _FULL_TYPES = frozenset({"article", "video_script", "infographic"})
 
 
 def group_content_rows(header: list[str], rows: list[list[str]]) -> dict[str, list[list[str]]]:
-    """Nhóm các hàng CONTENT (KHÔNG gồm header) theo Context, GIỮ nguyên thứ tự
-    xuất hiện bên trong mỗi nhóm. Hàng Context rỗng bị bỏ qua. Hàm THUẦN — dùng
-    bởi regroup_content_rows/content_merge_ranges (test được, không mạng)."""
+    """Nhóm các hàng CONTENT (KHÔNG gồm header) theo TopicKey, GIỮ nguyên thứ tự
+    xuất hiện bên trong mỗi nhóm. Hàng TopicKey rỗng bị bỏ qua. Hàm THUẦN — dùng
+    bởi regroup_content_rows/content_band_ranges (test được, không mạng).
+
+    Sheet UI cleanup Phase 1 — ĐỔI KHOÁ NHÓM từ Context text sang TopicKey:
+    Context có thể bị merge cũ để lại rỗng (dữ liệu cũ trước Phase 1) hoặc bị
+    sửa tay, trong khi TopicKey KHÔNG BAO GIỜ đổi/rỗng một khi đã gán (write-
+    once, xem curation/keys.py) — nhóm theo TopicKey ổn định hơn hẳn, và không
+    còn phụ thuộc cách viết Context có khớp hệt nhau ký tự-cho-ký tự hay không."""
     low = [h.strip().lower() for h in header]
-    if "context" not in low:
+    if "topickey" not in low:
         return {}
-    ic = low.index("context")
+    ik = low.index("topickey")
     groups: dict[str, list[list[str]]] = {}
     for r in rows:
-        ctx = r[ic].strip() if ic < len(r) else ""
-        if not ctx:
+        key = r[ik].strip() if ik < len(r) else ""
+        if not key:
             continue
-        groups.setdefault(ctx, []).append(r)
+        groups.setdefault(key, []).append(r)
     return groups
 
 
 def regroup_content_rows(header: list[str], rows: list[list[str]]) -> list[list[str]]:
-    """Sắp lại `rows` (KHÔNG gồm header) sao cho các hàng CÙNG Context LUÔN liền
-    kề nhau — điều kiện bắt buộc để merge dọc (Sheets chỉ merge được 1 dải liên
-    tục). Thứ tự xuất hiện ĐẦU TIÊN giữa các Context và thứ tự BÊN TRONG mỗi
-    Context được giữ nguyên (ổn định) — chỉ đổi VỊ TRÍ nhóm, không đổi dữ liệu.
-    Hàng Context rỗng giữ nguyên thứ tự tương đối, đẩy xuống cuối. Hàm THUẦN."""
+    """Sắp lại `rows` (KHÔNG gồm header) sao cho các hàng CÙNG TopicKey LUÔN liền
+    kề nhau — điều kiện để tô nền/viền theo nhóm (content_band_ranges). Thứ tự
+    xuất hiện ĐẦU TIÊN giữa các TopicKey và thứ tự BÊN TRONG mỗi nhóm được giữ
+    nguyên (ổn định) — chỉ đổi VỊ TRÍ nhóm, không đổi dữ liệu. Hàng TopicKey
+    rỗng giữ nguyên thứ tự tương đối, đẩy xuống cuối. Hàm THUẦN."""
     low = [h.strip().lower() for h in header]
-    if "context" not in low:
+    if "topickey" not in low:
         return list(rows)
-    ic = low.index("context")
+    ik = low.index("topickey")
     groups = group_content_rows(header, rows)
-    empty = [r for r in rows if not (r[ic].strip() if ic < len(r) else "")]
+    empty = [r for r in rows if not (r[ik].strip() if ik < len(r) else "")]
     out: list[list[str]] = []
-    seen_ctx: set[str] = set()
+    seen_keys: set[str] = set()
     for r in rows:
-        ctx = r[ic].strip() if ic < len(r) else ""
-        if not ctx or ctx in seen_ctx:
+        key = r[ik].strip() if ik < len(r) else ""
+        if not key or key in seen_keys:
             continue
-        seen_ctx.add(ctx)
-        out.extend(groups[ctx])
+        seen_keys.add(key)
+        out.extend(groups[key])
     out.extend(empty)
     return out
 
 
-_MIN_MERGE_TYPES = 2   # ngưỡng merge: Context có >= N loại KHÁC NHAU (article/video_script/
-                        # infographic) liền kề là merge — KHÔNG còn bắt buộc đủ cả 3 (_FULL_TYPES
-                        # vẫn giữ làm tập THAM KHẢO 3 loại hợp lệ, không dùng để so đủ/thiếu nữa).
-
-
-def content_merge_ranges(header: list[str], rows: list[list[str]]) -> list[tuple[int, int]]:
-    """`rows` PHẢI đã regroup (regroup_content_rows) trước — hàm này chỉ tìm dải,
-    KHÔNG tự sắp lại. Trả list (start, end) 0-based/end-exclusive TÍNH THEO SHEET
-    (offset +1 vì hàng 1 là header) — mỗi dải là 1 Context có TỪ _MIN_MERGE_TYPES
-    (mặc định 2) loại KHÁC NHAU trở lên (đếm loại PHÂN BIỆT, không đếm số hàng)
-    nằm ở các hàng LIÊN TIẾP. Context chỉ 1 loại hoặc hàng không liền kề (chưa
-    regroup) -> KHÔNG merge."""
+def content_band_ranges(header: list[str], rows: list[list[str]]) -> list[tuple[int, int]]:
+    """Sheet UI cleanup Phase 1 — THAY content_merge_ranges cũ (đã xoá cùng
+    mergeCells). `rows` PHẢI đã regroup (regroup_content_rows) trước — hàm này
+    chỉ tìm dải, KHÔNG tự sắp lại. Trả list (start, end) 0-based/end-exclusive
+    TÍNH THEO SHEET (offset +1 vì hàng 1 là header) — mỗi dải là 1 TopicKey liên
+    tục, KHÔNG PHÂN BIỆT số loại (khác _MIN_MERGE_TYPES cũ, vốn chỉ merge Context
+    có >=2 loại) — banding là phân nhóm THỊ GIÁC theo CHỦ ĐỀ, áp dụng cho MỌI
+    nhóm kể cả 1 dòng, để người đọc luôn thấy ranh giới chủ đề rõ ràng. Dùng để
+    TÔ MÀU/VIỀN xen kẽ (regroup_and_band_content) — KHÔNG merge ô, không xoá
+    giá trị bất kỳ cột nào."""
     low = [h.strip().lower() for h in header]
-    if "context" not in low or "type" not in low:
+    if "topickey" not in low:
         return []
-    ic, it = low.index("context"), low.index("type")
+    ik = low.index("topickey")
     ranges: list[tuple[int, int]] = []
     n = len(rows)
     i = 0
     while i < n:
-        ctx = rows[i][ic].strip() if ic < len(rows[i]) else ""
-        if not ctx:
+        key = rows[i][ik].strip() if ik < len(rows[i]) else ""
+        if not key:
             i += 1
             continue
         j = i
-        types_seen: set[str] = set()
-        while j < n and (rows[j][ic].strip() if ic < len(rows[j]) else "") == ctx:
-            types_seen.add(rows[j][it].strip().lower() if it < len(rows[j]) else "")
+        while j < n and (rows[j][ik].strip() if ik < len(rows[j]) else "") == key:
             j += 1
-        if len(types_seen) >= _MIN_MERGE_TYPES:
-            ranges.append((i + 1, j + 1))
+        ranges.append((i + 1, j + 1))
         i = j
     return ranges
 
@@ -736,10 +813,10 @@ def content_rows_for_render(header: list[str], rows: list[list[str]], *,
                             type_: str = "infographic") -> list[dict]:
     """Danh sách dòng CONTENT khớp `type_` — mỗi item: {row (Sheet 1-based),
     topic_key, context, output, facts (JSON thô), approve_gate2, asset_path,
-    gate3}. Thiếu cột bắt buộc (topickey/context/output/type/approve(gate 2))
+    gate3}. Thiếu cột bắt buộc (topickey/context/output/type/{GATE2_COL})
     -> [] (an toàn, KHÔNG đoán vị trí cột)."""
     low = [h.strip().lower() for h in header]
-    required = ("topickey", "context", "output", "type", "approve(gate 2)")
+    required = ("topickey", "context", "output", "type", _GATE2_KEY)
     if not all(c in low for c in required):
         return []
     idx = {c: low.index(c) for c in low}
@@ -758,9 +835,9 @@ def content_rows_for_render(header: list[str], rows: list[list[str]], *,
             "context": g(row, "context"),
             "output": g(row, "output"),
             "facts": g(row, "facts"),
-            "approve_gate2": g(row, "approve(gate 2)"),
+            "approve_gate2": g(row, _GATE2_KEY),
             "asset_path": g(row, "assetpath"),
-            "gate3": g(row, "gate3"),
+            "gate3": g(row, _GATE3_KEY),
         })
     return out
 
@@ -843,15 +920,19 @@ def is_title_chip(cell: dict, formatted_value: str) -> bool:
 # =====================================================================
 # LỚP 5 Phase 2 — Upsert CONTENT theo khoá. INVARIANT (chốt của Lead): match-
 # or-insert TRA THEO CỘT TopicKey ĐÃ LƯU. TUYỆT ĐỐI không tra theo Source sống,
-# không theo chỉ số dòng. TopicKey KHÔNG nằm trong _CONTENT_MERGE_COLS nên
-# SỐNG SÓT mergeCells (khác Context/Timestamp bị API xoá thật) — đây là lý do
-# chuyển dedup từ (Context, Type) sang (TopicKey, Type) đóng dứt điểm bug
-# "content mồ côi" (xem curation/keys.py docstring cho gốc rễ đầy đủ).
+# không theo chỉ số dòng. TopicKey KHÔNG BAO GIỜ bị mergeCells xoá (khác
+# Context/Timestamp, từng bị API xoá thật ở dữ liệu TRƯỚC Sheet UI cleanup
+# Phase 1 — mergeCells đã bỏ hẳn, ghi MỚI không còn hàng nào bị xoá rỗng, xem
+# regroup_and_band_content) — đây là lý do chuyển dedup từ (Context, Type)
+# sang (TopicKey, Type) đóng dứt điểm bug "content mồ côi" (xem curation/
+# keys.py docstring cho gốc rễ đầy đủ). Dữ liệu CŨ (trước Phase 1) vẫn có thể
+# còn Context rỗng do mergeCells để lại — code đọc dưới đây vẫn xử lý đúng.
 # =====================================================================
 def content_topic_keys(header: list[str], rows: list[list[str]]) -> tuple[set[tuple[str, str]], list[str]]:
     """(TopicKey, Type) đã có trong CONTENT — đọc TRỰC TIẾP cột TopicKey, KHÔNG
-    suy/tái tạo từ Context (bị mergeCells xoá thật, không đáng tin). Dòng CÓ
-    Type nhưng TopicKey RỖNG (dữ liệu cũ chưa backfill/rekey — xem
+    suy/tái tạo từ Context (dữ liệu CŨ trước Sheet UI cleanup Phase 1 có thể còn
+    rỗng do mergeCells cũ, không đáng tin — ghi MỚI từ Phase 1 không còn bị xoá
+    nữa). Dòng CÓ Type nhưng TopicKey RỖNG (dữ liệu cũ chưa backfill/rekey — xem
     backfill_content_topic_keys) KHÔNG được đưa vào set khoá (không thể định
     danh theo khoá) — Context của các dòng đó (carry-forward qua merge-blank,
     cùng kỹ thuật backfill_content_topic_keys) trả riêng ở phần tử thứ 2 để
@@ -885,7 +966,7 @@ def content_topic_keys(header: list[str], rows: list[list[str]]) -> tuple[set[tu
 
 
 def approved_context_from_rows(rows: list[list[str]]) -> list[dict]:
-    """Các dòng CONTEXT có Status=APPROVE -> list dict (ánh xạ theo TÊN cột):
+    """Các dòng CONTEXT có Duyệt Context=APPROVE -> list dict (ánh xạ theo TÊN cột):
     context (tiêu đề), hook, source (url chính), tickers, group, topic, execute
     (RUN/DONE/rỗng), row (số dòng 1-based TRÊN SHEET — dùng để ghi lại
     Execute=DONE sau khi sản xuất xong, xem SheetsBoard.mark_execute_done),
@@ -899,7 +980,7 @@ def approved_context_from_rows(rows: list[list[str]]) -> list[dict]:
         return header.index(name) if name in header else None
 
     i_ctx, i_hook, i_src = idx("context"), idx("hook"), idx("source")
-    i_tk, i_grp, i_tp, i_st = idx("tickers"), idx("group"), idx("topic"), idx("status")
+    i_tk, i_grp, i_tp, i_st = idx("tickers"), idx("group"), idx("topic"), idx(_GATE1_KEY)
     i_ex, i_key = idx("execute"), idx("topickey")
     if i_ctx is None or i_st is None:
         return []
@@ -1004,7 +1085,7 @@ _COL_WIDTH = {
     "hot%": 80, "group": 140, "source": 260, "value": 260,
     "publisher": 170, "field": 110, "topic": 130, "sources": 260, "feedurl": 260,
     "interval": 80, "priority": 80, "keywords": 380, "execute": 90,
-    "approve(gate 2)": 130,
+    _GATE1_KEY: 110, _GATE2_KEY: 130,
 }
 _COL_WIDTH_DEFAULT = 140
 # Cột nội dung dài -> wrap text.
@@ -1148,34 +1229,38 @@ def _tab_requests(t: TabMeta) -> list[dict]:
         c = low.index("enable")
         out.append(_set_validation(sid, 1, fmt_rows, c,
                                    {"condition": {"type": "BOOLEAN"}, "showCustomUi": True}))
-    if t.name == "CONTEXT" and "status" in low:  # -> dropdown quy trình duyệt (cổng 1)
-        c = low.index("status")
+    if t.name == "CONTEXT" and _GATE1_KEY in low:  # -> dropdown quy trình duyệt (cổng 1)
+        c = low.index(_GATE1_KEY)
         out.append(_set_validation(sid, 1, fmt_rows, c,
                                    _one_of_list(["PENDING", "APPROVE", "REJECT"])))
     if t.name == "CONTEXT" and "execute" in low:  # -> dropdown cờ thực thi sản xuất
         c = low.index("execute")
         out.append(_set_validation(sid, 1, fmt_rows, c,
                                    _one_of_list(["RUN", "DONE", "FAILED", "NEEDS_HUMAN"])))
-    if t.name == "CONTENT" and "status" in low:  # -> dropdown (kết quả sản xuất, tất định)
+    if t.name == "CONTENT" and "status" in low:  # -> dropdown (kết quả sản xuất, tất định — KHÁC Gate, không đổi tên)
         c = low.index("status")
         out.append(_set_validation(sid, 1, fmt_rows, c,
                                    _one_of_list(["PENDING", "RUNNING", "DONE", "ERROR", "SKIPPED"])))
-    if t.name == "CONTENT" and "approve(gate 2)" in low:  # -> dropdown quy trình duyệt (cổng 2)
-        c = low.index("approve(gate 2)")
+    if t.name == "CONTENT" and _GATE2_KEY in low:  # -> dropdown quy trình duyệt (cổng 2)
+        c = low.index(_GATE2_KEY)
         out.append(_set_validation(sid, 1, fmt_rows, c,
                                    _one_of_list(["PENDING", "APPROVE", "REJECT"])))
-    if t.name == "CONTENT" and "gate3" in low:  # Phase 1.3 -> dropdown quy trình duyệt (cổng 3, duyệt ASSET)
-        c = low.index("gate3")
+    if t.name == "CONTENT" and _GATE3_KEY in low:  # Phase 1.3 -> dropdown quy trình duyệt (cổng 3, duyệt ASSET)
+        c = low.index(_GATE3_KEY)
         out.append(_set_validation(sid, 1, fmt_rows, c,
                                    _one_of_list(["PENDING", "APPROVE", "REJECT"])))
+    if t.name == "CONTENT" and "posting status" in low:  # Sheet UI cleanup Phase 6 -> dropdown trạng thái đăng (người điền tay)
+        c = low.index("posting status")
+        out.append(_set_validation(sid, 1, fmt_rows, c,
+                                   _one_of_list(["Đã đăng", "Lỗi", "Đang chờ"])))
 
     # 8) Conditional formatting cho CONTEXT/CONTENT (xóa rule cũ trước -> idempotent).
     if t.name in ("CONTEXT", "CONTENT"):
         for i in range(t.cond_format_count - 1, -1, -1):
             out.append({"deleteConditionalFormatRule": {"sheetId": sid, "index": i}})
     if t.name == "CONTEXT":
-        if "status" in low:
-            c = low.index("status")
+        if _GATE1_KEY in low:
+            c = low.index(_GATE1_KEY)
             out.append(_text_eq_rule(sid, c, 1, fmt_rows, "APPROVE", _C_APPROVE))
             out.append(_text_eq_rule(sid, c, 1, fmt_rows, "PENDING", _C_PENDING))
             out.append(_text_eq_rule(sid, c, 1, fmt_rows, "REJECT", _C_REJECT))
@@ -1191,13 +1276,13 @@ def _tab_requests(t: TabMeta) -> list[dict]:
         if "hot%" in low:  # thang màu độ hot, cùng kiểu gradient với score
             c = low.index("hot%")
             out.append(_score_scale_rule(sid, c, 1, fmt_rows))
-    if t.name == "CONTENT" and "approve(gate 2)" in low:
-        c = low.index("approve(gate 2)")
+    if t.name == "CONTENT" and _GATE2_KEY in low:
+        c = low.index(_GATE2_KEY)
         out.append(_text_eq_rule(sid, c, 1, fmt_rows, "APPROVE", _C_APPROVE))
         out.append(_text_eq_rule(sid, c, 1, fmt_rows, "PENDING", _C_PENDING))
         out.append(_text_eq_rule(sid, c, 1, fmt_rows, "REJECT", _C_REJECT))
-    if t.name == "CONTENT" and "gate3" in low:   # Phase 1.3
-        c = low.index("gate3")
+    if t.name == "CONTENT" and _GATE3_KEY in low:   # Phase 1.3
+        c = low.index(_GATE3_KEY)
         out.append(_text_eq_rule(sid, c, 1, fmt_rows, "APPROVE", _C_APPROVE))
         out.append(_text_eq_rule(sid, c, 1, fmt_rows, "PENDING", _C_PENDING))
         out.append(_text_eq_rule(sid, c, 1, fmt_rows, "REJECT", _C_REJECT))
@@ -1304,9 +1389,9 @@ class SheetsBoard:
                 ws.append_rows(_PROMPTS_SEED_ROWS, value_input_option="USER_ENTERED")
             self._ws[name] = ws
         # Dọn tab CŨ không còn dùng: "Sheet1" (gspread tự tạo lúc dựng spreadsheet)
-        # + ResearchReview/ContentReview (chức năng đã gộp vào CONTEXT.Status/
-        # CONTENT."Approve(gate 2)"). CHỈ xoá ĐÚNG tên trong _LEGACY_TABS, không
-        # đụng tab lạ khác của người dùng.
+        # + ResearchReview/ContentReview (chức năng đã gộp vào CONTEXT.GATE1_COL/
+        # CONTENT.GATE2_COL). CHỈ xoá ĐÚNG tên trong _LEGACY_TABS, không đụng tab
+        # lạ khác của người dùng.
         for legacy in _LEGACY_TABS:
             if legacy in existing:
                 try:
@@ -1455,44 +1540,55 @@ class SheetsBoard:
         self._tab("CONTENT").append_rows(rows, value_input_option="RAW")
         return len(rows)
 
-    _CONTENT_MERGE_COLS = ("timestamp", "context")
+    # Sheet UI cleanup Phase 1 — 2 màu nền xen kẽ theo nhóm TopicKey (thay
+    # mergeCells cũ, vốn XOÁ THẬT giá trị Context/Timestamp ở hàng trong dải —
+    # xem PROJECT_HANDOFF_P5.md, CLAUDE.md §"mergeCells xoá dòng"). Trắng/xanh
+    # rất nhạt để không đấu màu với dropdown Status/Approve của format_board().
+    _CONTENT_BAND_COLORS = (
+        {"red": 1, "green": 1, "blue": 1},          # nhóm lẻ (1st, 3rd, ...) — trắng mặc định
+        {"red": 0.93, "green": 0.96, "blue": 1.0},  # nhóm chẵn (2nd, 4th, ...) — xanh rất nhạt
+    )
+    _CONTENT_BAND_BORDER = {"style": "SOLID_THICK", "color": {"red": 0.55, "green": 0.55, "blue": 0.55}}
 
-    def regroup_and_merge_content(self) -> int:
-        """Sắp lại tab CONTENT để các hàng CÙNG chủ đề (Context) liền kề nhau
-        (regroup_content_rows — CHỈ đổi vị trí, không đổi dữ liệu), rồi merge dọc
-        cột Timestamp+Context cho các chủ đề có TỪ 2 LOẠI khác nhau trở lên
-        (article/video_script/infographic — content_merge_ranges, ngưỡng
-        _MIN_MERGE_TYPES). Idempotent: unmerge TOÀN vùng dữ liệu trước khi merge
-        lại nên gọi nhiều lần không lỗi/không merge chồng. Trả số dải đã merge
-        (0 -> không đổi gì, kể cả khi tab rỗng/thiếu cột)."""
+    def regroup_and_band_content(self) -> int:
+        """Sheet UI cleanup Phase 1 — THAY regroup_and_merge_content() cũ (đã
+        xoá cùng mergeCells). Sắp lại tab CONTENT để các hàng CÙNG TopicKey liền
+        kề nhau (regroup_content_rows — CHỈ đổi vị trí, không đổi dữ liệu), rồi
+        TÔ NỀN XEN KẼ + VIỀN TRÊN ĐẬM cho MỌI nhóm TopicKey liên tục
+        (content_band_ranges — không còn ngưỡng số loại, banding là phân nhóm
+        thị giác theo CHỦ ĐỀ, không phải "đủ 3 loại mới đáng gộp"). KHÔNG mergeCells/
+        unmergeCells ở đâu cả — Context/Timestamp (và MỌI cột khác) giữ nguyên
+        giá trị trên TỪNG hàng, không còn hàng nào bị xoá rỗng vì lý do trình
+        bày. Idempotent: tô lại màu/viền mỗi lần gọi (không cần unmerge trước vì
+        không còn gì để unmerge). Trả số dải đã tô (0 -> không đổi gì, kể cả khi
+        tab rỗng/thiếu cột TopicKey)."""
         ws = self._tab("CONTENT")
         values = ws.get_all_values()
         if len(values) < 2:
             return 0
         header, rows = values[0], values[1:]
-        low = [h.strip().lower() for h in header]
 
         new_rows = regroup_content_rows(header, rows)
         if new_rows != rows:
             ws.update("A2", new_rows, value_input_option="RAW")
-        ranges = content_merge_ranges(header, new_rows)
+        ranges = content_band_ranges(header, new_rows)
+        if not ranges:
+            return 0
 
         sid = ws.id
         ncols = len(header)
-        n_rows = len(new_rows) + 1   # +1 header
-        reqs: list[dict] = [{"unmergeCells": {"range": _grid_range(sid, 1, n_rows, 0, ncols)}}]
-        for col_name in self._CONTENT_MERGE_COLS:
-            if col_name not in low or not ranges:
-                continue
-            c = low.index(col_name)
-            for r0, r1 in ranges:
-                reqs.append({"mergeCells": {"range": _grid_range(sid, r0, r1, c, c + 1),
-                                            "mergeType": "MERGE_COLUMNS"}})
-                reqs.append({"repeatCell": {
-                    "range": _grid_range(sid, r0, r1, c, c + 1),
-                    "cell": {"userEnteredFormat": {"verticalAlignment": "MIDDLE"}},
-                    "fields": "userEnteredFormat.verticalAlignment",
-                }})
+        reqs: list[dict] = []
+        for idx, (r0, r1) in enumerate(ranges):
+            color = self._CONTENT_BAND_COLORS[idx % 2]
+            reqs.append({"repeatCell": {
+                "range": _grid_range(sid, r0, r1, 0, ncols),
+                "cell": {"userEnteredFormat": {"backgroundColor": color}},
+                "fields": "userEnteredFormat.backgroundColor",
+            }})
+            reqs.append({"updateBorders": {
+                "range": _grid_range(sid, r0, r0 + 1, 0, ncols),
+                "top": self._CONTENT_BAND_BORDER,
+            }})
         self._spreadsheet().batch_update({"requests": reqs})
         return len(ranges)
 
@@ -1651,13 +1747,14 @@ class SheetsBoard:
         1.3). No-op nếu thiếu cột.
 
         INVARIANT (sự cố THẬT trên Sheet production, xem PROJECT_HANDOFF_P5.md):
-        CẤM ghi cột "Gate3" qua đường này (hay bất kỳ đường máy nào khác) —
-        Gate3 CHỈ người chọn dropdown trên Sheet mới được đổi. Raise ngay
+        CẤM ghi cột Gate3 (Sheet UI cleanup Phase 3: đổi tên hiển thị thành
+        "Duyệt Public", GATE3_COL) qua đường này (hay bất kỳ đường máy nào
+        khác) — CHỈ người chọn dropdown trên Sheet mới được đổi. Raise ngay
         (không no-op êm) để lộ lỗi SỚM nếu code sau này lỡ gọi nhầm — xem
         test_no_machine_write_path_touches_gate3 (tests/test_pipeline.py)."""
-        if col_name.strip().lower() == "gate3":
+        if col_name.strip().lower() == _GATE3_KEY:
             raise ValueError(
-                "set_content_cell: CẤM ghi cột Gate3 — cổng NGƯỜI duyệt asset, "
+                f"set_content_cell: CẤM ghi cột {GATE3_COL} — cổng NGƯỜI duyệt asset, "
                 "chỉ đổi qua dropdown trên Sheet, không luồng máy nào được ghi.")
         ws = self._tab("CONTENT")
         header = [h.strip().lower() for h in ws.row_values(1)]
@@ -1741,17 +1838,17 @@ class SheetsBoard:
         return new_rows
 
     def sync_approve_execute_flags(self) -> int:
-        """MỌI dòng CONTEXT có Status=APPROVE và Execute RỖNG -> tự đặt Execute=
-        RUN (chuẩn bị cho produce_from_sheet.py xử lý). Dòng đã RUN/DONE giữ
-        nguyên (idempotent, không đụng lại). Trả số dòng vừa đổi."""
+        """MỌI dòng CONTEXT có Duyệt Context=APPROVE và Execute RỖNG -> tự đặt
+        Execute=RUN (chuẩn bị cho produce_from_sheet.py xử lý). Dòng đã RUN/DONE
+        giữ nguyên (idempotent, không đụng lại). Trả số dòng vừa đổi."""
         ws = self._tab("CONTEXT")
         rows = ws.get_all_values()
         if not rows:
             return 0
         header = [h.strip().lower() for h in rows[0]]
-        if "status" not in header or "execute" not in header:
+        if _GATE1_KEY not in header or "execute" not in header:
             return 0
-        i_st, i_ex = header.index("status"), header.index("execute")
+        i_st, i_ex = header.index(_GATE1_KEY), header.index("execute")
 
         to_set: list[int] = []   # số dòng 1-based (2..N) cần đặt RUN
         for row_i, r in enumerate(rows[1:], start=2):
@@ -1865,3 +1962,164 @@ class SheetsBoard:
         self._tab("LOG").append_row(
             [_now_iso(), level.upper(), message, engine], value_input_option="RAW"
         )
+
+    # =====================================================================
+    # Sheet UI cleanup Phase 2 — công cụ RESET SẠCH tái sử dụng cho tương lai
+    # (vd crawl lại từ đầu, đổi giai đoạn dữ liệu). CHỈ đụng CONTEXT + CONTENT
+    # (2 tab có DÒNG DỮ LIỆU tích luỹ qua crawl/production) — KHÔNG đụng SOURCES/
+    # SETTINGS/TAXONOMY/PROMPTS/README (tab CẤU HÌNH, người vận hành tự quản).
+    # =====================================================================
+    _RESET_DATA_TABS = ("CONTEXT", "CONTENT")
+
+    def reset_plan(self) -> dict[str, dict[str, int]]:
+        """TÍNH TRƯỚC sẽ xoá bao nhiêu dòng + un-merge bao nhiêu VÙNG THẬT,
+        KHÔNG ghi gì — dùng CHUNG cho `--dry-run` VÀ bước đầu của `reset_all()`
+        (1 nguồn sự thật duy nhất, tránh lệch giữa "dự đoán" và "thực thi").
+        Số vùng merge đọc qua `fetch_sheet_metadata(fields="...merges")` — NGUỒN
+        SỰ THẬT DUY NHẤT (KHÔNG đoán qua ô rỗng, vì ô rỗng có thể do người xoá
+        tay hoặc do mergeCells cũ để lại, 2 nguyên nhân KHÁC NHAU). Trả
+        {tab_name: {"rows": số dòng dữ liệu (trừ header), "merge_ranges": số
+        vùng merge thật đang có}}. Tab lỗi mạng/không đọc được -> 0 cho tab đó
+        (an toàn, không chặn dry-run)."""
+        try:
+            meta = self._spreadsheet().fetch_sheet_metadata(
+                params={"fields": "sheets(properties(title),merges)"})
+            merges_by_title = {s["properties"]["title"]: len(s.get("merges", []))
+                              for s in meta.get("sheets", [])}
+        except Exception:  # pragma: no cover - lỗi mạng -> an toàn, coi như 0
+            merges_by_title = {}
+
+        plan: dict[str, dict[str, int]] = {}
+        for tab_name in self._RESET_DATA_TABS:
+            try:
+                values = self._tab(tab_name).get_all_values()
+                n_rows = max(len(values) - 1, 0)
+            except Exception:  # pragma: no cover - tab không tồn tại/lỗi mạng
+                n_rows = 0
+            plan[tab_name] = {"rows": n_rows, "merge_ranges": merges_by_title.get(tab_name, 0)}
+        return plan
+
+    def reset_all(self) -> dict[str, dict[str, int]]:
+        """XOÁ THẬT — KHÔNG THỂ HOÀN TÁC. Gọi `reset_plan()` trước (1 nguồn sự
+        thật) rồi: (1) un-merge TOÀN VÙNG mỗi tab (kể cả khi merge_ranges=0 —
+        vô hại, dọn sạch tàn dư dù plan có đọc thiếu do lỗi mạng thoáng qua),
+        (2) `batch_clear` giá trị MỌI dòng dữ liệu (GIỮ header dòng 1) — dùng
+        values-clear (KHÔNG resize/xoá dòng) nên ĐỊNH DẠNG CỘT (dropdown/
+        conditional format của `format_board()`) GIỮ NGUYÊN, đúng yêu cầu "giữ
+        schema". KHÔNG đụng SOURCES/SETTINGS/TAXONOMY/PROMPTS/README. Trả CÙNG
+        shape với `reset_plan()` (số liệu đã xử lý) để caller đối chiếu với dự
+        đoán ở `--dry-run`."""
+        plan = self.reset_plan()
+        for tab_name in self._RESET_DATA_TABS:
+            ws = self._tab(tab_name)
+            values = ws.get_all_values()
+            header = values[0] if values else list(TABS.get(tab_name, []))
+            ncols = len(header) or len(TABS.get(tab_name, []))
+            sid = ws.id
+            total_rows = max(len(values), ws.row_count, 2)
+
+            self._spreadsheet().batch_update({"requests": [
+                {"unmergeCells": {"range": _grid_range(sid, 0, total_rows, 0, max(ncols, 1))}}
+            ]})
+            if plan[tab_name]["rows"]:
+                last_col = _col_a1(ncols)
+                ws.batch_clear([f"A2:{last_col}{total_rows}"])
+        return plan
+
+    def set_machine_columns_hidden(self, *, hidden: bool = True) -> int:
+        """Sheet UI cleanup Phase 4 — ẨN/HIỆN các cột MÁY-SỞ-HỮU
+        (_MACHINE_OWNED_COLS: TopicKey ở CONTEXT+CONTENT, Facts ở CONTENT — kể
+        từ Phase 6, AssetPath ĐÃ RÚT khỏi nhóm này, xem protect_asset_path_
+        column() cho cơ chế khoá RIÊNG của AssetPath, không phải ẩn nữa) qua
+        `updateDimensionProperties(hiddenByUser)`.
+
+        ĐỘC LẬP HOÀN TOÀN với ensure_tabs()/_full_ensure_tabs()/migrate_rows()
+        — hàm này KHÔNG gọi ensure_tabs(), KHÔNG nằm trong format_board()/
+        _tab_requests() (khác cách format_board() vẫn dùng updateDimension
+        Properties cho ĐỘ RỘNG cột — đây là request BATCH RIÊNG, gửi độc lập).
+        `hiddenByUser` là thuộc tính HIỂN THỊ thuần tuý — KHÔNG đổi giá trị ô
+        nào, nên KHÔNG BAO GIỜ khiến `_headers_need_setup()` phát hiện "header
+        sai" và tự kích hoạt migrate_rows() (bài học Phase 3: đổi TÊN cột mới
+        có rủi ro đó, ẨN không có).
+
+        Sheets API vẫn trả ĐỦ giá trị mọi cột qua get_all_values()/values_
+        batch_get() bất kể hiddenByUser — cột ẩn chỉ ẩn trên GIAO DIỆN trình
+        duyệt, không ảnh hưởng đọc/ghi qua API (đây chính là điều Phase 4 cần
+        xác nhận bằng round-trip thật, xem script kiểm chứng riêng).
+
+        Trả số cột đã đổi hiddenByUser (0 nếu không tìm thấy cột nào khớp)."""
+        reqs: list[dict] = []
+        n = 0
+        for tab_name, col_keys in _MACHINE_OWNED_COLS.items():
+            ws = self._tab(tab_name)
+            header = [h.strip().lower() for h in ws.row_values(1)]
+            sid = ws.id
+            for key in col_keys:
+                if key not in header:
+                    continue
+                c = header.index(key)
+                reqs.append({"updateDimensionProperties": {
+                    "range": {"sheetId": sid, "dimension": "COLUMNS",
+                             "startIndex": c, "endIndex": c + 1},
+                    "properties": {"hiddenByUser": hidden},
+                    "fields": "hiddenByUser",
+                }})
+                n += 1
+        if reqs:
+            self._spreadsheet().batch_update({"requests": reqs})
+        return n
+
+    def _service_account_email(self) -> str:
+        """Đọc DUY NHẤT trường client_email từ creds_path (KHÔNG đọc/expose
+        private_key hay trường bí mật nào khác) — dùng làm editor DUY NHẤT
+        cho Protected Range (protect_asset_path_column), đảm bảo CHỈ Service
+        Account ghi được qua API — Owner Sheet luôn override Protected Range
+        được (hành vi CHUẨN Google Sheets, không cấu hình được), người khác
+        chỉ xem."""
+        import json as _json
+        with open(self.creds_path, encoding="utf-8") as f:
+            return _json.load(f)["client_email"]
+
+    def protect_asset_path_column(self) -> dict:
+        """Sheet UI cleanup Phase 6b — khoá CỨNG cột AssetPath (CONTENT) bằng
+        Protected Range: CHỈ Service Account (client_email trong creds_path)
+        + Owner Sheet được ghi, người khác chỉ xem. AssetPath là cột MÁY-GHI
+        (không phải Gate người duyệt) nhưng từ Phase 6 đã HIỂN THỊ (không còn
+        ẩn theo _MACHINE_OWNED_COLS) nên cần khoá RIÊNG khỏi sửa tay nhầm —
+        khác TopicKey/Facts (vẫn chỉ ẨN, chưa cần Protected Range vì không
+        hiển thị để lỡ tay sửa).
+
+        Idempotent: nếu CỘT NÀY đã có đúng protection (khớp _ASSET_PATH_
+        PROTECTION_DESC) -> bỏ qua, không tạo trùng (nhiều Protected Range
+        chồng lên cùng 1 vùng gây khó hiểu, không sai chức năng nhưng dọn
+        sạch hơn). Trả {} nếu tab CONTENT thiếu cột AssetPath, {"already_
+        protected": True, "protectedRangeId": ...} nếu đã có, hoặc response
+        thật của batchUpdate nếu vừa tạo mới."""
+        ws = self._tab("CONTENT")
+        header = [h.strip().lower() for h in ws.row_values(1)]
+        if "assetpath" not in header:
+            return {}
+        col = header.index("assetpath")
+        sid = ws.id
+
+        meta = self._spreadsheet().fetch_sheet_metadata(params={
+            "fields": "sheets(properties(sheetId),"
+                      "protectedRanges(protectedRangeId,range,description))"})
+        for s in meta.get("sheets", []):
+            if s.get("properties", {}).get("sheetId") != sid:
+                continue
+            for pr in s.get("protectedRanges", []):
+                r = pr.get("range", {})
+                if (r.get("sheetId") == sid and r.get("startColumnIndex") == col
+                        and r.get("endColumnIndex") == col + 1
+                        and pr.get("description") == _ASSET_PATH_PROTECTION_DESC):
+                    return {"already_protected": True, "protectedRangeId": pr["protectedRangeId"]}
+
+        sa_email = self._service_account_email()
+        req = {"addProtectedRange": {"protectedRange": {
+            "range": {"sheetId": sid, "startColumnIndex": col, "endColumnIndex": col + 1},
+            "description": _ASSET_PATH_PROTECTION_DESC,
+            "warningOnly": False,
+            "editors": {"users": [sa_email]},
+        }}}
+        return self._spreadsheet().batch_update({"requests": [req]})

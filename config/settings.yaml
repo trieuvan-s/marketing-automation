@@ -28,6 +28,12 @@ storage:
   drafts_dir: "state/production_drafts"   # hàng chờ --draft/--ingest (Claude Code viết nội dung)
   retention_days: 10              # giữ tối đa 10 ngày dữ liệu
   timezone: "Asia/Ho_Chi_Minh"    # mốc chia ngày
+  # Sheet UI cleanup Phase 6c — cổng local static file server (scripts/
+  # serve_assets.py, twmkt/asset_server.py) phục vụ output_dir qua
+  # http://127.0.0.1:PORT/ để link AssetPath trên Sheet bấm mở được (thay
+  # cho file:// — bị trình duyệt chặn khi mở từ trang HTTPS, xác nhận THẬT
+  # trên Sheet sống ở Phase 6b).
+  asset_server_port: 8899
 
 # --- Brand kit render Infographic (src/twmkt/render/infographic.py, $0 tất định) --
 # Đổi màu/font/kích thước ở ĐÂY, KHÔNG sửa code. SVG thuần (không phụ thuộc
@@ -446,6 +452,14 @@ sheets:
   # spreadsheet_id production dù đã set sẵn trong môi trường. Tạo 1 Google Sheet
   # TEST riêng (khác hẳn Sheet production ở trên) rồi điền ID vào đây/ENV.
   test_spreadsheet_id: ""
+  # Sheet UI cleanup Phase 5 — Sheet VẬN HÀNH RIÊNG cho tab backup/archive
+  # (*_backup_*), TÁCH KHỎI spreadsheet_id (production) — KHÔNG phải "db"
+  # (TopicKey Document Store chưa xây). Người vận hành tự tạo + share quyền
+  # Editor cho Service Account (client_email trong creds_path), KHÔNG phải
+  # Service Account tự tạo (để người vận hành giữ quyền Owner trên Drive của
+  # chính họ, dễ quản lý/tìm lại). Mỗi tab chuyển sang đây có dòng đầu:
+  # "Thông tin dành cho người điều hành sheet — chỉ Owner được sửa."
+  archive_spreadsheet_id: "1jMJiLw8i2_z5lC8BTGEuCb6BpDZcSnda-_eHGM2bR4E"
   research_worksheet: "ResearchReview"
   content_worksheet: "ContentReview"
   poll_interval_s: 15

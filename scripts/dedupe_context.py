@@ -36,7 +36,7 @@ ensure_utf8_stdio()
 
 from twmkt.config import load_settings  # noqa: E402
 from twmkt.sheets_board import (  # noqa: E402
-    SheetsBoard, choose_keep_row, content_topic_keys,
+    GATE1_COL, SheetsBoard, choose_keep_row, content_topic_keys,
     extract_cell_url, find_duplicate_context_groups, is_title_chip,
 )
 
@@ -72,7 +72,7 @@ def build_plan(ctx_header: list[str], ctx_rows: list[list[str]],
             has_content = any(tk == k[0] for k in content_keys)
             candidates.append({
                 "row": rn,
-                "status": _row_field(header_low, row, "status"),
+                "status": _row_field(header_low, row, GATE1_COL.lower()),   # Sheet UI cleanup Phase 3: trước đây "status"
                 "execute": _row_field(header_low, row, "execute"),
                 "has_content": has_content,
             })

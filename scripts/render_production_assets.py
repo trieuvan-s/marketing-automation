@@ -35,6 +35,7 @@ from twmkt._encoding import ensure_utf8_stdio  # noqa: E402
 
 ensure_utf8_stdio()
 
+from twmkt.asset_server import DEFAULT_PORT, asset_url  # noqa: E402
 from twmkt.config import data_path, load_settings  # noqa: E402
 from twmkt.media_factory.spec import build_spec_from_content, verify_spec  # noqa: E402
 from twmkt.render import brand_kit_from_settings, render_infographic_svg  # noqa: E402
@@ -54,6 +55,26 @@ def _slug(text: str, n: int = 40) -> str:
     while "--" in keep:
         keep = keep.replace("--", "-")
     return keep.strip("-")[:n] or "san-pham"
+
+
+def asset_hyperlink_formula(url: str) -> str:
+    """Sheet UI cleanup Phase 6b/6c — bọc `url` (HTTP, xem twmkt.asset_server.
+    asset_url) bằng HYPERLINK() để cột AssetPath (đã HIỂN THỊ từ Phase 6) là
+    link NGƯỜI BẤM ĐƯỢC thay vì text đường dẫn thô.
+
+    LỊCH SỬ (Phase 6b -> 6c): bản đầu dùng `file://` (Path.as_uri()) — test
+    THẬT trên Sheet sống cho thấy KHÔNG hoạt động (Google Sheets chạy qua
+    HTTPS, trình duyệt chặn điều hướng HTTPS -> file:// cục bộ). Đổi sang
+    `http://127.0.0.1:PORT/...` (twmkt.asset_server, cần `scripts/
+    serve_assets.py` chạy nền) — scheme http là web-an-toàn nên hoạt động
+    bình thường trong Sheets.
+
+    GIỚI HẠN ĐÃ BIẾT (chấp nhận, xem docs/HANDOFF.md): link CHỈ mở được trên
+    MÁY đã render asset VÀ đang chạy `scripts/serve_assets.py` — không phải
+    link chia sẻ được cho máy khác. Khi lên VPS: assets được serve qua web
+    server/cloud storage THẬT (không phải localhost), chỉ cần đổi cách build
+    `url` ở call site, KHÔNG cần sửa hàm này hay cấu trúc cột/Sheet."""
+    return f'=HYPERLINK("{url}", "Mở file")'
 
 
 def _open_board(settings) -> SheetsBoard:
@@ -87,8 +108,10 @@ def run(*, limit: int = 20) -> dict:
     brand = brand_kit_from_settings(settings)
 
     candidates = board.read_content_for_render(type_="infographic")
-    out_dir = data_path(settings.get("storage.output_dir", "output"), _today(), "assets", settings=settings)
+    output_root = data_path(settings.get("storage.output_dir", "output"), settings=settings)
+    out_dir = output_root / _today() / "assets"
     out_dir.mkdir(parents=True, exist_ok=True)
+    asset_port = int(settings.get("storage.asset_server_port", DEFAULT_PORT))
 
     rendered = skipped_not_approved = skipped_already_rendered = needs_human = 0
     for item in candidates:
@@ -117,8 +140,9 @@ def run(*, limit: int = 20) -> dict:
 
         fn = out_dir / f"{_slug(item['context'])}.svg"
         fn.write_text(svg, encoding="utf-8")
-        board.set_content_cell(item["row"], "AssetPath", str(fn))
-        print(f"[render] '{item['context'][:60]}' -> {fn}")
+        url = asset_url(fn, root=output_root, port=asset_port)
+        board.set_content_cell(item["row"], "AssetPath", asset_hyperlink_formula(url))
+        print(f"[render] '{item['context'][:60]}' -> {fn} ({url})")
         rendered += 1
         if rendered >= limit:
             break
