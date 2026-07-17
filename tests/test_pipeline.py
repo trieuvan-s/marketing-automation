@@ -311,11 +311,11 @@ def test_build_store_file_resolves_under_data_root_not_hardcoded_storage():
 
 
 def test_power_on_lock_path_resolves_via_data_path_helper():
-    """power_on._lock_path() KHÔNG còn hard-code REPO_ROOT/"storage"/... —
-    monkeypatch data_path (đã import vào namespace power_on) để cô lập khỏi
-    data_root thật trong lúc test."""
-    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
-    import power_on as po
+    """system_power_on._lock_path() KHÔNG còn hard-code REPO_ROOT/"storage"/...
+    — monkeypatch data_path (đã import vào namespace system_power_on) để cô
+    lập khỏi data_root thật trong lúc test."""
+    sys.path.insert(0, REPO_ROOT)
+    import system_power_on as po
     from twmkt.config import Settings, data_path as real_data_path
     import tempfile
 
@@ -7271,12 +7271,12 @@ def test_load_dotenv_missing_file_is_noop():
             os.environ["TWMKT_DOTENV"] = old
 
 
-# --- power_on.py: lock file tự chặn 2 tiến trình cùng máy ($0, không mạng) --
+# --- system_power_on.py: lock file tự chặn 2 tiến trình cùng máy ($0, không mạng) --
 def test_power_on_lock_parses_and_detects_dead_pid():
     """parse_lock_content + is_pid_alive: parse "host:pid" đúng/hỏng; PID không
     tồn tại -> False; PID hiện tại (chính tiến trình test) -> True."""
-    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
-    import power_on as po
+    sys.path.insert(0, REPO_ROOT)
+    import system_power_on as po
 
     assert po.parse_lock_content("myhost:1234") == ("myhost", 1234)
     assert po.parse_lock_content("hỏng-không-dấu-hai-chấm") is None
@@ -7291,8 +7291,8 @@ def test_power_on_acquire_lock_blocks_same_host_alive_pid():
     import socket
     import tempfile
     from pathlib import Path
-    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
-    import power_on as po
+    sys.path.insert(0, REPO_ROOT)
+    import system_power_on as po
 
     tmp = Path(tempfile.mkdtemp()) / "power_on.lock"
     tmp.write_text(f"{socket.gethostname()}:{os.getpid()}", encoding="utf-8")
@@ -7315,8 +7315,8 @@ def test_power_on_acquire_lock_warns_but_allows_different_host():
     thể tự chặn liên-máy từ 1 file cục bộ)."""
     import tempfile
     from pathlib import Path
-    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
-    import power_on as po
+    sys.path.insert(0, REPO_ROOT)
+    import system_power_on as po
 
     tmp = Path(tempfile.mkdtemp()) / "power_on.lock"
     tmp.write_text("mot-may-khac:123", encoding="utf-8")
@@ -7324,9 +7324,65 @@ def test_power_on_acquire_lock_warns_but_allows_different_host():
     po.release_lock(tmp)
 
 
-# =====================================================================
-# Production Factory Phase 1.1 — twmkt.media_factory.numbers / twmkt.media_factory.spec
-# =====================================================================
+def test_power_on_start_asset_server_disabled_by_default_returns_none():
+    """Sheet UI cleanup Phase 6d: storage.asset_server_enabled VẮNG (mặc định)
+    hoặc =false -> _start_asset_server() trả None, KHÔNG mở socket nào (asset
+    server TẮT trên máy dev cho tới khi lên VPS bật thủ công)."""
+    from twmkt.config import Settings
+    sys.path.insert(0, REPO_ROOT)
+    import system_power_on as po
+
+    assert po._start_asset_server(Settings({})) is None
+    assert po._start_asset_server(Settings({"storage": {"asset_server_enabled": False}})) is None
+
+
+def test_power_on_start_asset_server_enabled_starts_real_server_stoppable():
+    """storage.asset_server_enabled=true -> khởi động THẬT (port=0, OS tự cấp
+    cổng trống, tránh đụng cổng thật đang dùng) — server sống, phục vụ ĐÚNG
+    thư mục output_dir (round-trip HTTP GET thật, không mock). Monkeypatch
+    `po.build_server` chỉ để BẮT LẠI đối tượng server thật (lấy cổng OS vừa
+    cấp) — vẫn là server thật, KHÔNG thay hành vi build_server()."""
+    import tempfile
+    import threading as _threading
+    import urllib.request
+    from pathlib import Path as _Path
+
+    from twmkt.config import Settings
+    sys.path.insert(0, REPO_ROOT)
+    import system_power_on as po
+
+    data_root = _Path(tempfile.mkdtemp())
+    (data_root / "output").mkdir()
+    (data_root / "output" / "hello.txt").write_text("xin chao", encoding="utf-8")
+
+    settings = Settings({"storage": {
+        "data_root": str(data_root), "output_dir": "output",
+        "asset_server_enabled": True, "asset_server_port": 0,
+    }})
+
+    captured: dict = {}
+    real_build_server = po.build_server
+
+    def _capturing_build_server(root, *, host="127.0.0.1", port=8899):
+        srv = real_build_server(root, host=host, port=port)
+        captured["server"] = srv
+        return srv
+
+    po.build_server = _capturing_build_server
+    try:
+        t = po._start_asset_server(settings)
+        assert isinstance(t, _threading.Thread) and t.is_alive()
+        server = captured["server"]
+        real_port = server.server_address[1]
+        with urllib.request.urlopen(f"http://127.0.0.1:{real_port}/hello.txt", timeout=5) as resp:
+            body = resp.read().decode("utf-8")
+        assert body == "xin chao"
+    finally:
+        po.build_server = real_build_server
+        server = captured.get("server")
+        if server is not None:
+            server.shutdown()
+            server.server_close()
 def test_parse_vn_number_words_decimal_with_ty_suffix():
     from twmkt.media_factory.numbers import parse_vn_number_words
 

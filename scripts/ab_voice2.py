@@ -2,7 +2,7 @@
 system prompt (v1: chỉ §1+§2+§3 + Ví dụ A, KHÔNG có §2b; v2: có §2b + Ví dụ D).
 Cùng 1 context + evidence (dùng lại đúng bài SSI 8 cổ phiếu ở vòng A/B trước).
 $0 (dùng LẠI content_llm hiện có, không thêm lệnh gọi API mới). KHÔNG đổi kiến
-trúc/power_on.py.
+trúc/system_power_on.py.
 
 docs/voice_examples.md KHÔNG có bản v1 lưu riêng (file untracked, không có lịch
 sử git) -> tái dựng ĐÚNG điều kiện v1 bằng cách đọc CÙNG file v2 hiện tại nhưng

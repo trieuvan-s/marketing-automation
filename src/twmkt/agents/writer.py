@@ -2,7 +2,7 @@
 -> Writer. Gọi THẲNG LLMClient (factory.make_llm, model=llm.step_models.writer=
 "sonnet") — KHÔNG qua đường --draft/--ingest thủ công (Claude Code tự viết JSON
 trong 1 phiên chat riêng, xem scripts/produce_from_sheet.py --draft — đường đó
-vẫn còn TỒN TẠI cho tương thích ngược/power_on.py, nhưng KHÔNG còn là đường sống
+vẫn còn TỒN TẠI cho tương thích ngược/system_power_on.py, nhưng KHÔNG còn là đường sống
 chính; Writer ở đây là đường MỚI, tự gọi model thật trong 1 lượt).
 
 System prompt = persona/schema JSON (dùng CHUNG AnalysisWriterAgent.system —

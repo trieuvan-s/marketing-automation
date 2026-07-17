@@ -167,7 +167,7 @@ def default_user_agent(*, version: str = "0.2", contact: str = "") -> str:
 # PHASE DATA-ROOT — GỐC DUY NHẤT cho mọi dữ liệu runtime (documents/output/
 # state/logs/ab), TÁCH khỏi repo. Trước phase này, mỗi nơi tự ghép chuỗi
 # "storage/..." rải rác (factory.py, file_store.py, produce_from_sheet.py,
-# power_on.py...) -> dữ liệu nằm LẪN trong repo (rủi ro commit nhầm, khó tách
+# system_power_on.py...) -> dữ liệu nằm LẪN trong repo (rủi ro commit nhầm, khó tách
 # khi deploy VPS). Từ đây, TẤT CẢ đường dẫn dữ liệu PHẢI đi qua data_path().
 # =====================================================================
 _DEFAULT_DATA_ROOT = "../marketing-automation-database"

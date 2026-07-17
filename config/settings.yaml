@@ -34,6 +34,14 @@ storage:
   # cho file:// — bị trình duyệt chặn khi mở từ trang HTTPS, xác nhận THẬT
   # trên Sheet sống ở Phase 6b).
   asset_server_port: 8899
+  # Sheet UI cleanup Phase 6d — TẮT mặc định trên máy dev cục bộ.
+  # system_power_on.py (thư mục gốc dự án — lệnh gọi hệ thống, không còn nằm
+  # trong scripts/) đọc cờ này để TỰ khởi động asset server cùng 2 lịch
+  # crawl/draft (xem system_power_on.py::_start_asset_server) — chưa bật vì
+  # máy dev không cần phục vụ HTTP suốt 24/7. BẬT (true) khi triển khai VPS
+  # để chạy full service chỉ bằng `python system_power_on.py`, không cần
+  # lệnh tay `scripts/serve_assets.py` riêng.
+  asset_server_enabled: false
 
 # --- Brand kit render Infographic (src/twmkt/render/infographic.py, $0 tất định) --
 # Đổi màu/font/kích thước ở ĐÂY, KHÔNG sửa code. SVG thuần (không phụ thuộc
@@ -499,8 +507,9 @@ publishers:
 # python scripts/run_scheduler.py                       (loop nội bộ, cần enabled=true)
 # python scripts/run_scheduler.py --once                (1 lần — dùng cho OS scheduler)
 # python scripts/run_scheduler.py --print-os            (in lệnh Task Scheduler/cron)
-# python scripts/power_on.py  chạy CẢ 2 lịch (crawl + schedule_draft) 1 lần, 1 tiến trình,
-#   chạy NGAY 1 lượt khi khởi động (run_on_start=true) rồi lặp lại theo interval_minutes.
+# python system_power_on.py (thư mục gốc dự án)  chạy CẢ 2 lịch (crawl +
+#   schedule_draft) 1 lần, 1 tiến trình, chạy NGAY 1 lượt khi khởi động
+#   (run_on_start=true) rồi lặp lại theo interval_minutes.
 schedule:
   enabled: true                   # true = bật vòng lặp nội bộ
   mode: "interval"                # interval | daily

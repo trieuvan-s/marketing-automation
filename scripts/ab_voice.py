@@ -8,7 +8,7 @@ Chạy:
     python scripts/ab_voice.py --slug "co-may-tang-truong-moi-cua-hoa-phat"
 
 Idempotent: ghi ĐÈ cùng 1 file <data_root>/ab/voice_ab_<slug>.md mỗi lần chạy lại
-(không tích file rác). KHÔNG đụng power_on.py/CONTENT — chỉ đọc CONTEXT (APPROVE)
+(không tích file rác). KHÔNG đụng system_power_on.py/CONTENT — chỉ đọc CONTEXT (APPROVE)
 để lấy context/evidence, không ghi gì lên Sheet.
 """
 from __future__ import annotations

@@ -323,7 +323,7 @@ const NODES = [
    descTech:'Khảo sát code (Phase A v2): 1/3 việc có sẵn 1 phần (xem layers), 2/3 chưa có code nào.',
    layers:[
      {biz:'Render infographic (ảnh)', desc_biz:'Có sẵn 1 công cụ chuyển đặc tả thành ảnh thật, nhưng phải chạy tay — chưa tự động sau khi duyệt.',
-      tech:'render/infographic.py + scripts/render_infographic.py — CÓ SẴN 1 PHẦN', desc_tech:'render_infographic_svg() render SVG thật, $0, tất định, dùng brand kit từ config. Là SCRIPT CHẠY TAY riêng — produce_from_sheet.py/power_on.py KHÔNG gọi tự động.'},
+      tech:'render/infographic.py + scripts/render_infographic.py — CÓ SẴN 1 PHẦN', desc_tech:'render_infographic_svg() render SVG thật, $0, tất định, dùng brand kit từ config. Là SCRIPT CHẠY TAY riêng — produce_from_sheet.py/system_power_on.py KHÔNG gọi tự động.'},
      {biz:'Dựng video (News/Avatar/Human/Short/Reel)', desc_biz:'Chưa có công cụ nào tự tổng hợp giọng nói hay ráp video.',
       tech:'— CHƯA CÓ code nào', desc_tech:'agents/production.py chỉ có _VIDEO_TTS_GUIDANCE — hướng dẫn AI viết kịch bản NGẮN, đọc lên tự nhiên (prompt text), KHÔNG phải code tổng hợp giọng nói/dựng video thật.'},
      {biz:'Format bài publish-ready', desc_biz:'Chưa có công cụ tự động format bài theo khuôn từng kênh đăng.',
@@ -397,9 +397,9 @@ const NODES = [
 
   {id:'orchestration', row:'support', w:230, h:130, kind:'module', tier:TIER.T0,
    biz:'Kịch bản điều phối', tech:'Orchestration / Scripts',
-   file:'scripts/*.py',
+   file:'scripts/*.py + system_power_on.py (gốc dự án)',
    descBiz:'2 chương trình độc lập: 1 lo phần "từ tin tức tới danh sách chờ duyệt", 1 lo phần "từ chủ đề đã duyệt tới nội dung hoàn thiện". Chạy tay hoặc theo lịch tự động.',
-   descTech:'review_to_sheet.py + produce_from_sheet.py + power_on.py (chạy CẢ 2 lịch, lock file chống trùng). Tiện ích Lớp 5: reroute.py, backfill_topic_keys.py.',
+   descTech:'review_to_sheet.py + produce_from_sheet.py + system_power_on.py (chạy CẢ 2 lịch, lock file chống trùng). Tiện ích Lớp 5: reroute.py, backfill_topic_keys.py.',
    layers:[]},
 
   // ================= LUỒNG B (riêng biệt) =================

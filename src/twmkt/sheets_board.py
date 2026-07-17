@@ -315,7 +315,7 @@ _README_ROWS = [
      "gộp bài trùng giữa các nguồn, UPSERT vào CONTEXT theo url (bài đã có GIỮ NGUYÊN)."],
     [f"5) Duyệt ở cột {GATE1_COL} của CONTEXT: APPROVE / REJECT (mặc định PENDING). "
      "APPROVE -> tự đặt Execute=RUN (chờ sản xuất)."],
-    [f"6) scripts/produce_from_sheet.py --draft/--ingest chạy lịch 30'/lần (power_on.py): "
+    [f"6) scripts/produce_from_sheet.py --draft/--ingest chạy lịch 30'/lần (system_power_on.py): "
      f"CHỈ xử lý dòng {GATE1_COL}=APPROVE và Execute=RUN, xong đặt Execute=DONE (idempotent), "
      "ghi tab CONTENT."],
     [f"7) Duyệt nội dung (cổng 2) ở cột \"{GATE2_COL}\" của tab CONTENT: APPROVE / REJECT."],
@@ -1445,7 +1445,7 @@ class SheetsBoard:
         batchUpdate, chỉ giữ deleteBanding cho ID còn tồn tại — tránh lỗi 400
         "no banding with id X" khi ID đã bị xoá bởi 1 lượt chạy KHÁC giữa lúc
         format_board() đọc metadata (đầu hàm) và lúc gửi batchUpdate (đóng khe
-        hở race, vd 2 lịch power_on.py chạy song song). No-op nếu không có
+        hở race, vd 2 lịch system_power_on.py chạy song song). No-op nếu không có
         deleteBanding nào trong `requests` (đỡ tốn 1 lượt gọi khi không cần)."""
         if not any("deleteBanding" in r for r in requests):
             return requests

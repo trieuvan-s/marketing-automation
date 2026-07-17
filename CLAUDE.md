@@ -58,7 +58,8 @@ python tests/test_pipeline.py       # full suite (hoặc python -m pytest)
    XÂY. `cluster_by_event()` (`curation/enrich.py`) chỉ gộp CÙNG LƯỢT crawl
    chéo nguồn, không phải danh tính bền theo thời gian.
 5. **VPS trước khi xây store phân tán.** TOCTOU (2 máy ghi đồng thời) CỐ Ý
-   CHƯA xử lý — `power_on.py` chỉ chặn 2 tiến trình CÙNG MÁY. Giải bằng VPS (1
+   CHƯA xử lý — `system_power_on.py` (thư mục gốc dự án, trước đây
+   `scripts/power_on.py`) chỉ chặn 2 tiến trình CÙNG MÁY. Giải bằng VPS (1
    nguồn ghi), không xây distributed lock.
 6. **Production Factory = code tất định SAU Gate 2, không phải LLM thêm 1
    vòng.** `media_factory/spec.py: verify_spec()` là guardrail số LẦN 2 (đối

@@ -159,7 +159,7 @@ def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False
     # CHỈ Hook gọi LLM ở script này (Researcher không chạy ở đây).
     # `offline=True` ép Hook $0 (fallback tất định) BẤT KỂ API key có hiệu lực
     # hay không -- dùng cho lịch chạy tự động không giám sát (xem run_scheduler.py
-    # / power_on.py, tránh phát sinh chi phí API mỗi giờ ngoài ý muốn).
+    # / system_power_on.py, tránh phát sinh chi phí API mỗi giờ ngoài ý muốn).
     llm = factory.llm_status(settings)
     print(llm.banner)
     use_llm = llm.use_llm and not offline

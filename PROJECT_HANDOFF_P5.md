@@ -54,7 +54,8 @@ Analysis — "Tăng trưởng bền vững"), nội dung tài chính/đầu tư,
   - `config/settings.yaml`: `project.name = "Turtle Wealth Marketing"`; **`crawl.user_agent`**
     chứa `"TurtleWealthBot/..."` + email cá nhân — User-Agent này được GỬI tới mọi site crawl.
   - `README.md`, `CLAUDE.md`, `docs/foundation.md`, `docs/google_sheets_setup.md`,
-    `docs/production_agents_design.md`, `scripts/power_on.py` (banner khởi động).
+    `docs/production_agents_design.md`, `system_power_on.py` (banner khởi động,
+    trước đây `scripts/power_on.py` — đã chuyển ra gốc dự án + đổi tên).
   - `models.py`, `sheets_board.py`, `src/twmkt/__init__.py` (docstring module).
 - **"FVA Capital"** trước P5: xuất hiện **đúng 1 lần** — `<title>` của `docs/system_design.html`.
   P2.md (§1) từng viết "Turtle Wealth VN / FVA Capital" (song song, CHƯA chốt) và tự ghi ở §14:
@@ -74,7 +75,7 @@ Analysis — "Tăng trưởng bền vững"), nội dung tài chính/đầu tư,
 - **Quy ước đã chứng minh hiệu quả** (áp dụng xuyên suốt Lớp 5 + Fix (a)):
   - Mỗi việc lớn chia **phase, mỗi phase DỪNG-BÁO-CÁO** để review từng lớp trước khi đi tiếp.
   - Ràng buộc chuẩn: **config-first, kèm test, UTF-8, không đổi kiến trúc gate, không thêm vào
-    `power_on.py`, không auto-commit.**
+    `system_power_on.py` (khi đó còn là `scripts/power_on.py`), không auto-commit.**
   - Test tự động dùng **MockLLM/fake fixture ($0)**; **round-trip/thao tác thật chỉ khi cần xác
     nhận** (vd 1 lần gọi `claude -p` thật, hoặc chạy `--apply` thật trên Sheet sau khi đã dry-run).
   - **Chấm trên OUTPUT/DỮ LIỆU THẬT, không tin "tests pass".** Bài học lặp lại nhiều lần nhất
@@ -103,8 +104,8 @@ spec → **media giao được** (ảnh thật, video, bài publish-ready).
 thủ công, tách biệt pipeline** — `src/twmkt/render/infographic.py` + `scripts/render_infographic.py`
 — đọc JSON spec (schema Composer 8-trường: title/subtitle/hero/market/highlights/related/priority/
 source) và sinh **ảnh SVG thật** ($0, tất định, brand kit qua `render.infographic.*` trong
-`settings.yaml`). Đã khảo `produce_from_sheet.py`/`power_on.py`/`review_to_sheet.py`: **0 chỗ gọi**
-`render_infographic` — hoàn toàn thủ công, người vận hành phải tự chạy script sau khi duyệt Gate 2.
+`settings.yaml`). Đã khảo `produce_from_sheet.py`/`system_power_on.py`/`review_to_sheet.py`: **0 chỗ
+gọi** `render_infographic` — hoàn toàn thủ công, người vận hành phải tự chạy script sau khi duyệt Gate 2.
 **Không phải "0% Production Factory"** — có 1 viên gạch nền (SVG, không phải PNG như P2 §14 định
 hướng "con đường 1") nhưng CHƯA wire tự động, CHƯA có brand kit FVA, CHƯA làm video. Phiên tiếp nên
 kiểm tra viên gạch này TRƯỚC khi xây Production Factory từ đầu, tránh trùng việc.
@@ -128,7 +129,7 @@ kiểm tra viên gạch này TRƯỚC khi xây Production Factory từ đầu, t
 | Guardrail canonical (chặn số bịa) | ĐÃ CÓ | `guardrails/compliance.py`, `curation/_numeric.py` |
 | LLM adapter (claude_code/api/mock) | ĐÃ CÓ | `agents/base.py`, `factory.py` |
 | Telegram notifier | ĐÃ CÓ (non-blocking) | `utils/telegram_notifier.py` |
-| Scheduler (crawl + draft, 1 tiến trình) | ĐÃ CÓ | `power_on.py`, `schedule.py` |
+| Scheduler (crawl + draft, 1 tiến trình) | ĐÃ CÓ | `system_power_on.py`, `schedule.py` |
 | Renderer infographic (SVG) — brand-kit wired | ĐÃ CÓ | `render/infographic.py` (`config/brand.yaml`, `config.load_brand()`) |
 | `ProductionSpec`/`ProductionScene`/`Violation` (schema trung lập vendor) | ĐÃ CÓ | `media_factory/spec.py` |
 | Chuẩn hoá số-chữ tiếng Việt (13,8 tỷ đọc bằng chữ) | ĐÃ CÓ | `media_factory/numbers.py` |
@@ -228,8 +229,10 @@ LLMClient.complete(system, prompt, *, model=None, fail_loud=False)   # mở rộ
   `storage.data_root: "../marketing-automation-database"` (ngoài repo, override qua `${DATA_ROOT}`).
 - Đây **KHÔNG phải web app**. Kỷ luật TẠM THỜI tới khi có VPS: **một máy crawl/ghi tại một thời
   điểm**; TOCTOU (2 máy ghi ĐỒNG THỜI) **cố ý CHƯA xử lý** — khảo code xác nhận chỉ có
-  `power_on.py: acquire_lock()/release_lock()` chặn 2 tiến trình **CÙNG MÁY** (lock file dưới
-  `data_root/logs/power_on.lock`, hostname:pid); máy khác giữ lock chỉ bị CẢNH BÁO, không bị chặn
+  `system_power_on.py: acquire_lock()/release_lock()` (trước đây `scripts/power_on.py`, đã chuyển ra
+  gốc dự án + đổi tên) chặn 2 tiến trình **CÙNG MÁY** (lock file dưới
+  `data_root/logs/power_on.lock`, hostname:pid, tên file lock KHÔNG đổi); máy khác giữ lock chỉ bị
+  CẢNH BÁO, không bị chặn
   (không thể chặn liên-máy từ 1 file cục bộ). Giải bằng VPS (1 nguồn ghi), **không xây distributed
   lock**.
 
@@ -337,7 +340,7 @@ LLMClient.complete(system, prompt, *, model=None, fail_loud=False)   # mở rộ
   4. Backend corpus online đa máy + dedup URL (Postgres/Supabase) thay `FileDocumentStore` local —
      tự giải quyết luôn phần "2 máy" ở §5.7 nếu làm sớm hơn VPS thuần.
   5. Redesign tab SOURCES dạng "Router" (Module Publisher / Fields / Feed-Type).
-- **Bật automation thật:** khi VPS sẵn sàng, đổi `llm.mode: api` + bật `power_on.py` (giữ
+- **Bật automation thật:** khi VPS sẵn sàng, đổi `llm.mode: api` + bật `system_power_on.py` (giữ
   `hook_offline: true` để lịch nền không tự đốt token cho Hook). **Hai Gate giữ nguyên** ở mọi chế
   độ — không có phiên bản "bỏ qua duyệt người" nào được lên kế hoạch.
 

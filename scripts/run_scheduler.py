@@ -15,8 +15,9 @@ Job (adapter, chọn qua <section>.job):
                       (produce_from_sheet.py --draft) — KHÔNG tự --ingest.
 
 Muốn chạy CẢ 2 lịch (crawl + produce_draft) CÙNG LÚC trong 1 tiến trình: xem
-scripts/power_on.py. Script này (run_scheduler.py) chỉ chạy 1 lịch/lần gọi —
-hợp để đăng ký riêng lẻ vào OS Task Scheduler (xem --print-os).
+system_power_on.py (thư mục gốc dự án). Script này (run_scheduler.py) chỉ
+chạy 1 lịch/lần gọi — hợp để đăng ký riêng lẻ vào OS Task Scheduler (xem
+--print-os).
 """
 from __future__ import annotations
 

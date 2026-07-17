@@ -14,7 +14,7 @@
 | `agents/router.py` vs `agents/structure_router.py` vs `agents/route_once.py` | **router.py** = LLMRouter (bọc cost-tracking/budget, dùng ở Luồng B/Hook). **structure_router.py** = StructureRouterAgent (chọn khung viết S1-S5 + hook, Luồng A). **route_once.py** = đóng băng quyết định của structure_router (route 1 lần/chủ đề). |
 | `curation/store.py` vs `curation/file_store.py` | **store.py** = DocumentStore Protocol, in-memory (Luồng B). **file_store.py** = FileDocumentStore, persist theo ngày+retention (Luồng A thật). |
 | `approval/sheets_gate.py` vs `sheets_board.py` | **sheets_gate.py** = ApprovalGate cũ qua Sheets (Luồng B riêng, 1 worksheet Decision đơn giản). **sheets_board.py** = control-plane 8-tab hiện dùng (Luồng A: CONTEXT/CONTENT/SOURCES/...). Cả hai "sheets" nhưng khác hệ hoàn toàn. |
-| `scripts/review_to_sheet.py` | Docstring dòng đầu tự ghi "DEMO khép kín" — **GÂY NHẦM**: đây thực ra là script THU THẬP THẬT của Luồng A, được `power_on.py` gọi theo lịch, không phải demo. |
+| `scripts/review_to_sheet.py` | Docstring dòng đầu tự ghi "DEMO khép kín" — **GÂY NHẦM**: đây thực ra là script THU THẬP THẬT của Luồng A, được `system_power_on.py` gọi theo lịch, không phải demo. |
 
 ## Collection (thu thập, Luồng A)
 - `src/twmkt/collectors/base.py` — `Collector` Protocol, mọi nguồn crawl phải tuân thủ.
@@ -75,12 +75,12 @@
 - `src/twmkt/approval/gate.py` — `ApprovalGate` (Auto/Console, demo/test).
 - `src/twmkt/approval/sheets_gate.py` — `ApprovalGate` qua Sheets, bản CŨ (KHÁC `sheets_board.py` — xem Bẫy tên).
 - `src/twmkt/publishers/base.py` — `ConsolePublisher`/`StubPublisher` — CHƯA có publisher MXH thật.
-- `src/twmkt/schedule.py` — `Scheduler` tất định, adapter nhận job callable (dùng bởi cả 2 luồng qua `power_on.py`).
+- `src/twmkt/schedule.py` — `Scheduler` tất định, adapter nhận job callable (dùng bởi cả 2 luồng qua `system_power_on.py`).
 
 ## Scripts — vận hành Luồng A (chạy thật/theo lịch)
 - `scripts/review_to_sheet.py` — Crawl thật → chuẩn hoá → upsert CONTEXT (xem Bẫy tên: docstring ghi nhầm "DEMO").
 - `scripts/produce_from_sheet.py` — CONTEXT Status=APPROVE → sản xuất → CONTENT (`--draft`/`--ingest`/`--offline`/API thật).
-- `scripts/power_on.py` — Chạy CẢ 2 lịch (crawl + draft) trong 1 tiến trình, có lock file chống chạy trùng.
+- `system_power_on.py` (THƯ MỤC GỐC dự án, không phải `scripts/` — lệnh gọi hệ thống) — Chạy CẢ 2 lịch (crawl + draft) + asset server (tắt mặc định) trong 1 tiến trình, có lock file chống chạy trùng.
 - `scripts/run_scheduler.py` — Chạy 1 job theo lịch riêng lẻ (đọc 1 section trong `settings.yaml`).
 
 ## Scripts — Lớp 5 (TopicKey)
