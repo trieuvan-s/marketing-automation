@@ -204,3 +204,23 @@ def data_path(*parts: str, settings: Settings | None = None) -> Path:
     target_dir = p.parent if "." in p.name else p
     target_dir.mkdir(parents=True, exist_ok=True)
     return p
+
+
+_DEFAULT_AIGEN_REPO_PATH = "../aigen-pipeline"
+
+
+def aigen_repo_path(settings: Settings | None = None) -> Path:
+    """Đường dẫn repo AIGEN (`github.com/trieuvan-s/aigen-pipeline`, sibling
+    NGOÀI repo marketing-automation) — CÙNG NẾP với `data_root()`: ưu tiên
+    biến môi trường AIGEN_REPO_PATH (đặt khi deploy máy khác/VPS), không có
+    thì đọc `media_factory.aigen_repo_path` trong settings.yaml (mặc định
+    "../aigen-pipeline"). Đường dẫn TƯƠNG ĐỐI tính theo CWD lúc chạy.
+
+    KHÔNG tự tạo thư mục (khác `data_path()`) — đây là repo NGOÀI phải đã tồn
+    tại sẵn (git clone tay), không phải nơi ghi dữ liệu runtime. Người gọi
+    (`media_factory.aigen_seam.run_aigen_pipeline()`) tự kiểm tồn tại và báo
+    lỗi rõ ràng nếu thiếu — hàm này chỉ resolve giá trị thô từ config."""
+    settings = settings or load_settings()
+    raw = os.environ.get("AIGEN_REPO_PATH") or settings.get(
+        "media_factory.aigen_repo_path", _DEFAULT_AIGEN_REPO_PATH)
+    return Path(str(raw))

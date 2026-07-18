@@ -545,3 +545,12 @@ schedule_draft:
 # --- Giới hạn xử lý mỗi lần --draft (config-first, tránh hard-code trong scheduler)
 production:
   draft_limit: 5                  # số dòng CONTEXT APPROVE tối đa xử lý mỗi lần --draft
+
+# --- Production Factory: seam gọi AIGEN pipeline thật (media_factory/aigen_seam.py) --
+# CÙNG NẾP với storage.data_root: đường dẫn SIBLING NGOÀI repo, đọc qua
+# src/twmkt/config.py::aigen_repo_path(). Override bằng biến môi trường
+# AIGEN_REPO_PATH khi đổi máy (VPS) — KHÔNG sửa code, chỉ đổi 1 dòng ở đây
+# hoặc set ENV. Repo AIGEN chính thức = github.com/trieuvan-s/aigen-pipeline
+# (aigen-fva-capital ĐÃ CHẾT, không còn dùng — xem docs/VPS_MIGRATION_BACKLOG.md A3).
+media_factory:
+  aigen_repo_path: "../aigen-pipeline"

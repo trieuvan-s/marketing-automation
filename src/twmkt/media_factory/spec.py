@@ -12,7 +12,7 @@ QUYẾT ĐỊNH #1 Phase 1.0 (đã CHỐT, KHÔNG persist ProductionSpec):
   phép biến đổi CODE TẤT ĐỊNH, không LLM.
 
 HAI TRỤC TÁCH BẠCH (rà soát ProductionSpec, chốt sau khi đối chiếu CATALOG.md
-AIGEN thật — xem `../aigen-fva-capital/aigen/templates/CATALOG.md`):
+AIGEN thật — xem `../aigen-pipeline/templates/CATALOG.md`):
   `ProductionBlock.block_kind` — trục KHỐI ĐỒNG THỜI, cho INFOGRAPHIC (ảnh
     tĩnh, nhiều block hiển thị CÙNG LÚC trên 1 canvas). Tập đóng 13 giá trị =
     NGUYÊN VĂN từ vựng `content_writer_rules.md` §5.4 (metric_cards/
@@ -24,7 +24,7 @@ AIGEN thật — xem `../aigen-fva-capital/aigen/templates/CATALOG.md`):
     template ảnh tĩnh nào. Vì vậy `block_kind` KHÔNG map sang AIGEN — hợp đồng
     này dành cho renderer SVG NỘI BỘ (`render/infographic.py`), độc lập AIGEN.
   `ProductionScene.visual_kind` — trục THỜI GIAN, cho VIDEO (nhiều scene nối
-    tiếp theo timeline). Tập đóng 9 giá trị (mở rộng từ 5, đối chiếu 15
+    tiếp theo timeline). Tập đóng 10 giá trị (mở rộng từ 5, đối chiếu 15
     template AIGEN thật): title | stat | statement | list | comparison | quote
     | ticker | news | avatar | outro. `avatar` có trong tập nhưng
     **DEFERRED — chờ HeyGen, CHƯA kích hoạt** (template frame-avatar-presenter

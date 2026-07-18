@@ -7924,6 +7924,262 @@ def test_matches_canonical_fact_range_and_delta_shapes():
     assert "95%" in bad
 
 
+# =====================================================================
+# "Lớp Adapter DUY NHẤT" — seam subprocess (media_factory/aigen_seam.py).
+# Máy này (PC-A) KHÔNG BAO GIỜ gọi npm thật -- MOCK subprocess.run hoàn
+# toàn, phủ 3 nhánh (exit 0 / exit 1 / exit 2) + idempotent-skip + dry-run.
+# =====================================================================
+def test_aigen_seam_success_exit0_finds_video(tmp_path=None):
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import patch, MagicMock
+    from twmkt.media_factory.aigen_seam import run_aigen_pipeline
+
+    tmp = Path(tempfile.mkdtemp())
+    script_path = tmp / "script.json"
+    script_path.write_text("{}", encoding="utf-8")
+    video_path = tmp / "video.mp4"
+
+    def _fake_run(cmd, cwd, capture_output, text, timeout):
+        video_path.write_text("fake mp4 bytes", encoding="utf-8")  # AIGEN "renders" it
+        return MagicMock(returncode=0, stdout="ok", stderr="")
+
+    with patch("subprocess.run", side_effect=_fake_run) as m:
+        result = run_aigen_pipeline(script_path, aigen_repo_path=tmp / "aigen")
+        assert m.call_count == 1
+        called_cmd = m.call_args.args[0]
+        assert called_cmd == ["npm", "run", "pipeline", "--", str(script_path)]
+        assert m.call_args.kwargs["cwd"] == str(tmp / "aigen")
+
+    assert result.ok is True
+    assert result.video_path == video_path
+    assert result.skipped_already_rendered is False
+    assert result.exit_code == 0
+
+
+def test_aigen_seam_exit1_pipeline_failure_is_fatal():
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import patch, MagicMock
+    from twmkt.media_factory.aigen_seam import run_aigen_pipeline
+
+    tmp = Path(tempfile.mkdtemp())
+    script_path = tmp / "script.json"
+    script_path.write_text("{}", encoding="utf-8")
+
+    fake = MagicMock(returncode=1, stdout="", stderr="ffmpeg ENOENT")
+    with patch("subprocess.run", return_value=fake):
+        result = run_aigen_pipeline(script_path, aigen_repo_path=tmp / "aigen")
+
+    assert result.ok is False
+    assert result.exit_code == 1
+    assert "exit 1" in result.error
+    assert not (tmp / "video.mp4").exists()
+
+
+def test_aigen_seam_exit2_missing_arg_also_fatal_same_as_exit1():
+    """Tài liệu AIGEN không phân biệt đủ rõ ý nghĩa exit 1 vs exit 2 -- seam
+    coi CẢ HAI fatal như nhau (xem docstring module), KHÔNG cố xử lý khác
+    nhau dựa trên đoán ý nghĩa mã số."""
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import patch, MagicMock
+    from twmkt.media_factory.aigen_seam import run_aigen_pipeline
+
+    tmp = Path(tempfile.mkdtemp())
+    script_path = tmp / "script.json"
+    script_path.write_text("{}", encoding="utf-8")
+
+    fake = MagicMock(returncode=2, stdout="", stderr="Usage: npm run pipeline -- <path>")
+    with patch("subprocess.run", return_value=fake):
+        result = run_aigen_pipeline(script_path, aigen_repo_path=tmp / "aigen")
+
+    assert result.ok is False
+    assert result.exit_code == 2
+    assert "exit 2" in result.error
+
+
+def test_aigen_seam_exit0_but_no_video_file_is_still_an_error():
+    """KHÔNG tin exit code một mình -- exit 0 mà video.mp4 không thật sự xuất
+    hiện vẫn phải báo lỗi rõ ràng, không báo ok=True mù quáng."""
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import patch, MagicMock
+    from twmkt.media_factory.aigen_seam import run_aigen_pipeline
+
+    tmp = Path(tempfile.mkdtemp())
+    script_path = tmp / "script.json"
+    script_path.write_text("{}", encoding="utf-8")
+
+    fake = MagicMock(returncode=0, stdout="=== Result ===", stderr="")
+    with patch("subprocess.run", return_value=fake):
+        result = run_aigen_pipeline(script_path, aigen_repo_path=tmp / "aigen")
+
+    assert result.ok is False
+    assert "KHÔNG thấy video.mp4" in result.error
+
+
+def test_aigen_seam_idempotent_skip_when_video_already_exists_no_subprocess_call():
+    """IDEMPOTENT PER-ASSET (không cờ --force toàn cục): video.mp4 đã tồn tại
+    trước khi gọi -> subprocess.run KHÔNG được gọi luôn (assert not called),
+    không chỉ 'gọi rồi bỏ qua kết quả'."""
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import patch
+    from twmkt.media_factory.aigen_seam import run_aigen_pipeline
+
+    tmp = Path(tempfile.mkdtemp())
+    script_path = tmp / "script.json"
+    script_path.write_text("{}", encoding="utf-8")
+    video_path = tmp / "video.mp4"
+    video_path.write_text("da render tu truoc", encoding="utf-8")
+
+    with patch("subprocess.run") as m:
+        result = run_aigen_pipeline(script_path, aigen_repo_path=tmp / "aigen")
+        m.assert_not_called()
+
+    assert result.ok is True
+    assert result.skipped_already_rendered is True
+    assert result.video_path == video_path
+
+
+def test_aigen_seam_dry_run_logs_command_never_calls_subprocess():
+    """dry_run=True (chế độ AN TOÀN dùng trên PC-A -- máy này KHÔNG BAO GIỜ
+    render thật) -- log lệnh SẼ chạy, subprocess.run KHÔNG được gọi."""
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import patch
+    from twmkt.media_factory.aigen_seam import run_aigen_pipeline
+
+    tmp = Path(tempfile.mkdtemp())
+    script_path = tmp / "script.json"
+    script_path.write_text("{}", encoding="utf-8")
+    aigen_path = tmp / "aigen"
+
+    with patch("subprocess.run") as m:
+        result = run_aigen_pipeline(script_path, aigen_repo_path=aigen_path, dry_run=True)
+        m.assert_not_called()
+
+    assert result.ok is True
+    assert result.video_path is None
+    assert "DRY-RUN" in result.stdout
+    assert str(script_path) in result.stdout
+    assert str(aigen_path) in result.stdout
+
+
+def test_aigen_seam_timeout_is_reported_not_raised():
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import patch
+    import subprocess as _subprocess
+    from twmkt.media_factory.aigen_seam import run_aigen_pipeline
+
+    tmp = Path(tempfile.mkdtemp())
+    script_path = tmp / "script.json"
+    script_path.write_text("{}", encoding="utf-8")
+
+    def _raise_timeout(*a, **kw):
+        raise _subprocess.TimeoutExpired(cmd="npm", timeout=5)
+
+    with patch("subprocess.run", side_effect=_raise_timeout):
+        result = run_aigen_pipeline(script_path, aigen_repo_path=tmp / "aigen", timeout_s=5)
+
+    assert result.ok is False
+    assert "timeout" in result.error
+
+
+# --- A5: aigen_repo_path qua CONFIG (ENV AIGEN_REPO_PATH), không hardcode ---
+# (sự cố: dry-run từng in cwd=E:\aigen-fva-capital\aigen, repo ĐÃ CHẾT — xem
+# docs/VPS_MIGRATION_BACKLOG.md A5). 3 test dưới KHÔNG truyền aigen_repo_path
+# tường minh -> ép seam tự resolve qua config, đúng nhánh code MỚI (khác 7
+# test trên -- những test đó cố ý giữ nguyên nhánh truyền tường minh cũ).
+def test_aigen_seam_resolves_aigen_repo_path_from_config_when_path_exists():
+    """Config (ENV AIGEN_REPO_PATH) trỏ path CÓ THẬT -> seam tự resolve, dựng
+    đúng lệnh + đúng cwd -- KHÔNG cần truyền aigen_repo_path tường minh."""
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import patch, MagicMock
+    from twmkt.media_factory.aigen_seam import run_aigen_pipeline
+
+    tmp = Path(tempfile.mkdtemp())
+    script_path = tmp / "script.json"
+    script_path.write_text("{}", encoding="utf-8")
+    video_path = tmp / "video.mp4"
+    aigen_dir = Path(tempfile.mkdtemp())  # path CÓ THẬT trên đĩa
+
+    def _fake_run(cmd, cwd, capture_output, text, timeout):
+        video_path.write_text("fake mp4 bytes", encoding="utf-8")
+        return MagicMock(returncode=0, stdout="ok", stderr="")
+
+    os.environ["AIGEN_REPO_PATH"] = str(aigen_dir)
+    try:
+        with patch("subprocess.run", side_effect=_fake_run) as m:
+            result = run_aigen_pipeline(script_path)  # KHÔNG truyền aigen_repo_path
+            assert m.call_args.kwargs["cwd"] == str(aigen_dir)
+            assert m.call_args.args[0] == ["npm", "run", "pipeline", "--", str(script_path)]
+        assert result.ok is True
+    finally:
+        del os.environ["AIGEN_REPO_PATH"]
+
+
+def test_aigen_seam_config_path_missing_raises_clear_error_naming_the_path():
+    """Config (ENV AIGEN_REPO_PATH) trỏ path KHÔNG TỒN TẠI -> raise lỗi RÕ
+    RÀNG nêu đúng đường dẫn đã thử -- KHÔNG fail mù bằng lỗi OS/subprocess
+    khó hiểu. Lỗi cấu hình phổ biến nhất khi đổi máy (VPS)."""
+    from pathlib import Path
+    from twmkt.media_factory.aigen_seam import run_aigen_pipeline, AigenRepoPathNotFoundError
+
+    missing_path = str(Path("E:/khong-ton-tai/aigen-pipeline-gia"))  # str(Path(...)) chuẩn hoá dấu phân cách OS -- khớp đúng những gì seam sẽ in ra
+    os.environ["AIGEN_REPO_PATH"] = missing_path
+    try:
+        run_aigen_pipeline(Path("dummy-script.json"))  # KHÔNG truyền aigen_repo_path
+    except AigenRepoPathNotFoundError as e:
+        assert missing_path in str(e)
+        return
+    finally:
+        del os.environ["AIGEN_REPO_PATH"]
+    raise AssertionError("phải raise AigenRepoPathNotFoundError khi config trỏ path không tồn tại")
+
+
+def test_aigen_seam_changing_config_changes_resolved_cwd_not_hardcoded():
+    """Đổi ENV AIGEN_REPO_PATH giữa 2 lần gọi -> cwd đổi theo -- chứng minh
+    seam THẬT SỰ đọc config mỗi lần gọi, không cache/hardcode giá trị cũ."""
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import patch, MagicMock
+    from twmkt.media_factory.aigen_seam import run_aigen_pipeline
+
+    tmp = Path(tempfile.mkdtemp())
+    script_path = tmp / "script.json"
+    script_path.write_text("{}", encoding="utf-8")
+    aigen_dir_a = Path(tempfile.mkdtemp())
+    aigen_dir_b = Path(tempfile.mkdtemp())
+
+    fake = MagicMock(returncode=0, stdout="ok", stderr="")
+
+    def _fake_run_a(cmd, cwd, capture_output, text, timeout):
+        (tmp / "video.mp4").write_text("x", encoding="utf-8")
+        return fake
+
+    os.environ["AIGEN_REPO_PATH"] = str(aigen_dir_a)
+    try:
+        with patch("subprocess.run", side_effect=_fake_run_a) as m:
+            run_aigen_pipeline(script_path)
+            assert m.call_args.kwargs["cwd"] == str(aigen_dir_a)
+    finally:
+        del os.environ["AIGEN_REPO_PATH"]
+
+    (tmp / "video.mp4").unlink()  # reset idempotent-skip guard cho lần gọi thứ 2
+    os.environ["AIGEN_REPO_PATH"] = str(aigen_dir_b)
+    try:
+        with patch("subprocess.run", return_value=fake) as m:
+            run_aigen_pipeline(script_path)
+            assert m.call_args.kwargs["cwd"] == str(aigen_dir_b)
+            assert m.call_args.kwargs["cwd"] != str(aigen_dir_a)
+    finally:
+        del os.environ["AIGEN_REPO_PATH"]
+
+
 # xfail: test biết trước ĐANG đỏ vì 1 phần việc CHƯA làm (không phải regression
 # mới) — ghi rõ lý do + phase sẽ fix, để suite chạy XANH sạch mà không che giấu
 # nợ kỹ thuật. Nếu ai lỡ fix xong mà quên bỏ khỏi danh sách này -> in XPASS (cảnh

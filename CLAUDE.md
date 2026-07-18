@@ -3,6 +3,8 @@
 > File này CHỈ giữ quy tắc đúng cho MỌI task. Bản đồ code: `docs/MODULE_INDEX.md`.
 > Quyết định kiến trúc + lịch sử phase: `PROJECT_HANDOFF_P5.md`. Task đang làm:
 > `tasks/ACTIVE_TASK.md`. Kết quả suite gần nhất: `reports/TEST_RESULT.md`.
+> Nợ dài hạn trước/khi/sau chuyển VPS (file CHỈ THÊM, không ghi đè — khác
+> ACTIVE_TASK.md/HANDOFF.md): `docs/VPS_MIGRATION_BACKLOG.md`.
 
 ## Kỷ luật vận hành (bắt buộc, mọi task)
 - **Config-first.** Tham số ở `config/settings.yaml` (brand ở `config/brand.yaml`,
