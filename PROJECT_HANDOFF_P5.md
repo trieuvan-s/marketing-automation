@@ -6,8 +6,15 @@
 > ProductionSpec/guardrail lần 2/brand-kit/render+Gate 3). Trước đó: Lớp 5 (TopicKey) + Fix (a).
 > **Trạng thái:** Sheet board hội tụ bất kể máy/DB nào crawl. Brand **FVA Capital** đã wire vào
 > renderer SVG (`config/brand.yaml`), CTA/persona trong `agents/*.py` CHƯA đổi. CONTENT có thêm
-> `Facts`/`AssetPath`/`Gate3`. Kế tiếp: mở rộng Production Factory (Phase 2 — video) hoặc dọn nốt
-> brand cũ còn lại trong prompts/CTA.
+> `Facts`/`AssetPath`/`Gate3`.
+>
+> **SỬA 2026-07-19 — kiến trúc video đã đổi, dòng trên chỉ còn đúng cho NHÁNH ẢNH.**
+> "Production Factory = `twmkt.media_factory`" **KHÔNG còn đúng cho video** — `ProductionScene`
+> + guardrail-2 nhánh video đã PORT sang `aigen-pipeline/src/production-spec/` (TypeScript, cùng
+> ngôn ngữ với renderer AIGEN). `media_factory/` ở đây giờ CHỈ còn giữ `ProductionBlock` + guardrail
+> nhánh ảnh (nhẹ) cho renderer SVG nội bộ — không liên quan AIGEN/video nữa. Bản đồ đầy đủ, khỏi
+> nhầm lần nữa: `docs/ARCHITECTURE_MODULES.md`. Kế tiếp: nối thông Content Factory → aigen-pipeline
+> (xem `docs/VPS_MIGRATION_BACKLOG.md` A0) hoặc dọn nốt brand cũ còn lại trong prompts/CTA.
 
 ---
 
@@ -131,9 +138,11 @@ kiểm tra viên gạch này TRƯỚC khi xây Production Factory từ đầu, t
 | Telegram notifier | ĐÃ CÓ (non-blocking) | `utils/telegram_notifier.py` |
 | Scheduler (crawl + draft, 1 tiến trình) | ĐÃ CÓ | `system_power_on.py`, `schedule.py` |
 | Renderer infographic (SVG) — brand-kit wired | ĐÃ CÓ | `render/infographic.py` (`config/brand.yaml`, `config.load_brand()`) |
-| `ProductionSpec`/`ProductionScene`/`Violation` (schema trung lập vendor) | ĐÃ CÓ | `media_factory/spec.py` |
-| Chuẩn hoá số-chữ tiếng Việt (13,8 tỷ đọc bằng chữ) | ĐÃ CÓ | `media_factory/numbers.py` |
-| Guardrail lần 2 (`verify_spec`, TRƯỚC render, sau khi người sửa Gate 2) | ĐÃ CÓ | `media_factory/spec.py: verify_spec/build_spec_from_content` |
+| `ProductionBlock`/`Violation` (nhánh ẢNH, schema trung lập vendor) | ĐÃ CÓ | `media_factory/spec.py` |
+| `ProductionScene` (nhánh VIDEO) — **ĐÃ MOVE 2026-07-19**, không còn ở Python | ĐÃ CÓ, Ở REPO KHÁC | `aigen-pipeline/src/production-spec/spec.ts` |
+| Chuẩn hoá số-chữ tiếng Việt (13,8 tỷ đọc bằng chữ) — bản Python cho ẢNH; bản VIDEO đã port sang TS | ĐÃ CÓ (2 bản, khác repo) | `media_factory/numbers.py` (ẢNH, parser ngược) · `aigen-pipeline/src/production-spec/voice/` (VIDEO, sinh xuôi) |
+| Guardrail lần 2 nhánh ẢNH (`verify_spec`, TRƯỚC render, sau khi người sửa Gate 2) | ĐÃ CÓ | `media_factory/spec.py: verify_spec/build_spec_from_content` |
+| Guardrail lần 2 nhánh VIDEO — **ĐÃ MOVE 2026-07-19** | ĐÃ CÓ, Ở REPO KHÁC | `aigen-pipeline/src/production-spec/guardrail/` |
 | CONTENT.Facts/AssetPath/Gate3 (persist facts[] ra Sheet, KHÔNG data_root) | ĐÃ CÓ | `sheets_board.py` (`content_row`, `facts_to_json/facts_from_json`) |
 | Render + upsert asset theo TopicKey (idempotent) → Gate 3 | ĐÃ CÓ | `scripts/render_production_assets.py` |
 | Lớp 1–4, 6 (block ngày, khoá cột, sliding window, Manual adapter, validation tập trung) | **CHƯA XÂY** (GÁC, xem §5) | — |

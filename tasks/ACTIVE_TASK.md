@@ -1,74 +1,205 @@
-# ACTIVE_TASK — AigenAdapter + seam subprocess (ghép Content Factory → AIGEN → video)
+# ACTIVE_TASK — Tái cấu trúc 2 repo (marketing-automation ↔ aigen-pipeline)
 
-## QUY ƯỚC WORKFLOW (đọc trước, mọi phiên)
-1. Đọc `CLAUDE.md` (quy tắc chung) → `tasks/ACTIVE_TASK.md` (file này) → tra `docs/MODULE_INDEX.md` khi cần định vị code. **KHÔNG khám phá lại repo từ đầu.**
-2. Chỉ đụng file trong SCOPE khai báo dưới. Cần ra ngoài scope → **DỪNG-BÁO-CÁO**, chờ duyệt.
-3. **DỪNG-BÁO-CÁO mỗi phase.** KHÔNG auto-commit. Chấm trên output thật.
-4. Sau task: cập nhật `docs/HANDOFF.md` (ghi đè) + `reports/TEST_RESULT.md`.
+> **GHI ĐÈ MỖI PHIÊN** — file này phản ánh trạng thái NGAY LÚC dừng phiên gần
+> nhất, không phải log lịch sử (lịch sử: `PROJECT_HANDOFF_P5.md`). Viết lại
+> 2026-07-19, phiên bị cắt ngang giữa chừng vì hết tài nguyên — nhiều phần
+> **CHƯA XONG**, đọc kỹ mục "CHƯA LÀM" trước khi tiếp tục, đừng làm lại từ đầu.
 
-## Mục tiêu
-Ghép đường VIDEO: `ProductionSpec (variant=video, scenes[])` → **AigenAdapter** (dịch sang `TemplateScript` của AIGEN) → AIGEN render → thu `video.mp4`. Đây là lát cắt dọc video đầu tiên.
+## QUY ƯỚC WORKFLOW
+1. Đọc `CLAUDE.md` → file này → `docs/ARCHITECTURE_MODULES.md` (kiến trúc
+   tổng, ĐỌC TRƯỚC KHI ĐỘNG VÀO BẤT CỨ GÌ) → `docs/CONTENT_OUTPUT_SCHEMA.md`
+   (schema JSON chốt, có version) → `docs/MODULE_INDEX.md` khi cần định vị
+   code. Cả 4 file này tồn tại GIỐNG HỆT ở CẢ HAI repo.
+2. **DỪNG-BÁO-CÁO** khi ra ngoài scope hoặc gặp 1 trong 4 điều ở mục "DỪNG
+   KHI" cuối file. KHÔNG auto-commit.
+3. Nợ dài hạn không thuộc task này: `docs/VPS_MIGRATION_BACKLOG.md`
+   (file chỉ-thêm, không ghi đè — đọc trước khi bắt tay, có mục A0 "ưu tiên
+   cao nhất" liên quan trực tiếp task này).
 
-## Phạm vi HAI REPO (ranh giới cứng)
-- **`../aigen-fva-capital/`** (repo AIGEN, sibling, git RIÊNG): AigenAdapter (TS) + bảng ánh xạ config. Sửa ở đây KHÔNG được lẫn vào git của marketing-automation.
-- **`marketing-automation/`**: seam subprocess (Python) gọi AIGEN + thu kết quả. CHỈ phần này vào git marketing-automation.
-- `git status` của marketing-automation phải KHÔNG xuất hiện file AIGEN.
+## Kiến trúc đã CHỐT (không mở lại — xem đầy đủ ở `docs/ARCHITECTURE_MODULES.md`)
+2 repo, ranh giới = `CONTENT.Output` (JSON, có version — KHÔNG PHẢI
+`ProductionSpec` như thiết kế cũ). marketing-automation (Python) sinh
+`CONTENT.Output`; aigen-pipeline (TypeScript) biến nó thành video —
+`ProductionScene`, guardrail-2 nhánh video, Scene Builder, chuẩn hoá
+voice_text **ĐÃ CHUYỂN HẲN sang TypeScript** (không còn ở Python). Renderer
+Infographic + `ProductionBlock` **Ở LẠI** Python.
 
-## Quyết định kiến trúc đã CHỐT (không mở lại)
-- **`ProductionSpec` vendor-neutral: KHÔNG chứa `templateId`.** Ánh xạ `visual_kind → templateId` sống trong **config của adapter**, không trong spec.
-- **Adapter TẤT ĐỊNH, KHÔNG LLM.** Cùng ProductionSpec → cùng TemplateScript.
-- **`voice.provider` của AIGEN KHÔNG map vào ProductionSpec** (đúng — vendor-neutral), nhưng
-  **KHÔNG phải dead code phía AIGEN** (kết luận sai ở phase trước, đã sửa): đây là Zod
-  discriminator BẮT BUỘC trên `TemplateScriptSchema` (`z.literal("omnivoice")`) — engine TTS
-  thật chọn qua `TTS_PROVIDER` (env, phía operator/máy render, xem AIGEN `src/config.ts`),
-  KHÔNG liên quan field này. Adapter vẫn LUÔN emit cứng `{"provider":"omnivoice","speed":1.0}`
-  vì schema bắt buộc phải có giá trị, và đó là giá trị DUY NHẤT hợp lệ hiện tại.
-- **Alias-theo-kênh:** `voice_text` CẤM ticker/viết-tắt (TTS đọc "HVN"→"hát-vê-en"); số viết bằng chữ (ràng buộc voiceText của AIGEN). Slot hiển thị thì được.
-- **Lát cắt đầu: CHỈ hook/body/outro (11 template gốc), 9:16. KHÔNG avatar** (chờ HeyGen). TTS: **mock/OmniVoice** cho test luồng (ElevenLabs cần key+voiceID, chưa có — KHÔNG chặn adapter).
-- AIGEN `CLAUDE.md §9` đã chừa sẵn ProductionSpec/AigenAdapter/Renderer-interface — tôn trọng ranh giới đó, AIGEN là Renderer.
-
----
-
-## Phase 0 — Discovery + thiết kế ánh xạ (đọc, CHƯA code) — phần rủi ro nhất
-Đọc (dùng MODULE_INDEX + CATALOG đã có): AIGEN `TemplateScriptSchema`, **inputs BẮT BUỘC của từng template** (11 template hook/body/outro), entry point pipeline (`npm run pipeline`/`cli.ts` — nhận `script.json` thế nào, trả `video.mp4` ở đâu), ràng buộc scene (3–12 cảnh, đầu=hook, cuối=outro). Đọc `ProductionScene` (media_factory/spec.py) hiện tại.
-
-Báo cáo:
-1. **Bảng ánh xạ `visual_kind → templateId`** (10 giá trị → template thật). Nhiều template/1 visual_kind (vd title→4 template) → nêu **quy tắc chọn tất định** (theo role+variant, hay default+rotation). avatar → đánh dấu DEFERRED.
-2. **Với mỗi template: inputs bắt buộc là gì**, và `ProductionScene.slots` hiện có cung cấp đủ không? Chỗ nào THIẾU field → báo (đây là gap phải lấp trước khi render được).
-3. Điểm nối subprocess: Content Factory ghi `script.json` ở đâu, gọi lệnh gì, thu `video.mp4` ở đâu, mã lỗi ra sao.
-4. `voice_text` từ spec có sẵn cho scene video chưa? (báo cáo trước từng nói build_spec_from_content chưa build scene video — xác nhận trạng thái thật.)
-
-**DỪNG. BÁO CÁO bảng ánh xạ + gap inputs. Chờ duyệt trước khi code.**
+Nguyên tắc: **Composer (Opus, TRƯỚC Gate 2) là nơi DUY NHẤT có trí thông
+minh/LLM.** Sau Gate 2: 100% code tất định — kể cả chuẩn hoá số→chữ và
+ticker→phiên âm, KHÔNG giao LLM (bài học rút ra giữa phiên: LLM/kể cả người
+suy luận theo quy tắc chữ-cái đều ĐOÁN SAI cách đọc ticker thật — VNM đọc
+"vi na miu" theo thương hiệu, không theo quy tắc nào suy ra được. Xem
+`docs/CONTENT_OUTPUT_SCHEMA.md` phần Fact/ví dụ để hiểu tại sao).
 
 ---
 
-## Phase 1 — Bảng ánh xạ config (AIGEN side)
-Ghi bảng `visual_kind → templateId` + quy tắc chọn vào **config của adapter** (không hard-code trong code TS). Test: mỗi visual_kind resolve đúng 1 templateId tất định.
+## TRẠNG THÁI 6 PHA (2026-07-19, cuối phiên)
 
-**DỪNG. BÁO CÁO. Chờ duyệt.**
+### PHA 0 — Tài liệu — **XONG**
+- `docs/ARCHITECTURE_MODULES.md` — tạo mới, giống hệt 2 repo.
+- `docs/CONTENT_OUTPUT_SCHEMA.md` — tạo mới, giống hệt 2 repo (schema
+  `CONTENT.Output` video, version 1, đối chiếu `Fact` thật từ `models.py`).
+- `docs/MODULE_INDEX.md` — cập nhật cả 2 repo (aigen-pipeline trước đó CHƯA
+  có file này, đã tạo mới).
+- `PROJECT_HANDOFF_P5.md` — sửa 2 chỗ nói sai "Production Factory =
+  media_factory/".
+- `docs/VPS_MIGRATION_BACKLOG.md` — thêm mục A6 (DB chung, chi tiết hoá B1).
 
-## Phase 2 — AigenAdapter (TS, AIGEN side)
-`ProductionSpec JSON → TemplateScript`: map visual_kind→templateId qua config; điền inputs từ slots (theo gap đã rõ ở Phase 0); enforce thứ tự (đầu=hook, cuối=outro) + ràng buộc 3–12 cảnh; chuyển voice_text (enforce alias-theo-kênh: reject nếu có ticker/viết-tắt, số phải là chữ). Test: spec hợp lệ → TemplateScript hợp lệ; spec vi phạm (ticker trong voice_text, <3 cảnh, thiếu hook/outro) → lỗi rõ ràng.
+### PHA 1 (aigen-pipeline: đo + port `ProductionScene`/guardrail-2 video) — **XONG, CHƯA MERGE**
+**SỬA 2026-07-19 cuối phiên**: ban đầu tưởng subagent làm PHA 1+3 bị mất
+(worktree rỗng, `TaskStop` báo "No task found") — điều tra lại kỹ hơn phát
+hiện subagent thực ra làm việc TRỰC TIẾP trên cây chính `aigen-pipeline`
+(không phải worktree cô lập như dự kiến) và ĐàHOÀN THÀNH thật trước khi bị
+dừng. Đã tìm thấy, kiểm tra (`npx vitest run src/production-spec` → 82/82
+pass; `npx tsc --noEmit` sạch; full suite 204/206 — 2 fail còn lại là
+`ffmpeg`/`ffprobe` ENOENT, hạn chế PC-A đã biết từ trước, không liên quan),
+commit + push lên **`feature/production-spec`** (đã push `origin`, CHƯA mở
+PR, CHƯA merge `main`).
 
-**DỪNG. BÁO CÁO. Chờ duyệt.**
+**Việc PHA 1.1 (đo trước) — CHƯA có báo cáo số liệu tường minh** từ subagent
+(không rõ có thực sự đo dòng/kiểm tra "guardrail-2 tách sạch" như brief yêu
+cầu, hay chỉ port thẳng dựa trên đọc code). Code port
+(`src/production-spec/spec.ts` + `guardrail/verify-spec.ts`) NHÌN kỹ lưỡng
+(vd tự nhận ra và xử lý đúng 1 nuance không có trong brief: `CONTENT.Output.
+disclaimer` ở top-level cần bridge vào `slots.disclaimer` của scene outro,
+xem docstring `src/production-spec/index.ts::withDisclaimerOnOutro`) — NHƯNG
+**CHƯA CÓ AI (Lead) đối chiếu tay port này với `verify_spec()` Python gốc**
+để xác nhận đúng semantics 100%, đặc biệt: NFC-normalize (ĐÃ CÓ,
+`verify-spec.ts:42`), 5 shape fact, salience. Đây là việc nên làm trước khi
+mở PR/merge.
 
-## Phase 3 — Seam subprocess (Python, marketing-automation side)
-Viết caller: dựng ProductionSpec (video) → serialize JSON → gọi AIGEN qua subprocess (`npm run pipeline` tại `../aigen-fva-capital/`) → thu `video.mp4` + xử lý exit code/timeout/lỗi. AIGEN ở repo riêng, gọi qua đường dẫn config (giống base_path). Test: mock subprocess (không chạy render thật) — luồng ghi JSON → gọi → thu file → xử lý lỗi đúng.
+`media_factory/aigen_seam.py` (Python) — **CHƯA THẤY ghi nhận đánh giá** còn
+cần hay không trong bất kỳ đâu (report của subagent hay code) — vẫn là câu
+hỏi mở, xem lại khi có thời gian.
 
-**DỪNG. BÁO CÁO. Chờ duyệt.**
+### PHA 2 (marketing-automation: chuẩn hoá output Composer) — **CODE XONG, CHƯA DUYỆT CHẤT LƯỢNG**
+**Nằm trên branch riêng, CHƯA merge vào `develop`:**
+`feature/video-composer-schema-pending-review` (đã push lên
+`origin` — `git fetch && git checkout feature/video-composer-schema-pending-review`
+để xem). Nội dung: `prompts/video.v1.md` (chỉ dòng định dạng đầu ra),
+`agents/production.py` (`VideoScriptAgent.system`/`video_fields_from_data()`/
+`render_video()` — parse+serialize schema mới), test cập nhật khớp.
+`python tests/test_pipeline.py` → **400/400 xanh** trên branch đó.
 
-## Phase 4 — Lát cắt dọc video THẬT (1 tin)
-1 tin video thật → ProductionSpec → adapter → AIGEN render (TTS mock/OmniVoice) → `video.mp4` 9:16. Ghi vào data_root theo ngày. **GIAO file video** để xem.
+**⚠️ VIỆC CÒN THIẾU, BẮT BUỘC TRƯỚC KHI MERGE**: kiểm tra hồi quy chất lượng
+biên tập. Dữ liệu THÔ đã có sẵn trên branch đó, tại
+`reports/regression_video_prompt/` — 3 chủ đề × (bản CŨ + bản MỚI, prompt
+khác nhau, cùng input, Opus thật):
+`cong_ty_lo_q2`, `vietnam_airlines_co_dong`, `4_cang_bien_dac_biet`
+(mỗi chủ đề 2 file `*_old.txt`/`*_new.txt`). **CHƯA CÓ AI ĐỌC ĐỐI CHIẾU
+CŨ/MỚI** — đây là việc CHỈ NGƯỜI (Lead) làm được, không giao LLM/subagent
+(phán đoán biên tập cần sắc thái). Đọc xong, nếu chất lượng KHÔNG giảm →
+merge branch vào `develop`. Nếu giảm → sửa prompt tiếp, KHÔNG tự vá bằng
+thêm luật máy móc.
 
-**DỪNG. GIAO VIDEO. BÁO CÁO. KHÔNG commit.**
+### PHA 3 (aigen-pipeline: Scene Builder + voice layer) — **XONG, CHƯA MERGE** (cùng branch `feature/production-spec` với PHA 1, xem trên)
+Đã có đủ: `src/production-spec/voice/spell-out-numbers.ts` +
+`voice/pronunciation.ts` (đọc file `pronunciation_dict.vi.json` trực tiếp,
+KHÔNG gọi HTTP :8881 — xác nhận đúng yêu cầu), `scene-builder/index.ts`
+(ánh xạ thuần tất định), `index.ts::buildTemplateScriptFromContentOutput()`
+(orchestration đầy đủ: scene-builder → voice → guardrail-2 → adapter có
+sẵn). Từ điển đã thêm ĐÚNG 4 entry đã xác nhận (`PNJ`/`VNM`/`HPG`/`MWG`),
+không thêm gì khác — đã đối chiếu diff, sạch.
+
+**✅ ĐÃ SOI MẮT** (2026-07-19, cuối phiên) — chạy `normalizeForTts()` thật
+trên 3 câu (mẫu FPT + câu có cả 4 ticker + câu acronym GDP/CPI/ETF), kết
+quả ĐÚNG cả 3: `4,98%→"bốn phẩy chín tám phần trăm"`,
+`66.800→"sáu mươi sáu nghìn tám trăm"`, `739→"bảy trăm ba mươi chín"`,
+`PNJ→"pi en di"`, `VNM→"vi na miu"`, `HPG→"hát pê gờ"`,
+`MWG→"mờ đắp-liu gờ"` (khớp CHÍNH XÁC 4 mã Lead xác nhận), `GDP→"giê đê
+pê"`/`CPI→"xê pê ai"`/`ETF→"i tê ép"` (khớp từ điển FVB có sẵn). `FPT`
+(KHÔNG có trong từ điển) giữ nguyên thô — ĐÚNG THIẾT KẾ (alias-guardrail sẽ
+chặn khi gặp thật, không đoán mù). Lệnh xác minh (đứng ở gốc `aigen-pipeline`,
+branch `feature/production-spec`, viết 1 file `.mts` tạm với import tương
+đối rồi `npx tsx` — import path tuyệt đối `E:/...` KHÔNG chạy được với ESM
+loader của Node, đã gặp lỗi `ERR_UNSUPPORTED_ESM_URL_SCHEME`, phải dùng
+đường dẫn tương đối).
+
+**Vẫn còn CHƯA làm**: chỉ soi 3 câu, chưa soi hết mọi edge case (số âm, ngày
+tháng dạng khác, số cực lớn) — 82/82 test tự động phủ nhiều ca hơn nhưng
+Lead chưa đọc TỪNG assert xem có tự viết expect sai theo hay không.
+
+### PHA 4 (nối thông + dọn đường dẫn) — **CHƯA LÀM** (phụ thuộc PHA 1-3 xong)
+4.1 Grep "aigen-fva-capital" cả 2 repo phải về 0 (đã gần 0 từ phiên trước,
+chỉ còn ghi chú lịch sử hợp lệ — kiểm lại sau khi PHA 1-3 xong, có thể phát
+sinh thêm nếu subagent trước đó có sửa gì không rõ).
+4.2 Chạy end-to-end 1 bài THẬT: `CONTENT.Output` → scene-builder → voice →
+guardrail → adapter → `TemplateScript`, Zod validate thật. KHÔNG render
+AIGEN thật (máy không đủ phần cứng — xem PHA 6 cho việc trên VPS).
+4.3 Audit môi trường VPS — **ĐÃ LÀM XONG** (subagent Nhánh C hoàn tất, xem
+`docs/VPS_MIGRATION_BACKLOG.md` mục ghi chú audit, hoặc tìm trong lịch sử
+hội thoại phiên này nếu cần chi tiết đầy đủ — tóm tắt: chưa có Task
+Scheduler/service nào đăng ký, đang chạy tay; OmniVoice cần driver NVIDIA
+≥570/CUDA 12.8, đã test trên GTX 1070 Ti Pascal; 0 xung đột tên file hoa/thường).
+
+### PHA 5 (test + commit) — **CHƯA LÀM**
+Chờ PHA 1-4 xong. `aigen-pipeline`: branch mới `feature/production-spec`,
+MỞ PR, KHÔNG merge main. `marketing-automation`: branch `develop`, sau khi
+PHA 2 được Lead duyệt chất lượng và merge `feature/video-composer-schema-pending-review`.
+
+### PHA 6 (đóng gói data move VPS) — **CHƯA LÀM**
+Xem mục "DỮ LIỆU NGOÀI GIT — CẦN COPY TAY" bên dưới (đã liệt kê đủ, chưa
+đóng gói/nén).
 
 ---
 
-## Ghi chú chuyển giao (HANDOFF.md)
-- Bảng `visual_kind→templateId` — nguồn để mở rộng template sau.
-- Gap inputs template (nếu có) — chỗ cần thêm field ProductionScene sau.
-- ElevenLabs (key+voiceID) chưa wire — TTS đang mock/OmniVoice; đổi khi có key.
-- guardrail-2 trên `blocks[]` (đường infographic) VẪN nợ từ Phase 3 ProductionSpec — làm sau.
+## DỮ LIỆU NGOÀI GIT — CẦN COPY TAY LÊN VPS
 
-## Nghiệm thu
-Adapter tất định (cùng spec→cùng TemplateScript) · ProductionSpec vẫn 0 templateId (vendor-neutral) · alias-theo-kênh enforce trong voice_text · seam thu được video.mp4, xử lý lỗi đúng · file AIGEN không lẫn git marketing-automation · 1 video thật giao được · suite xanh · không auto-commit.
+### marketing-automation
+- **`E:\marketing-automation-database\`** (data_root, sibling ngoài repo) —
+  **47MB**: `output/` 47MB (gần hết dung lượng), `documents/` 88KB,
+  `logs/`+`state/` rỗng. Đường dẫn tương đối `../marketing-automation-database`
+  trong `settings.yaml`, không hardcode ổ đĩa — copy nguyên thư mục, đặt
+  đúng vị trí sibling so với repo trên VPS.
+- **`secrets/.env`** (732 bytes) — 2 biến ACTIVE: `TELEGRAM_BOT_TOKEN`,
+  `TELEGRAM_CHAT_ID` (giá trị KHÔNG được in ra bất cứ đâu, tự điền tay).
+  `ANTHROPIC_API_KEY` hiện để trống hợp lệ (llm.mode="claude_code", dùng
+  CLI `claude -p`, không cần key riêng — chỉ cần nếu đổi sang llm.mode="api").
+- **`secrets/sa.json`** (2389 bytes) — credential Service Account Google
+  Sheet, tham chiếu qua `settings.yaml: sheets.creds_path`.
+
+### aigen-pipeline
+- **`node_modules/`** — KHÔNG copy, cài lại bằng `npm install` trên VPS
+  (112 package, `package-lock.json` đã khớp sẵn).
+- **`.env.local`** (nếu có, cho OmniVoice/ElevenLabs — xem `RUNTIME.md`) —
+  chưa xác nhận đã tồn tại trên máy này, kiểm tra lại khi dựng VPS.
+- **Tầng 2 chưa dựng trên máy này** (không phải "dữ liệu cần copy" mà là
+  "phần mềm cần CÀI MỚI trên VPS"): ffmpeg/ffprobe, OmniVoice server
+  (`:8123`), financial-voice-bible server (`:8881` — CHỈ dùng làm nguồn dữ
+  liệu tĩnh cho `voice/`, KHÔNG chạy service này trong luồng render thật).
+
+### Thứ tự dựng trên VPS (tham khảo, chi tiết đầy đủ hơn cần viết
+`out/move-to-vps/MOVE_README.md` — **CHƯA VIẾT**, PHA 6 chưa làm):
+1. Clone `marketing-automation` + `aigen-pipeline` làm sibling directory.
+2. `npm install` (aigen-pipeline).
+3. Copy `E:\marketing-automation-database\` (data_root) vào đúng vị trí
+   sibling.
+4. Điền `secrets/.env` + `secrets/sa.json` (marketing-automation).
+5. Đổi `storage.asset_server_enabled: false → true` trong
+   `config/settings.yaml` (cho `system_power_on.py` tự chạy asset server).
+6. Đăng ký Task Scheduler/NSSM cho `system_power_on.py` (CHƯA có cơ chế
+   nào — `scripts/run_scheduler.py --print-os` in sẵn lệnh `schtasks` mẫu
+   để tham khảo).
+7. Chạy test 2 repo (`python tests/test_pipeline.py`, `npx vitest run`).
+8. Merge `feature/video-composer-schema-pending-review` SAU KHI Lead đọc
+   xong `reports/regression_video_prompt/` (xem PHA 2).
+9. Làm nốt PHA 1/3 (aigen-pipeline, theo brief ở trên).
+10. Chạy thử 1 video thật (PHA 4.2 mở rộng — có phần cứng GPU/OmniVoice
+    thật trên VPS, máy PC-A này không có).
+
+---
+
+## DỪNG KHI (4 điều, không đổi so với lần chốt trước)
+1. Guardrail-2 KHÔNG tách sạch đôi được (PHA 1.1).
+2. Chất lượng biên tập GIẢM ở kiểm tra hồi quy (PHA 2 — Lead tự đọc, chưa
+   xong ở cuối phiên này).
+3. Cần render AIGEN thật (máy không đủ phần cứng).
+4. Đụng kiến trúc đã chốt ở `docs/ARCHITECTURE_MODULES.md`.
+
+## KHÔNG LÀM
+Không đụng `src/render/` (aigen-pipeline, ruột AIGEN, agent-B sở hữu).
+Không đụng `src/adapter/` (đã xong, 79/79 test, PR #1 merged). Không xây
+DB chung (A6 — làm sau khi luồng thông). Không reset Sheet (Sheet ĐANG LÀ
+database, xem "QUY TẮC VÀNG" trong `docs/VPS_MIGRATION_BACKLOG.md`). Không
+merge `feature/video-composer-schema-pending-review` vào `develop` trước
+khi Lead đọc xong hồi quy. Không merge bất cứ gì vào `main` (aigen-pipeline).

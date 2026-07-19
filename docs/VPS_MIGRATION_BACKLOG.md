@@ -13,6 +13,48 @@
 
 ## A. CHẶN — làm ngay khi lên VPS
 
+### A0. [ƯU TIÊN CAO NHẤT] Ghép nối marketing-automation + aigen-pipeline — test tổng thể "tin tức" → "video"
+Thêm 2026-07-19, mức ưu tiên CAO NHẤT trong toàn bộ file này — đứng trước cả
+A1-A5. Mở rộng A3 (đặt 2 repo cạnh nhau) thành 1 tiêu chí nghiệm thu CỤ THỂ:
+không chỉ sibling directory, mà phải **chạy được 1 lượt thật, đầu-cuối**, từ
+đầu vào "tin tức" tới đầu ra "video", để xác nhận Adapter hoạt động đúng và 2
+module lớn (Content Factory Python + AIGEN render TS) đã khớp nhau THẬT SỰ —
+không chỉ khớp trên giấy/qua test mock/qua fixture tay.
+
+**Chuỗi cần chạy được (đầu-cuối, không cắt đoạn)**:
+tin tức thật (crawl → CONTEXT) → duyệt Gate 1 (Context=APPROVE) → Content
+Factory sinh Output (Gate 2) → `media_factory.spec.py::build_spec_from_content()`
+hoặc tương đương cho nhánh video (**xem điều kiện B2 bên dưới**) →
+`ProductionSpec.scenes[]` → AigenAdapter (`aigen-pipeline/src/adapter/`) →
+`TemplateScript` (`script.json`) → `media_factory/aigen_seam.py::
+run_aigen_pipeline(dry_run=False)` → `npm run pipeline` → **`video.mp4` thật,
+mở lên xem được, không lỗi, không lộ demo placeholder (quirk #1/#2)**.
+
+**Điều kiện tiên quyết (PHẢI xong trước, theo đúng thứ tự phụ thuộc đã ghi ở
+A2/A3 bên dưới)**:
+- A2 (data_root hợp nhất) — VPS phải là nơi dữ liệu SỐNG DUY NHẤT trước khi
+  chạy thật, tránh test này ghi lệch giữa 2 bản data_root.
+- A3 (2 repo sibling, `../aigen-pipeline`) — seam (A5, đã sửa) resolve path
+  qua config, cần repo đã ở đúng vị trí sibling để tự tìm thấy.
+- Máy chạy: **PC-B/VPS** (có OmniVoice/ffmpeg/CUDA) — PC-A KHÔNG BAO GIỜ
+  render thật (ranh giới máy đã chốt, xem CLAUDE.md + `aigen_seam.py`
+  docstring). `dry_run=True` trên PC-A KHÔNG tính là đã nghiệm thu mục này.
+
+**Khoảng trống cần biết trước khi chạy**: B2 (Video Scene Builder thật —
+`CONTENT.Output` → `ProductionSpec.scenes[]`) **CHƯA XÂY** — `scenes[]` hiện
+LUÔN RỖNG trong pipeline thật. Nếu B2 chưa xong khi tới lượt chạy test này,
+2 lựa chọn: (a) xây 1 bản Scene Builder tối thiểu đủ cho 1 chủ đề thật để có
+`scenes[]` thật thay vì bịa, HOẶC (b) chạy tạm bằng fixture tay đã có
+(`aigen-pipeline/out/handoff-to-pcb/script.json`, 7 scene THẬT lấy từ video
+PNJ đã render — KHÔNG phải toàn chuỗi đầu-cuối, chỉ xác nhận đoạn Adapter→
+AIGEN, KHÔNG xác nhận đoạn Content Factory→ProductionSpec.scenes[]). Ghi rõ
+trong báo cáo nghiệm thu đã dùng (a) hay (b) — 2 mức bằng chứng khác nhau.
+
+**Sau khi chạy xong**: soi từng frame `video.mp4` tìm chữ demo lọt lên (quirk
+#1/#2, KHÔNG test nào bắt được tự động — xem C5), nghe kỹ `voiceText` tìm
+acronym đọc sai (C4), đối chiếu `AigenPipelineResult.ok`/`error` không có gì
+bất thường.
+
 ### A1. WEBHOOK thay scheduler 30 phút
 Hiện tại: `system_power_on` khởi chạy scheduler quét Sheet 30'/lần tìm cờ
 Execute=RUN. User bấm "Thực Thi" có thể chờ tới 30' mới thấy chạy.
@@ -57,6 +99,20 @@ hoặc `media_factory.aigen_repo_path` trong `settings.yaml`, mặc định sibl
 `test_aigen_seam_config_path_missing_raises_clear_error_naming_the_path`,
 `test_aigen_seam_changing_config_changes_resolved_cwd_not_hardcoded`
 (`tests/test_pipeline.py`).
+
+### A6. TopicKey Document Store (DB chung) — bổ sung 2026-07-19, chi tiết hoá B1
+Thêm sau khi kiến trúc 2 repo chốt (`docs/ARCHITECTURE_MODULES.md`) — cùng
+khái niệm B1 bên dưới, nhưng giờ có thêm ràng buộc QUYỀN GHI vì 2 repo 2 ngôn
+ngữ cùng cần đụng dữ liệu:
+
+1 DB, mọi bản ghi neo TopicKey. **QUYỀN GHI TÁCH BẠCH**: marketing-automation
+ghi tầng 1-3 (thô, brief, `CONTENT.Output`) + kết quả infographic;
+aigen-pipeline ghi tầng video. Bên kia CHỈ ĐỌC — không bảng nào cả 2 bên cùng
+ghi (tránh race-write xuyên ngôn ngữ, không có transaction chung).
+
+⚠️ **LÀM SAU khi luồng thông** (B2 Scene Builder xong, chạy end-to-end được ít
+nhất 1 lần). Sheet HIỆN ĐANG LÀ database (Facts/Output/Gate status chỉ tồn
+tại trên Sheet) → xem cảnh báo TUYỆT ĐỐI ở B1 bên dưới, vẫn còn nguyên giá trị.
 
 ---
 

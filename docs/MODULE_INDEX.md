@@ -9,7 +9,7 @@
 
 | Cặp/nhóm dễ nhầm | Phân biệt |
 |---|---|
-| `agents/production.py` vs `media_factory/` vs `factory.py` | **production.py** = Content Factory (Milestone (a), sinh ĐẶC TẢ văn bản: bài/video-script/infographic-JSON). **media_factory/** = Production Factory (Phase 5 Gate 3, biến đặc tả thành ẢNH/VIDEO THẬT). **factory.py** = lắp ráp adapter theo `settings.yaml` (DI), không liên quan nội dung/media. |
+| `agents/production.py` vs `media_factory/` vs `factory.py` | **production.py** = Content Factory (Milestone (a), sinh ĐẶC TẢ văn bản: bài/video-script/infographic-JSON). **media_factory/** = Production Factory, **CHỈ CÒN NHÁNH ẢNH** kể từ 2026-07-19 (biến đặc tả thành ẢNH thật, nhánh VIDEO đã move sang `aigen-pipeline/src/production-spec/` — xem `docs/ARCHITECTURE_MODULES.md`). **factory.py** = lắp ráp adapter theo `settings.yaml` (DI), không liên quan nội dung/media. |
 | `agents/producers.py` vs `agents/production.py` | **producers.py** = Luồng B (offline demo/legacy, 4 agent cũ). **production.py** = Luồng A (Milestone (a), đang dùng thật). Tên gần giống hệt — dễ gõ/import nhầm. |
 | `agents/router.py` vs `agents/structure_router.py` vs `agents/route_once.py` | **router.py** = LLMRouter (bọc cost-tracking/budget, dùng ở Luồng B/Hook). **structure_router.py** = StructureRouterAgent (chọn khung viết S1-S5 + hook, Luồng A). **route_once.py** = đóng băng quyết định của structure_router (route 1 lần/chủ đề). |
 | `curation/store.py` vs `curation/file_store.py` | **store.py** = DocumentStore Protocol, in-memory (Luồng B). **file_store.py** = FileDocumentStore, persist theo ngày+retention (Luồng A thật). |
@@ -45,9 +45,14 @@
 - `src/twmkt/agents/_numeric.py` — Parser số CANONICAL (chống bịa, "AI hiểu ở Brief, CODE phán ở Guardrail").
 - `src/twmkt/agents/_jsonparse.py` — Parse JSON object từ output LLM (hardening code-fence/lời dẫn).
 
-## Production Factory (`media_factory/` — Phase 5 Gate 3, biến đặc tả thành MEDIA hoàn chỉnh)
-- `src/twmkt/media_factory/spec.py` — `ProductionSpec`/`verify_spec()`: guardrail số LẦN 2 (trước render, sau khi người có thể sửa tay Gate 2).
-- `src/twmkt/media_factory/numbers.py` — Chuẩn hoá số viết bằng chữ tiếng Việt (cho `voice_text`, TTS đọc tự nhiên).
+## Production Factory (`media_factory/` — CHỈ CÒN NHÁNH ẢNH sau tái cấu trúc 2026-07-19)
+> Nhánh VIDEO (`ProductionScene`, guardrail-2 video) đã MOVE sang
+> `aigen-pipeline/src/production-spec/` (TypeScript) — xem `docs/ARCHITECTURE_MODULES.md`.
+> `media_factory/` ở marketing-automation giờ CHỈ phục vụ renderer SVG nội bộ (ảnh),
+> không còn liên quan AIGEN.
+- `src/twmkt/media_factory/spec.py` — `ProductionSpec`(nhánh `blocks[]`)/`ProductionBlock`/`verify_spec()`: guardrail số LẦN 2 cho ẢNH (trước render, sau khi người có thể sửa tay Gate 2).
+- `src/twmkt/media_factory/numbers.py` — Parser NGƯỢC (chữ→số) dùng bởi `verify_spec()` để đối chiếu facts — KHÔNG phải bộ sinh số→chữ (bản sinh xuôi cho video nằm ở `aigen-pipeline/src/production-spec/voice/`).
+- `src/twmkt/media_factory/aigen_seam.py` — seam subprocess gọi `npm run pipeline` (AIGEN) từ Python. **Cần đánh giá lại còn cần không** sau khi toàn luồng video chuyển hẳn sang aigen-pipeline (xem `docs/VPS_MIGRATION_BACKLOG.md`) — chưa xoá, chỉ đánh dấu.
 - `src/twmkt/render/infographic.py` — Render spec Composer (JSON) → ảnh SVG thật ($0, tất định, brand kit từ `config/brand.yaml`).
 
 ## Guardrail
