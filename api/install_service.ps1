@@ -25,12 +25,16 @@ param(
 $ErrorActionPreference = "Stop"
 
 $venvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
-if (Test-Path $venvPython) {
-    $pythonExe = $venvPython
-} else {
-    Write-Warning "Không thấy venv tại $venvPython -- dùng 'python' hệ thống. Xác nhận venv đã dựng đúng trên VPS trước khi cài service thật."
-    $pythonExe = "python"
+if (-not (Test-Path $venvPython)) {
+    # KHÔNG fallback sang 'python' hệ thống -- service chạy sai bộ package
+    # (thiếu fastapi/uvicorn/python-dotenv, hoặc version lệch với venv agent-B
+    # dùng cho pytest) sẽ hỏng ÂM THẦM, khó phát hiện hơn nhiều so với dừng
+    # ngay ở đây. Bài học A5 (đường dẫn hardcode gãy khi đổi máy) áp dụng
+    # tương tự: báo lỗi RÕ, nêu đúng đường dẫn đã thử, không đoán mù.
+    Write-Error "Không thấy venv tại '$venvPython' -- KHÔNG dùng 'python' hệ thống thay thế (có thể thiếu/lệch package). Dựng venv đúng vị trí này trước khi chạy lại script."
+    exit 1
 }
+$pythonExe = $venvPython
 
 $uvicornArgs = "-m uvicorn api.main:app --host 0.0.0.0 --port $Port"
 $logDir = Join-Path $RepoRoot "logs"

@@ -150,6 +150,9 @@ Phụ thuộc A1 (endpoint) và B1 (LOG neo theo TopicKey, không theo dòng).
   phía Content Factory, KHÔNG thêm từ điển vào adapter.
 - **C5.** Quirk #1/#2 (demo placeholder lòi lên video) KHÔNG test nào bắt
   được — phải soi frame sau mỗi lần render thật.
+- **C6.** Service webhook chết giữa chừng → cờ `Execute` kẹt `RUN` vĩnh
+  viễn, user không kích hoạt lại được. Nấc 1: xử tay (xoá ô). Xử tử tế khi
+  có Document Store (có timestamp → phát hiện "RUN quá lâu" → tự giải phóng).
 
 ---
 
