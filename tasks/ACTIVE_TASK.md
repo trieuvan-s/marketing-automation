@@ -45,16 +45,24 @@ suy luận theo quy tắc chữ-cái đều ĐOÁN SAI cách đọc ticker thậ
   media_factory/".
 - `docs/VPS_MIGRATION_BACKLOG.md` — thêm mục A6 (DB chung, chi tiết hoá B1).
 
-### PHA 1 (aigen-pipeline: đo + port `ProductionScene`/guardrail-2 video) — **XONG, CHƯA MERGE**
-**SỬA 2026-07-19 cuối phiên**: ban đầu tưởng subagent làm PHA 1+3 bị mất
-(worktree rỗng, `TaskStop` báo "No task found") — điều tra lại kỹ hơn phát
-hiện subagent thực ra làm việc TRỰC TIẾP trên cây chính `aigen-pipeline`
-(không phải worktree cô lập như dự kiến) và ĐàHOÀN THÀNH thật trước khi bị
-dừng. Đã tìm thấy, kiểm tra (`npx vitest run src/production-spec` → 82/82
-pass; `npx tsc --noEmit` sạch; full suite 204/206 — 2 fail còn lại là
-`ffmpeg`/`ffprobe` ENOENT, hạn chế PC-A đã biết từ trước, không liên quan),
-commit + push lên **`feature/production-spec`** (đã push `origin`, CHƯA mở
-PR, CHƯA merge `main`).
+### PHA 1 (aigen-pipeline: đo + port `ProductionScene`/guardrail-2 video) — **XONG, ĐÃ Ở `develop`, PR draft mở**
+**CẬP NHẬT 2026-07-19 (sau khi Lead tự tay dọn nhánh)**: nhánh làm việc
+`feature/production-spec` đã được Lead **đổi tên thẳng thành `develop`**
+(local + remote, xác nhận qua `git ls-remote origin develop` khớp commit
+`2a7a2a8`). `aigen-pipeline` giờ có đúng 2 nhánh: `main` (sạch, chỉ có PR #1
+cũ) và `develop` (chứa toàn bộ PHA 1+3). Đã mở **PR draft** `develop` → `main`
+trên GitHub (GitHub tự cập nhật PR theo tên nhánh mới khi rename) — ĐỂ Ở
+TRẠNG THÁI DRAFT có chủ đích, xem lý do ở mục PHA 1.1 ngay dưới. Nhánh cũ
+`feature/adapter-productionspec` (PR #1, đã merge từ trước) đã bị xoá cả
+local lẫn remote — sạch.
+
+Trước khi tìm thấy trạng thái thật ở trên, tôi từng tưởng subagent làm PHA
+1+3 bị mất (worktree rỗng, `TaskStop` báo "No task found") — điều tra lại kỹ
+hơn phát hiện subagent thực ra làm việc TRỰC TIẾP trên cây chính
+`aigen-pipeline` (không phải worktree cô lập như dự kiến ban đầu) và ĐÃ HOÀN
+THÀNH thật trước khi bị dừng. Đã kiểm tra: `npx vitest run src/production-spec`
+→ 82/82 pass; `npx tsc --noEmit` sạch; full suite 204/206 (2 fail còn lại là
+`ffmpeg`/`ffprobe` ENOENT, hạn chế PC-A đã biết từ trước, không liên quan).
 
 **Việc PHA 1.1 (đo trước) — CHƯA có báo cáo số liệu tường minh** từ subagent
 (không rõ có thực sự đo dòng/kiểm tra "guardrail-2 tách sạch" như brief yêu
