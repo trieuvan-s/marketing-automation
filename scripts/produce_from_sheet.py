@@ -546,7 +546,9 @@ def _today() -> str:
 # =====================================================================
 _SCHEMA_HINT = {
     "article": 'title/sapo/sections[{heading,content}]/disclaimer/sources[]',
-    "video": 'title/duration_sec/scenes[{t,voiceover,on_screen_text,visual_hint}]/cta/disclaimer',
+    # CONTENT.Output video (docs/CONTENT_OUTPUT_SCHEMA.md) — CTA nằm trong
+    # payload của scene cuối (visual_kind="outro"), KHÔNG còn field "cta" rời.
+    "video": 'schema_version/title/scenes[{role,visual_kind,payload,narration}]/source/disclaimer',
 }
 
 
@@ -591,8 +593,8 @@ def draft_to_content_draft(type_: str, data: dict, brief: ProductionBrief, *,
         body = render_analysis(title, sapo, sections, disclaimer, sources, brief)
         draft = ContentDraft(fmt=ContentFormat.ARTICLE, title=title, body=body, brief_topic=brief.topic)
     else:
-        title, duration, scenes, cta, disclaimer = video_fields_from_data(data, brief)
-        body = render_video(title, duration, scenes, cta, disclaimer, brief)
+        title, scenes, disclaimer = video_fields_from_data(data, brief)
+        body = render_video(title, scenes, disclaimer, brief)
         draft = ContentDraft(fmt=ContentFormat.VIDEO_SCRIPT, title=title, body=body, brief_topic=brief.topic)
     return apply_guardrails(draft, brief.evidence, brief.background, brief.facts,
                             approx_tolerance=approx_tolerance)

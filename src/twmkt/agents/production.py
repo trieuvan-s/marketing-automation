@@ -4,7 +4,9 @@
 nên không đốt token cho chủ đề bị loại. Mỗi định dạng = 1 agent chuyên biệt, output
 JSON theo SCHEMA cố định (xem docs/production_agents_design.md):
   • AnalysisWriterAgent  — bài phân tích (LLM). Schema: title/sapo/sections/disclaimer/sources.
-  • VideoScriptAgent     — kịch bản video ~60s (LLM). Schema: title/duration_sec/scenes/cta/disclaimer.
+  • VideoScriptAgent     — kịch bản video ~60s (LLM). Schema: CONTENT.Output video
+    (schema_version/title/scenes[{role,visual_kind,payload,narration}]/source/
+    disclaimer/facts — xem docs/CONTENT_OUTPUT_SCHEMA.md, hợp đồng CHÉO REPO).
   • InfographicSpecAgent — spec JSON (TẤT ĐỊNH, $0 — theo CLAUDE.md: infographic ở
     Tầng 0/free). Số liệu đọc THẲNG từ ProductionBrief.facts[] (Phase 4.10 — trước
     đó trích thô bằng regex trên evidence, không qua LLM nên không thể bịa).
@@ -65,7 +67,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -73,11 +75,23 @@ from ._jsonparse import try_json_object
 from ._numeric import has_approx_word, parse_magnitude_token
 from ..config import load_brand, load_settings
 from ..guardrails import compliance
+from ..media_factory.spec import DEFERRED_VISUAL_KINDS, VISUAL_KINDS
 from ..models import ContentDraft, ContentFormat, Fact
 from .base import Agent, LLMClient
 from .voice import assemble_voice
 
 _FALLBACK_DISCLAIMER = "Nội dung mang tính thông tin, không phải khuyến nghị đầu tư."
+
+# CONTENT.Output (video) — hợp đồng CHÉO REPO có version, xem
+# docs/CONTENT_OUTPUT_SCHEMA.md (NGUỒN SỰ THẬT DUY NHẤT cho shape JSON dưới
+# đây). Đổi shape PHẢI bump version này + đồng bộ tài liệu ở CẢ HAI repo.
+_CONTENT_OUTPUT_SCHEMA_VERSION = 1
+
+# 9 visual_kind IN-SCOPE (10 canonical trừ "avatar" DEFERRED — chờ HeyGen, xem
+# media_factory/spec.py) — MỘT NGUỒN cho cả prompt LLM lẫn validate parse ở
+# đây, KHÔNG tự chép lại danh sách rời rạc (tránh trôi giữa 2 nơi).
+_IN_SCOPE_VISUAL_KINDS = VISUAL_KINDS - DEFERRED_VISUAL_KINDS
+_VIDEO_SCENE_ROLES = ("hook", "body", "outro")
 
 
 def _default_cta(brand: dict | None = None) -> str:
@@ -451,9 +465,20 @@ class VideoScriptAgent(Agent):
         f'Kết bằng disclaimer: PHẢI dùng ĐÚNG NGUYÊN VĂN "{_default_disclaimer()}" '
         "(KHÔNG viết lại/diễn giải/thêm bớt chữ nào — đây là câu miễn trừ trách nhiệm "
         "CHUẨN, đã duyệt). KHÔNG bịa số, KHÔNG hô hào mua.\n"
-        'Trả về DUY NHẤT JSON: {"title": str, "duration_sec": int, '
-        '"scenes": [{"t": str, "voiceover": str, "on_screen_text": str, "visual_hint": str}], '
-        '"cta": str, "disclaimer": str}.'
+        'Trả về DUY NHẤT JSON: {"schema_version": 1, "title": str, "scenes": '
+        '[{"role": "hook"|"body"|"outro", "visual_kind": "title"|"stat"|"statement"|'
+        '"list"|"comparison"|"quote"|"ticker"|"news"|"outro", "payload": object, '
+        '"narration": str}], "source": str, "disclaimer": str}. scenes[0].role="hook", '
+        'scene cuối role="outro" (payload outro gồm CTA, KHÔNG có field "cta" rời cấp top). '
+        'payload theo visual_kind: title:{"headline":str,"subheadline":str?}; '
+        'stat:{"label":str,"value":str,"note":str?}; statement:{"hero":str,"desc":str}; '
+        'list:{"title":str,"items":[{"title":str,"desc":str,"tag":str?}]}; '
+        'comparison:{"left":{"label":str,"bullets":[str],"stat":str?},'
+        '"right":{"label":str,"bullets":[str],"stat":str?}}; '
+        'quote:{"quote":str,"attribution":str?}; '
+        'ticker:{"items":[{"symbol":str,"value":str}]}; '
+        'news:{"headline":str,"source":str}; '
+        'outro:{"brand_name":str,"tagline":str?,"cta":str}.'
     )
 
     def run(self, brief: ProductionBrief, decision=None) -> ContentDraft:
@@ -471,8 +496,8 @@ class VideoScriptAgent(Agent):
         if rules:
             extra += f"\n\n---\n\nCONTENT_WRITER_RULES (bắt buộc, nguồn chuẩn):\n{rules}"
         data = try_json_object(self._ask(build_video_prompt(brief), extra_system=extra))
-        title, duration, scenes, cta, disclaimer = video_fields_from_data(data, brief)
-        body = render_video(title, duration, scenes, cta, disclaimer, brief)
+        title, scenes, disclaimer = video_fields_from_data(data, brief)
+        body = render_video(title, scenes, disclaimer, brief)
         return ContentDraft(fmt=ContentFormat.VIDEO_SCRIPT, title=title, body=body,
                             brief_topic=brief.topic)
 
@@ -487,48 +512,102 @@ def build_video_prompt(brief: ProductionBrief) -> str:
     )
 
 
+def _normalize_video_scene(sc: dict, *, role_default: str) -> dict:
+    """1 phần tử scenes[] LLM trả -> {role, visual_kind, payload, narration} đã
+    validate NHẸ (role/visual_kind lạ -> default an toàn; `payload` không phải
+    LLM cũng KHÔNG trust là dict). Validate CHI TIẾT hơn theo từng visual_kind
+    (payload đúng field) là việc của scene-builder/guardrail-2 phía
+    aigen-pipeline (xem docs/ARCHITECTURE_MODULES.md) — ở đây chỉ đảm bảo
+    SHAPE ngoài đúng để JSON hợp lệ, không đụng nội dung LLM viết."""
+    role = str(sc.get("role", "")).strip().lower()
+    if role not in _VIDEO_SCENE_ROLES:
+        role = role_default
+    visual_kind = str(sc.get("visual_kind", "")).strip().lower()
+    if visual_kind not in _IN_SCOPE_VISUAL_KINDS:
+        visual_kind = "statement"
+    payload = sc.get("payload") if isinstance(sc.get("payload"), dict) else {}
+    narration = str(sc.get("narration", "")).strip()
+    return {"role": role, "visual_kind": visual_kind, "payload": payload, "narration": narration}
+
+
+def _ensure_outro_scene(sc: dict, brief: ProductionBrief) -> dict:
+    """Ép cảnh CUỐI đúng bất biến schema (scenes[last].role == visual_kind ==
+    "outro", xem docs/CONTENT_OUTPUT_SCHEMA.md) + payload có "brand_name"/"cta"
+    (brand-driven, KHÔNG hard-code — _default_cta()/_BRAND_NAME) khi LLM/đường
+    lùi mượt bỏ sót. aigen-pipeline scene-builder DỰA VÀO bất biến này, không
+    tự lùi mượt được phía đó — PHẢI đảm bảo TẠI ĐÂY."""
+    payload = dict(sc.get("payload") or {})
+    if not str(payload.get("brand_name") or "").strip():
+        payload["brand_name"] = _BRAND_NAME
+    if not str(payload.get("cta") or "").strip():
+        payload["cta"] = _default_cta()
+    narration = str(sc.get("narration") or "").strip() or payload["cta"]
+    return {"role": "outro", "visual_kind": "outro", "payload": payload, "narration": narration}
+
+
 def video_fields_from_data(data: dict | None, brief: ProductionBrief):
+    """JSON LLM (hoặc None/rỗng) -> (title, scenes, disclaimer) khớp
+    ContentOutputVideo (docs/CONTENT_OUTPUT_SCHEMA.md) — `schema_version`/
+    `source`/`facts` KHÔNG lấy từ đây (tất định, gắn ở render_video()), cùng
+    nếp InfographicSpecAgent (source luôn domain_of(brief.url), KHÔNG tin LLM
+    tự bịa domain). `cta` (dạng cũ) KHÔNG còn ở đây — nằm trong
+    payload của scene cuối (visual_kind="outro"), xem _ensure_outro_scene."""
     if data:
         title = str(data.get("title") or brief.hook or brief.title).strip()
-        duration = int(data.get("duration_sec") or 60)
+        raw_scenes = [sc for sc in (data.get("scenes") or []) if isinstance(sc, dict)]
+        n = len(raw_scenes)
         scenes = [
-            {"t": str(sc.get("t", "")).strip(), "voiceover": str(sc.get("voiceover", "")).strip(),
-             "on_screen_text": str(sc.get("on_screen_text", "")).strip(),
-             "visual_hint": str(sc.get("visual_hint", "")).strip()}
-            for sc in (data.get("scenes") or []) if isinstance(sc, dict)
+            _normalize_video_scene(sc, role_default=("hook" if i == 0 else "outro" if i == n - 1 else "body"))
+            for i, sc in enumerate(raw_scenes)
         ]
-        cta = str(data.get("cta") or _default_cta()).strip()
         disclaimer = str(data.get("disclaimer") or _default_disclaimer()).strip()
         if scenes:
-            return title, duration, scenes, cta, disclaimer
-    # LÙI MƯỢT: kịch bản tất định 3-4 cảnh từ dữ kiện đã duyệt.
+            scenes[0]["role"] = "hook"
+            scenes[-1] = _ensure_outro_scene(scenes[-1], brief)
+            return title, scenes, disclaimer
+    # LÙI MƯỢT: kịch bản tất định 4 cảnh (>= 1 "hook" + 1 "outro") từ dữ kiện
+    # đã duyệt (KHÔNG cần Opus) — GIỮ nguyên nội dung/thứ tự ý tưởng đường cũ
+    # (hook -> tiêu đề -> bối cảnh (nếu có) -> mã liên quan -> CTA), chỉ đổi
+    # VỎ ĐỰNG sang scene có kiểu.
     title = brief.hook or brief.title
     scenes = [
-        {"t": "0-3s", "voiceover": brief.hook or brief.title, "on_screen_text": brief.title, "visual_hint": ""},
-        {"t": "3-30s", "voiceover": brief.title, "on_screen_text": "", "visual_hint": ""},
+        {"role": "hook", "visual_kind": "statement",
+         "payload": {"hero": brief.hook or brief.title, "desc": brief.title},
+         "narration": brief.hook or brief.title},
+        {"role": "body", "visual_kind": "statement",
+         "payload": {"hero": brief.title, "desc": _soft_truncate(brief.evidence, 200)},
+         "narration": brief.title},
     ]
     if brief.background:
-        scenes.append({"t": "30-45s", "voiceover": _soft_truncate(brief.background, 200),
-                       "on_screen_text": "", "visual_hint": ""})
-    scenes.append({"t": "45-55s", "voiceover": f"Hàm ý cho nhà đầu tư với {_tickers_line(brief)}.",
-                   "on_screen_text": "", "visual_hint": ""})
-    return title, 60, scenes, _default_cta(), _default_disclaimer()
+        scenes.append({"role": "body", "visual_kind": "statement",
+                       "payload": {"hero": "Bối cảnh mở rộng", "desc": _soft_truncate(brief.background, 200)},
+                       "narration": _soft_truncate(brief.background, 200)})
+    scenes.append({"role": "body", "visual_kind": "stat",
+                   "payload": {"label": "Mã liên quan", "value": _tickers_line(brief)},
+                   "narration": f"Hàm ý cho nhà đầu tư với {_tickers_line(brief)}."})
+    scenes.append(_ensure_outro_scene({}, brief))
+    return title, scenes, _default_disclaimer()
 
 
-def render_video(title, duration, scenes, cta, disclaimer, brief: ProductionBrief) -> str:
-    body = [f"HOOK: {title}", f"(~{duration}s)", ""]
-    for sc in scenes:
-        body.append(f"[{sc['t']}] {sc['voiceover']}")
-        if sc["on_screen_text"]:
-            body.append(f"  On-screen: {sc['on_screen_text']}")
-        if sc["visual_hint"]:
-            body.append(f"  Hình ảnh: {sc['visual_hint']}")
-    dom = domain_of(brief.url)
-    body += ["", f"[CTA] {cta}"]
-    if dom:
-        body.append(f"Nguồn: {dom}")
-    body += ["", disclaimer]
-    return "\n".join(body)
+def render_video(title, scenes, disclaimer, brief: ProductionBrief) -> str:
+    """Serialize ContentOutputVideo (schema_version=1, xem docs/CONTENT_OUTPUT_
+    SCHEMA.md) -> JSON string = `ContentDraft.body` mới (thay hẳn văn xuôi có
+    đánh dấu cũ `[t] voiceover / On-screen: / Hình ảnh: / [CTA] / Nguồn:`).
+    `source` TẤT ĐỊNH từ domain_of(brief.url) (giống dòng "Nguồn:" cũ, KHÔNG
+    tin LLM tự bịa domain — cùng nếp InfographicSpecAgent.infographic_spec_
+    from_data). `facts` pass-through NGUYÊN VĂN brief.facts (đã verify sẵn ở
+    Brief/agents.brief.py, KHÔNG LLM sinh lại) — nguồn cho guardrail-2 phía
+    aigen-pipeline (facts[] là hợp đồng chéo repo, xem docs/ARCHITECTURE_
+    MODULES.md)."""
+    output = {
+        "schema_version": _CONTENT_OUTPUT_SCHEMA_VERSION,
+        "title": title,
+        "scenes": scenes,
+        "source": domain_of(brief.url),
+        "disclaimer": disclaimer,
+        "facts": [asdict(f) for f in brief.facts],
+    }
+    return json.dumps(output, ensure_ascii=False, indent=2)
 
 
 # PHASE 4.10: kind ưu tiên "đáng lên hình nhất" khi chọn stat emphasis=true —

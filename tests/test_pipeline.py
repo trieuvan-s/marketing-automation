@@ -4435,22 +4435,36 @@ def test_analysis_agent_parses_llm_json_schema():
 
 
 def test_video_agent_parses_llm_json_schema():
+    """CONTENT.Output video (docs/CONTENT_OUTPUT_SCHEMA.md): scenes[{role,
+    visual_kind,payload,narration}], CTA nằm trong payload của scene cuối
+    (visual_kind="outro"), KHÔNG còn field "cta" rời cấp top."""
     from twmkt.agents.production import VideoScriptAgent, ProductionBrief
     import json as _json
 
     class JsonLLM:
         def complete(self, system, prompt, **kwargs):
             return _json.dumps({
-                "title": "HPG hook", "duration_sec": 45,
-                "scenes": [{"t": "0-3s", "voiceover": "HPG lãi tăng mạnh",
-                           "on_screen_text": "HPG +40%", "visual_hint": "biểu đồ"}],
-                "cta": "CTA riêng", "disclaimer": "Nội dung chỉ mang tính thông tin.",
+                "schema_version": 1, "title": "HPG hook",
+                "scenes": [
+                    {"role": "hook", "visual_kind": "stat",
+                     "payload": {"label": "HPG", "value": "+40%", "note": "biểu đồ"},
+                     "narration": "HPG lãi tăng mạnh"},
+                    {"role": "outro", "visual_kind": "outro",
+                     "payload": {"brand_name": "FVA Capital", "cta": "CTA riêng"},
+                     "narration": "CTA riêng"},
+                ],
+                "source": "ignored", "disclaimer": "Nội dung chỉ mang tính thông tin.",
             }, ensure_ascii=False)
 
     brief = ProductionBrief(title="HPG báo lãi", tickers=["HPG"], evidence="x")
     d = VideoScriptAgent(JsonLLM()).run(brief)
-    assert "HPG lãi tăng mạnh" in d.body and "HPG +40%" in d.body and "biểu đồ" in d.body
+    data = _json.loads(d.body)
+    assert data["schema_version"] == 1
+    assert "HPG lãi tăng mạnh" in d.body and "+40%" in d.body and "biểu đồ" in d.body
     assert "CTA riêng" in d.body
+    assert data["scenes"][0]["role"] == "hook"
+    assert data["scenes"][-1]["role"] == "outro" and data["scenes"][-1]["visual_kind"] == "outro"
+    assert data["scenes"][-1]["payload"]["cta"] == "CTA riêng"
 
 
 def test_video_agent_uses_frozen_router_decision_for_voice_lock():
@@ -4469,9 +4483,14 @@ def test_video_agent_uses_frozen_router_decision_for_voice_lock():
         def complete(self, system, prompt, **kwargs):
             self.last_system = system
             return _json.dumps({
-                "title": "t", "duration_sec": 45,
-                "scenes": [{"t": "0-3s", "voiceover": "x", "on_screen_text": "", "visual_hint": ""}],
-                "cta": "c", "disclaimer": "d",
+                "schema_version": 1, "title": "t",
+                "scenes": [
+                    {"role": "hook", "visual_kind": "statement",
+                     "payload": {"hero": "x", "desc": ""}, "narration": "x"},
+                    {"role": "outro", "visual_kind": "outro",
+                     "payload": {"brand_name": "FVA Capital", "cta": "c"}, "narration": "c"},
+                ],
+                "source": "ignored", "disclaimer": "d",
             }, ensure_ascii=False)
 
     llm = _SpyLLM()
@@ -4591,14 +4610,17 @@ def test_render_analysis_and_video_use_dynamic_cta_not_hardcoded_brand():
                            "disclaimer", [], brief)
     assert _default_cta() in body
 
-    # Video: LLM trả JSON nhưng THIẾU field "cta" -> fallback _default_cta()
-    _title, _dur, _scenes, cta, _disc = video_fields_from_data(
-        {"title": "T", "scenes": [{"t": "0-3s", "voiceover": "v"}]}, brief)
-    assert cta == _default_cta()
+    # Video: LLM trả JSON nhưng scene CUỐI THIẾU payload.cta -> fallback _default_cta()
+    # (CTA giờ nằm trong payload của scene cuối, visual_kind="outro", KHÔNG còn field
+    # "cta" rời cấp top — xem docs/CONTENT_OUTPUT_SCHEMA.md).
+    _title, _scenes, _disc = video_fields_from_data(
+        {"title": "T", "scenes": [{"role": "hook", "visual_kind": "statement",
+                                   "payload": {"hero": "v", "desc": ""}, "narration": "v"}]}, brief)
+    assert _scenes[-1]["payload"]["cta"] == _default_cta()
 
     # Video: data=None (LLM hỏng hoàn toàn) -> đường lùi mượt CŨNG dùng _default_cta()
-    _title2, _dur2, _scenes2, cta2, disc2 = video_fields_from_data(None, brief)
-    assert cta2 == _default_cta()
+    _title2, _scenes2, disc2 = video_fields_from_data(None, brief)
+    assert _scenes2[-1]["payload"]["cta"] == _default_cta()
     assert disc2 != ""   # vẫn có disclaimer hợp lệ (brand-driven), không rỗng
 
 
