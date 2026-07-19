@@ -13,6 +13,11 @@ export WEBHOOK_TOKEN=mot-chuoi-bi-mat-tuy-chon   # PowerShell: $env:WEBHOOK_TOKE
 uvicorn api.main:app --reload --port 8899
 ```
 
+Hoặc tạo file `api/.env` (tự gitignore, KHÔNG BAO GIỜ commit) với
+`WEBHOOK_TOKEN=...` — `main.py` tự nạp qua `python-dotenv`
+(`override=False`, ENV thật của process luôn thắng file, cùng nếp
+`twmkt.config._load_dotenv()`) — khỏi cần `export` tay mỗi phiên shell.
+
 Kiểm tra: `curl http://127.0.0.1:8899/health`
 
 ## Chạy test
@@ -45,7 +50,9 @@ Xem chi tiết/cảnh báo trong docstring đầu file `install_service.ps1` —
 
 ## Chống double-fire — thiết kế nấc 1
 
-Registry `set` in-memory + `threading.Lock`, đơn tiến trình. **Hạn chế đã biết**: mất trạng thái khi service restart (1 request đang chạy lúc restart sẽ "quên", request trùng sau đó không bị chặn). Chấp nhận được ở nấc 1 vì restart không thường xuyên — `store/document_store.py` (viết cùng lượt với module này) là ứng viên thay thế bằng trạng thái bền khi ráp thật, nhưng **CHƯA nối** — 2 module độc lập nhau ở nấc này.
+Registry `set` in-memory + `threading.Lock`, đơn tiến trình. **Hạn chế đã biết**: mất trạng thái khi service restart (1 request đang chạy lúc restart sẽ "quên", request trùng sau đó không bị chặn).
+
+**[ĐÃ CHỐT — Lead quyết định 2026-07-19, xem RÁP SAU #4]**: registry này là lưới nhanh CỤC BỘ, KHÔNG phải nguồn sự thật cho double-fire — nguồn sự thật là cờ `Execute` trên Sheet (đã tồn tại). `store/document_store.py` (viết cùng lượt với module này) **KHÔNG** phải "ứng viên thay thế" registry (Lead đã bác bỏ xây trạng thái bền thứ hai — 2 nguồn sự thật cho cùng 1 trạng thái là cấm) — 2 module hoàn toàn độc lập ở nấc này, sẽ tiếp tục độc lập kể cả sau khi ráp.
 
 ## Đã kiểm thật (smoke test, không phải mock) — 2026-07-19
 
@@ -93,5 +100,5 @@ verify end-to-end trên máy nào cả**, chỉ verify logic path bằng đọc 
 2. **`api/main.py::report_result()`** — hiện chỉ log, không ghi Sheet thật. Phải nối vào cơ chế ghi cột Execute (nghi vấn `sheets_board.py::set_execute_values`, **chưa xác nhận tên hàm/chữ ký thật**).
 3. **Đăng ký endpoint với Apps Script** — chưa viết phía Apps Script (nút "Thực Thi" hiện chưa gọi HTTP đi đâu cả), và chưa có tunnel (ngrok/Cloudflare Tunnel/reverse proxy) để endpoint này ra được internet từ VPS.
 4. **[ĐÃ CHỐT — Lead quyết định 2026-07-19]** KHÔNG xây trạng thái bền thứ hai cho double-fire. Lý do: idempotency bền vững ĐÃ tồn tại — cờ `Execute` trên Sheet (`empty→RUN→DONE/FAILED/NEEDS_HUMAN`). Hai cơ chế bền cho cùng một trạng thái = hai nguồn sự thật, cấm. **HỆ QUẢ BẮT BUỘC khi ráp**: `webhook_execute()` phải ĐỌC cờ `Execute` trên Sheet TRƯỚC khi nhận việc — thấy `RUN` → trả 409 giống như đang trùng registry. Registry in-memory hiện tại CHỈ là lưới nhanh cục bộ (đỡ 1 round-trip đọc Sheet cho ca double-click sát nhau trong cùng tiến trình), KHÔNG phải nguồn sự thật — cờ Sheet mới là nguồn sự thật.
-   ⚠️ **Rủi ro đã ghi nhận, KHÔNG xử ở nấc này**: service chết giữa chừng lúc đang xử lý → cờ `Execute` kẹt ở `RUN` vĩnh viễn (không ai đặt lại `DONE`/`FAILED`). Nấc 1 xử tay (người vận hành tự xoá ô về rỗng). Xử tử tế hơn khi có Document Store (`store/`) theo dõi tiến trình bền hơn cờ Sheet đơn thuần. **Cần thêm mục C6 vào `docs/VPS_MIGRATION_BACKLOG.md`** — CHƯA làm được trong task này vì nằm ngoài phạm vi `api/`/`store/`/`apps_script/` đã chốt, Lead/phiên sau tự thêm.
+   ⚠️ **Rủi ro đã ghi nhận, KHÔNG xử ở nấc này**: service chết giữa chừng lúc đang xử lý → cờ `Execute` kẹt ở `RUN` vĩnh viễn (không ai đặt lại `DONE`/`FAILED`). Nấc 1 xử tay (người vận hành tự xoá ô về rỗng). Xử tử tế hơn khi có Document Store (`store/`) theo dõi tiến trình bền hơn cờ Sheet đơn thuần — **[ĐÃ GHI — mục C6 trong `docs/VPS_MIGRATION_BACKLOG.md`, thêm 2026-07-19]**, không còn là việc tồn đọng.
 5. **`requirements-webhook.txt` riêng** — cần hợp nhất vào `requirements.txt` gốc (hoặc giữ tách nếu muốn webhook là optional dependency) khi ráp.

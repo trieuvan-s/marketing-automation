@@ -114,6 +114,45 @@ ghi (tránh race-write xuyên ngôn ngữ, không có transaction chung).
 nhất 1 lần). Sheet HIỆN ĐANG LÀ database (Facts/Output/Gate status chỉ tồn
 tại trên Sheet) → xem cảnh báo TUYỆT ĐỐI ở B1 bên dưới, vẫn còn nguyên giá trị.
 
+### A7. Document Store — schema ĐÃ XÁC THỰC bằng DỮ LIỆU THẬT (cập nhật A6)
+Bổ sung 2026-07-19, nhánh `feature/webhook-store` (chưa merge `develop`).
+
+Đã có: `store/schema.sql` + `store/document_store.py`
+(write_document/read_latest/read_history/list_topics) +
+`store/backfill_from_sheet.py` (script CHỈ ĐỌC Sheet, `--dry-run`/`--write`
+vào DB TẠM — KHÔNG đụng store thật, KHÔNG ghi Sheet). Chạy dry-run + write
+thật trên Sheet production (9 dòng CONTEXT + 9 dòng CONTENT), phát hiện và
+SỬA 3 bug:
+- **BUG 1**: khoá UNIQUE thiếu `content_type` — 1 topic_key có 3
+  content_type (article/infographic/video) trong layer `content_output` bị
+  coi là 3 version NỐI TIẾP của CÙNG 1 tài liệu, "chôn" mất 2/3 khi đọc lại.
+  Sửa: thêm cột `content_type` vào `UNIQUE(topic_key, layer, content_type,
+  version)`; `read_latest()`/`read_history()` giờ BẮT BUỘC tham số
+  `content_type`.
+- **BUG 2**: `ContentFormat.VIDEO_SCRIPT="video_script"` không khớp Sheet
+  thật (Sheet ghi `"video"`). Sửa ENUM theo Sheet (Sheet là nguồn sự thật ở
+  giai đoạn backfill) — xem C7 bên dưới về 1 chỗ CHƯA sửa được.
+- **BUG 3** (làm rõ, không phải bug code): layer `infographic`/`video` = 0
+  bản ghi vì cột `AssetPath` RỖNG ở CẢ 9/9 dòng CONTENT thật (kể cả 3 dòng
+  Type=infographic) — Production Factory (`render_production_assets.py`)
+  chưa từng render cho các dòng này, KHÔNG phải lỗi đọc thiếu cột.
+
+Kết quả xác minh: 27/27 bản ghi (raw+brief+content_output) ghi thành công
+vào DB tạm; 3/3 topic_key đa content_type đọc lại ĐỘC LẬP, đúng, không cái
+nào chôn. 42/42 test xanh.
+
+⚠️ **CHƯA làm** (đúng phạm vi "viết sẵn chờ ráp", không tạo thêm diff chờ
+ráp lúc chưa cần — xem A6 "LÀM SAU khi luồng thông"):
+- Dual-write thật vào `store/document_store.db` thật (chỉ mới có DB TẠM
+  dùng để test schema).
+- Nối `backfill_from_sheet.py`/`document_store.py` vào
+  `scripts/produce_from_sheet.py` hay pipeline thật.
+- Quyết định 7 cột CONTEXT + 8 cột CONTENT không map vào layer nào (toàn bộ
+  là cột trạng thái vận hành: Duyệt Context/Execute/Approve(gate 2)/Gate3/
+  Posting Status/Notes/Timestamp/Hot%/Score/Group) — có cần 1 nơi neo khác
+  ngoài Sheet không, hay cố ý để Sheet giữ trạng thái vận hành mãi mãi
+  (đúng kiến trúc A6 "Sheet chỉ là UI/view") — CẦN LEAD XÁC NHẬN.
+
 ---
 
 ## B. MODULE LỚN — sau khi A xong
@@ -169,6 +208,18 @@ Phụ thuộc A1 (endpoint) và B1 (LOG neo theo TopicKey, không theo dòng).
   chừng → cờ `Execute` kẹt `RUN` vĩnh viễn, user không kích hoạt lại được.
   Nấc 1: xử tay (xoá ô). Xử tử tế khi có Document Store (có timestamp → phát
   hiện "RUN quá lâu" → tự giải phóng).
+- **C9.** [nhánh `feature/webhook-store`, đánh số lại từ C7 trùng khi rebase
+  lên develop 2026-07-21 — nội dung KHÔNG đổi. KHOẢNG TRỐNG GIỮA 2 AGENT —
+  đọc trước khi merge] `scripts/produce_from_sheet.py` VẪN còn dùng chuỗi
+  `"video_script"` cũ (xác nhận qua `grep -n "video_script"
+  scripts/produce_from_sheet.py`) — KHÔNG khớp `ContentFormat.VIDEO_SCRIPT`
+  đã sửa thành `"video"` ở `models.py`/`sheets_board.py` (xem A7, BUG 2).
+  **CỐ Ý KHÔNG SỬA** trong lúc viết dòng này vì file đó đang là vùng agent-B
+  sửa dở (diff lớn chưa commit trên `develop`) — sửa lúc đó rủi ro đụng
+  độ/mất việc của agent-B. Đây KHÔNG phải lỗi của agent-B (họ không biết bug
+  enum này tồn tại khi bắt đầu sửa file) — **người merge/rebase SAU CÙNG (khi
+  cả 2 agent xong) phải chủ động rà lại `scripts/produce_from_sheet.py` tìm
+  `"video_script"` còn sót**, đừng để mỗi bên tưởng bên kia đã sửa.
 
 ---
 
