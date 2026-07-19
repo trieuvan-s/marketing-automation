@@ -35,3 +35,8 @@ reports/*
 !reports/TEST_RESULT.md
 !reports/phase2_verify/
 !reports/phase2_verify/**
+
+# Kiểm tra hồi quy PHA 2 (chuẩn hoá Composer video) — bằng chứng cho Lead
+# duyệt, PHẢI ở trong git (không phải report tạm dùng-rồi-bỏ)
+!reports/regression_video_prompt/
+!reports/regression_video_prompt/**
