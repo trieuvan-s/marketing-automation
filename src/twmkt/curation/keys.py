@@ -20,7 +20,7 @@ Phát hiện quan trọng (Phase 0, LỊCH SỬ — đã sửa ở Sheet UI clea
 band_content()`) từng dùng Sheets API `mergeCells` (MERGE_COLUMNS) cho cột
 Context — API này XOÁ THẬT giá trị mọi ô bị merge trừ ô đầu tiên (không chỉ ẩn
 hiển thị). Hệ quả: sau 1 lần merge, `existing_content_keys()` (so khớp theo
-Context text) không còn thấy được các dòng video_script/infographic đã merge
+Context text) không còn thấy được các dòng video/infographic đã merge
 -> mất idempotency, chính là cơ chế "content mồ côi". TopicKey PHẢI là cột
 RIÊNG, không bao giờ bị mergeCells đụng tới — dữ liệu ghi MỚI từ Phase 1 không
 còn dùng mergeCells nữa nên không còn phát sinh ca này, nhưng TopicKey vẫn là

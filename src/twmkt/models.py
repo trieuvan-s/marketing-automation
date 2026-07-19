@@ -30,7 +30,12 @@ class SourceType(str, Enum):
 class ContentFormat(str, Enum):
     ARTICLE = "article"
     INFOGRAPHIC = "infographic"   # sinh ra SPEC (JSON), không phải ảnh
-    VIDEO_SCRIPT = "video_script"
+    # SỬA 2026-07-19 (BUG 2, phát hiện qua store/backfill_from_sheet.py --dry-run
+    # trên Sheet thật): giá trị CŨ "video_script" KHÔNG khớp dữ liệu Type thật
+    # trên CONTENT (Sheet ghi "video", xác nhận qua đọc trực tiếp 9 dòng CONTENT
+    # production) -- Sheet là nguồn sự thật ở giai đoạn backfill, sửa ENUM theo
+    # Sheet, KHÔNG sửa Sheet.
+    VIDEO_SCRIPT = "video"
     NEWSLETTER = "newsletter"
 
 

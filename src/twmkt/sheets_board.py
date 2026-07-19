@@ -621,7 +621,9 @@ def facts_from_json(raw: str) -> list:
     return out
 
 
-_FULL_TYPES = frozenset({"article", "video_script", "infographic"})
+# SỬA 2026-07-19 (BUG 2, xem models.py::ContentFormat.VIDEO_SCRIPT) --
+# "video_script" -> "video", khớp giá trị Type thật trên Sheet.
+_FULL_TYPES = frozenset({"article", "video", "infographic"})
 
 
 def group_content_rows(header: list[str], rows: list[list[str]]) -> dict[str, list[list[str]]]:
