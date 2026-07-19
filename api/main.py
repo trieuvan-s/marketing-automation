@@ -9,6 +9,12 @@ scripts/produce_from_sheet.py hay module pipeline thật (xem
 pipeline_bridge.py), KHÔNG ghi Sheet thật (report_result() là stub).
 
 Chạy dev: uvicorn api.main:app --reload --port 8899
+
+`WEBHOOK_TOKEN` tự nạp từ `api/.env` (nếu file tồn tại, qua `python-dotenv`)
+-- KHÔNG override biến môi trường ĐÃ set sẵn (`override=False`, cùng nếp
+`twmkt.config._load_dotenv()` bên marketing-automation: ENV thật của
+process/CI luôn thắng file). `api/.env` PHẢI gitignore (đã khớp pattern
+`.env` sẵn có trong `.gitignore` gốc) -- KHÔNG BAO GIỜ commit file đó.
 """
 from __future__ import annotations
 
@@ -17,11 +23,15 @@ import os
 import secrets
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from pydantic import BaseModel
 
 from api.pipeline_bridge import run_pipeline
+
+load_dotenv(Path(__file__).parent / ".env", override=False)
 
 logger = logging.getLogger("webhook.main")
 
