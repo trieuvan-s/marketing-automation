@@ -164,6 +164,11 @@ Phụ thuộc A1 (endpoint) và B1 (LOG neo theo TopicKey, không theo dòng).
 - **C7.** [2026-07-20] Outro `primary_url` = link FB profile thô 67 ký tự
   (`BRAND_PRIMARY_URL` trong `aigen production-spec/index.ts`) wrap 2 dòng
   uppercase, xấu. Cân nhắc link rút gọn cho kênh (đã ghi từ HANDOFF, chưa làm).
+- **C8.** [nhánh `feature/webhook-store`, đánh số lại từ C6 trùng khi rebase
+  lên develop 2026-07-21 — nội dung KHÔNG đổi] Service webhook chết giữa
+  chừng → cờ `Execute` kẹt `RUN` vĩnh viễn, user không kích hoạt lại được.
+  Nấc 1: xử tay (xoá ô). Xử tử tế khi có Document Store (có timestamp → phát
+  hiện "RUN quá lâu" → tự giải phóng).
 
 ---
 

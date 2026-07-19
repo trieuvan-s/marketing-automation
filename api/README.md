@@ -75,13 +75,17 @@ hiện trong stdout uvicorn — logger tuỳ biến chưa có handler/level cấ
 chỉ log request (uvicorn tự log) mới hiện. Không ảnh hưởng hành vi (409 vẫn
 đúng), nhưng đáng sửa khi ráp thật để dễ debug production.
 
-`install_service.ps1` — chưa chạy thật (máy này không có NSSM để cài đầy
-đủ), nhưng đã xác nhận riêng phần đường dẫn: `.venv/Scripts/python.exe`
-KHÔNG tồn tại trên máy này -> script tự fallback đúng thiết kế sang
-`python` hệ thống; `python` hệ thống resolve đúng
-(`C:\Users\PC\AppData\Local\Programs\Python\Python312\python.exe`);
-`python -m uvicorn api.main:app` chạy được thật (đã chứng minh ở smoke test
-trên) -- không cần sửa đường dẫn nào trong script cho máy này.
+`install_service.ps1` — **CHƯA chạy thật** (máy PC-A này không có NSSM để
+cài đầy đủ, và cũng KHÔNG có venv tại `.venv\Scripts\python.exe` — venv
+thật nằm trên VPS của agent-B, dùng để chạy pytest ở đó). **SỬA 2026-07-19**:
+bỏ hẳn cơ chế fallback sang `python` hệ thống khi không thấy venv (rủi ro
+hỏng ÂM THẦM nếu service chạy sai bộ package/version) — giờ KHÔNG thấy venv
+tại đúng đường dẫn `<repo>\.venv\Scripts\python.exe` → script `Write-Error`
++ `exit 1` ngay, nêu rõ đường dẫn đã thử, không đoán mù (cùng nguyên tắc bài
+học A5). Đã xác nhận `python -m uvicorn api.main:app` tự nó chạy được thật
+(smoke test ở trên, dùng Python hệ thống trực tiếp không qua script này) —
+nhưng **bản thân `install_service.ps1` với venv + NSSM thật vẫn CHƯA được
+verify end-to-end trên máy nào cả**, chỉ verify logic path bằng đọc code.
 
 ## RÁP SAU (bắt buộc đọc trước khi coi webhook "xong")
 
