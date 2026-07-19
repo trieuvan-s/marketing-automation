@@ -6,7 +6,11 @@ thao tác) -- ":memory:" của sqlite3 tạo 1 DB RIÊNG BIỆT cho MỖI connec
 write_document() và read_latest() thấy 2 DB rỗng khác nhau, không round-trip
 được. tmp_path (file thật trên đĩa tạm, pytest tự dọn) đạt đúng tinh thần
 "cô lập, nhanh, không đụng DB thật" mà "in-memory" hướng tới, chỉ khác cơ
-chế lưu trữ vật lý."""
+chế lưu trữ vật lý.
+
+`content_type` (BUG 1, 2026-07-19): read_latest()/read_history() giờ BẮT
+BUỘC tham số content_type -- test dưới truyền "" cho layer không có đa loại
+(raw/brief/infographic/video), giá trị thật cho content_output."""
 import sqlite3
 
 import pytest
@@ -24,14 +28,14 @@ def db_path(tmp_path):
 def test_write_and_read_latest_round_trip(db_path):
     v = ds.write_document("topic-1", "raw", {"a": 1}, "ma", db_path=db_path)
     assert v == 1
-    assert ds.read_latest("topic-1", "raw", db_path=db_path) == {"a": 1}
+    assert ds.read_latest("topic-1", "raw", "", db_path=db_path) == {"a": 1}
 
 
 def test_version_auto_increments_per_topic_and_layer(db_path):
     ds.write_document("topic-1", "brief", {"n": 1}, "ma", db_path=db_path)
     v2 = ds.write_document("topic-1", "brief", {"n": 2}, "ma", db_path=db_path)
     assert v2 == 2
-    assert ds.read_latest("topic-1", "brief", db_path=db_path) == {"n": 2}
+    assert ds.read_latest("topic-1", "brief", "", db_path=db_path) == {"n": 2}
     # layer khác -> version đếm riêng, không lẫn
     v_other_layer = ds.write_document("topic-1", "raw", {"m": 1}, "ma", db_path=db_path)
     assert v_other_layer == 1
@@ -42,15 +46,15 @@ def test_unique_constraint_blocks_duplicate_version_insert(db_path):
     with sqlite3.connect(str(db_path)) as conn:
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
-                "INSERT INTO documents (topic_key, layer, version, payload_json, created_at, written_by) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                ("topic-1", "raw", 1, "{}", "2026-01-01T00:00:00+00:00", "ma"),
+                "INSERT INTO documents (topic_key, layer, content_type, version, payload_json, created_at, written_by) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("topic-1", "raw", "", 1, "{}", "2026-01-01T00:00:00+00:00", "ma"),
             )
 
 
 def test_check_constraint_blocks_aigen_writing_content_output(db_path):
     with pytest.raises(sqlite3.IntegrityError):
-        ds.write_document("topic-1", "content_output", {}, "aigen", db_path=db_path)
+        ds.write_document("topic-1", "content_output", {}, "aigen", content_type="article", db_path=db_path)
 
 
 def test_check_constraint_blocks_ma_writing_video(db_path):
@@ -64,16 +68,20 @@ def test_check_constraint_allows_aigen_writing_video(db_path):
 
 
 def test_check_constraint_allows_ma_writing_all_four_non_video_layers(db_path):
-    for layer in ("raw", "brief", "content_output", "infographic"):
+    for layer in ("raw", "brief", "infographic"):
         v = ds.write_document("topic-1", layer, {"layer": layer}, "ma", db_path=db_path)
         assert v == 1
+    v_content_output = ds.write_document(
+        "topic-1", "content_output", {"layer": "content_output"}, "ma", content_type="article", db_path=db_path
+    )
+    assert v_content_output == 1
 
 
 def test_read_history_returns_all_versions_in_ascending_order(db_path):
     ds.write_document("topic-1", "raw", {"n": 1}, "ma", db_path=db_path)
     ds.write_document("topic-1", "raw", {"n": 2}, "ma", db_path=db_path)
     ds.write_document("topic-1", "raw", {"n": 3}, "ma", db_path=db_path)
-    hist = ds.read_history("topic-1", "raw", db_path=db_path)
+    hist = ds.read_history("topic-1", "raw", "", db_path=db_path)
     assert [v for v, _, _ in hist] == [1, 2, 3]
     assert [p for _, p, _ in hist] == [{"n": 1}, {"n": 2}, {"n": 3}]
     # created_at phải là chuỗi ISO khác rỗng
@@ -81,11 +89,11 @@ def test_read_history_returns_all_versions_in_ascending_order(db_path):
 
 
 def test_read_latest_returns_none_when_no_document_written(db_path):
-    assert ds.read_latest("khong-ton-tai", "raw", db_path=db_path) is None
+    assert ds.read_latest("khong-ton-tai", "raw", "", db_path=db_path) is None
 
 
 def test_read_history_returns_empty_list_when_no_document_written(db_path):
-    assert ds.read_history("khong-ton-tai", "raw", db_path=db_path) == []
+    assert ds.read_history("khong-ton-tai", "raw", "", db_path=db_path) == []
 
 
 def test_list_topics_filters_by_layer(db_path):
@@ -120,4 +128,57 @@ def test_payload_not_json_serializable_raises_type_error(db_path):
 def test_init_db_is_idempotent(db_path):
     ds.init_db(db_path)  # gọi lại lần 2, không được raise
     ds.write_document("t1", "raw", {"ok": True}, "ma", db_path=db_path)
-    assert ds.read_latest("t1", "raw", db_path=db_path) == {"ok": True}
+    assert ds.read_latest("t1", "raw", "", db_path=db_path) == {"ok": True}
+
+
+# --- BUG 1 (2026-07-19): content_type trong khoá UNIQUE ---------------------
+
+def test_content_output_requires_content_type_raises_value_error(db_path):
+    with pytest.raises(ValueError):
+        ds.write_document("t1", "content_output", {"x": 1}, "ma", db_path=db_path)  # thiếu content_type
+
+
+def test_multiple_content_types_same_topic_key_all_readable_independently(db_path):
+    """Đúng ca thật tìm thấy trên Sheet: 1 topic_key có 3 content_type
+    (article/infographic/video) trong layer content_output -- BUG 1 cũ sẽ
+    khiến 2 trong 3 bị "chôn". Sau khi sửa: cả 3 đọc lại độc lập, không cái
+    nào bị mất."""
+    ds.write_document("t1", "content_output", {"body": "bai viet"}, "ma", content_type="article", db_path=db_path)
+    ds.write_document("t1", "content_output", {"spec": "infographic spec"}, "ma", content_type="infographic", db_path=db_path)
+    ds.write_document("t1", "content_output", {"scenes": []}, "ma", content_type="video", db_path=db_path)
+
+    assert ds.read_latest("t1", "content_output", "article", db_path=db_path) == {"body": "bai viet"}
+    assert ds.read_latest("t1", "content_output", "infographic", db_path=db_path) == {"spec": "infographic spec"}
+    assert ds.read_latest("t1", "content_output", "video", db_path=db_path) == {"scenes": []}
+
+
+def test_version_counter_independent_per_content_type(db_path):
+    """version của 'article' và 'video' đếm RIÊNG -- không lẫn số dù cùng
+    topic_key+layer (đây chính xác là điều BUG 1 làm SAI trước khi sửa)."""
+    v1 = ds.write_document("t1", "content_output", {"n": 1}, "ma", content_type="article", db_path=db_path)
+    v2 = ds.write_document("t1", "content_output", {"n": 2}, "ma", content_type="article", db_path=db_path)
+    v_video = ds.write_document("t1", "content_output", {"n": 1}, "ma", content_type="video", db_path=db_path)
+    assert (v1, v2, v_video) == (1, 2, 1)
+    hist_article = ds.read_history("t1", "content_output", "article", db_path=db_path)
+    assert [v for v, _, _ in hist_article] == [1, 2]
+    hist_video = ds.read_history("t1", "content_output", "video", db_path=db_path)
+    assert [v for v, _, _ in hist_video] == [1]
+
+
+def test_unique_constraint_now_includes_content_type(db_path):
+    """Cùng topic_key+layer+version nhưng KHÁC content_type -- PHẢI được
+    phép (đây chính là điều BUG 1 sửa: trước kia UNIQUE(topic_key,layer,
+    version) sẽ chặn nhầm ca này)."""
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO documents (topic_key, layer, content_type, version, payload_json, created_at, written_by) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("t1", "content_output", "article", 1, "{}", "2026-01-01T00:00:00+00:00", "ma"),
+        )
+        # KHÔNG raise -- content_type khác, version=1 trùng nhưng khoá đủ khác
+        conn.execute(
+            "INSERT INTO documents (topic_key, layer, content_type, version, payload_json, created_at, written_by) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("t1", "content_output", "video", 1, "{}", "2026-01-01T00:00:00+00:00", "ma"),
+        )
+        conn.commit()

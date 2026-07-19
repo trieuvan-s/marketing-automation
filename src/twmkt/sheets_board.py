@@ -621,8 +621,8 @@ def facts_from_json(raw: str) -> list:
     return out
 
 
-# C7 (2026-07-20): "video_script" -> "video", khớp giá trị Type thật trên Sheet
-# (xem models.py::ContentFormat.VIDEO_SCRIPT).
+# SỬA 2026-07-19/20 (BUG 2, xem models.py::ContentFormat.VIDEO_SCRIPT) --
+# "video_script" -> "video", khớp giá trị Type thật trên Sheet.
 _FULL_TYPES = frozenset({"article", "video", "infographic"})
 
 

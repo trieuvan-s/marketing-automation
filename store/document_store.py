@@ -70,10 +70,24 @@ def write_document(
     payload: dict,
     written_by: str,
     *,
+    content_type: str = "",
     db_path: str | Path | None = None,
 ) -> int:
     """Ghi 1 bản MỚI (APPEND-ONLY, không ghi đè) -> trả version vừa ghi
-    (bắt đầu từ 1, tự tăng theo `topic_key`+`layer`).
+    (bắt đầu từ 1, tự tăng theo `topic_key`+`layer`+`content_type`).
+
+    `content_type` (BUG 1, phát hiện qua backfill --dry-run trên Sheet thật
+    2026-07-19): 1 topic_key có thể có NHIỀU content_type trong layer
+    'content_output' (vd article/infographic/video CÙNG 1 chủ đề, xác nhận
+    thật trên Sheet -- KHÔNG phải giả thuyết). Bỏ qua tham số này (mặc định
+    "") -> mọi content_type cùng topic_key+layer bị coi là version của CÙNG
+    1 tài liệu, "chôn" mất các content_type khác khi đọc lại. BẮT BUỘC
+    truyền `content_type` thật (khớp CONTENT.Type trên Sheet -- xem BUG 2:
+    "article"/"infographic"/"video", ĐÃ xác nhận đối chiếu ký tự-với-ký tự
+    với dữ liệu thật) khi `layer="content_output"` -- raise `ValueError`
+    SỚM nếu thiếu, không âm thầm nhận "" rồi gây bug y hệt BUG 1 lần nữa.
+    Layer khác (raw/brief/infographic/video) không có đa loại -- để mặc
+    định "" là đúng, không cần truyền.
 
     `payload` PHẢI JSON-serializable -- lỗi serialize raise `TypeError` từ
     `json.dumps()`, không tự bắt/nuốt ở đây. `layer`/`written_by` sai giá
@@ -84,56 +98,72 @@ def write_document(
     (schema là nguồn sự thật DUY NHẤT cho quyền ghi, tránh 2 nơi có thể
     lệch nhau).
 
-    Race hiếm (2 tiến trình ghi CÙNG topic_key+layer cùng lúc, cả 2 cùng
-    tính ra 1 version): UNIQUE(topic_key, layer, version) trong schema.sql
-    là lưới an toàn cuối -- 1 trong 2 sẽ nhận `sqlite3.IntegrityError` thay
-    vì âm thầm ghi đè, đúng tinh thần append-only. Ở nấc này (VPS 1 nguồn
-    ghi/layer theo thiết kế A6) race này không nên xảy ra trong vận hành
-    bình thường."""
+    Race hiếm (2 tiến trình ghi CÙNG topic_key+layer+content_type cùng lúc,
+    cả 2 cùng tính ra 1 version): UNIQUE(topic_key, layer, content_type,
+    version) trong schema.sql là lưới an toàn cuối -- 1 trong 2 sẽ nhận
+    `sqlite3.IntegrityError` thay vì âm thầm ghi đè, đúng tinh thần
+    append-only. Ở nấc này (VPS 1 nguồn ghi/layer theo thiết kế A6) race
+    này không nên xảy ra trong vận hành bình thường."""
     if layer not in _VALID_LAYERS:
         raise ValueError(f"layer không hợp lệ: {layer!r} (phải trong {sorted(_VALID_LAYERS)})")
     if written_by not in _VALID_WRITERS:
         raise ValueError(f"written_by không hợp lệ: {written_by!r} (phải trong {sorted(_VALID_WRITERS)})")
+    if layer == "content_output" and not content_type:
+        raise ValueError(
+            "layer='content_output' BẮT BUỘC content_type (vd 'article'/'infographic'/'video') "
+            "-- 1 topic_key có thể có nhiều content_type, thiếu tham số này sẽ tái diễn BUG 1 "
+            "(content_type khác nhau bị coi là version của cùng 1 tài liệu, chôn mất nhau)."
+        )
 
     payload_json = json.dumps(payload, ensure_ascii=False)
     created_at = datetime.now(timezone.utc).isoformat()
 
     with _connect(db_path) as conn:
         cur = conn.execute(
-            "SELECT COALESCE(MAX(version), 0) FROM documents WHERE topic_key = ? AND layer = ?",
-            (topic_key, layer),
+            "SELECT COALESCE(MAX(version), 0) FROM documents "
+            "WHERE topic_key = ? AND layer = ? AND content_type = ?",
+            (topic_key, layer, content_type),
         )
         next_version = cur.fetchone()[0] + 1
         conn.execute(
-            "INSERT INTO documents (topic_key, layer, version, payload_json, created_at, written_by) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (topic_key, layer, next_version, payload_json, created_at, written_by),
+            "INSERT INTO documents (topic_key, layer, content_type, version, payload_json, created_at, written_by) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (topic_key, layer, content_type, next_version, payload_json, created_at, written_by),
         )
         conn.commit()
         return next_version
 
 
-def read_latest(topic_key: str, layer: str, *, db_path: str | Path | None = None) -> dict | None:
-    """Bản MỚI NHẤT (version cao nhất) -- `None` nếu chưa từng ghi."""
+def read_latest(
+    topic_key: str, layer: str, content_type: str, *, db_path: str | Path | None = None
+) -> dict | None:
+    """Bản MỚI NHẤT (version cao nhất) của ĐÚNG `content_type` -- `None`
+    nếu chưa từng ghi. `content_type` BẮT BUỘC (không mặc định) kể từ BUG 1
+    -- truyền `""` cho layer không có đa loại (raw/brief/infographic/video),
+    truyền giá trị thật ('article'/'infographic'/'video') cho
+    layer='content_output'. Không có tham số này thì không có cách nào phân
+    biệt "muốn đọc bản nào trong số nhiều content_type cùng topic_key"."""
     with _connect(db_path) as conn:
         row = conn.execute(
-            "SELECT payload_json FROM documents WHERE topic_key = ? AND layer = ? "
+            "SELECT payload_json FROM documents "
+            "WHERE topic_key = ? AND layer = ? AND content_type = ? "
             "ORDER BY version DESC LIMIT 1",
-            (topic_key, layer),
+            (topic_key, layer, content_type),
         ).fetchone()
     return json.loads(row["payload_json"]) if row else None
 
 
 def read_history(
-    topic_key: str, layer: str, *, db_path: str | Path | None = None
+    topic_key: str, layer: str, content_type: str, *, db_path: str | Path | None = None
 ) -> list[tuple[int, dict, str]]:
-    """Toàn bộ lịch sử (version, payload, created_at), sắp XUÔI theo version
-    (1, 2, 3, ...) -- danh sách rỗng nếu chưa từng ghi (KHÔNG raise)."""
+    """Toàn bộ lịch sử (version, payload, created_at) của ĐÚNG `content_type`,
+    sắp XUÔI theo version (1, 2, 3, ...) -- danh sách rỗng nếu chưa từng ghi
+    (KHÔNG raise). `content_type` BẮT BUỘC, cùng lý do `read_latest()`."""
     with _connect(db_path) as conn:
         rows = conn.execute(
             "SELECT version, payload_json, created_at FROM documents "
-            "WHERE topic_key = ? AND layer = ? ORDER BY version ASC",
-            (topic_key, layer),
+            "WHERE topic_key = ? AND layer = ? AND content_type = ? ORDER BY version ASC",
+            (topic_key, layer, content_type),
         ).fetchall()
     return [(r["version"], json.loads(r["payload_json"]), r["created_at"]) for r in rows]
 

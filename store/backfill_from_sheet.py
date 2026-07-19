@@ -166,23 +166,18 @@ def print_report(report: dict) -> None:
     print(f"  {len(dup)} topic_key trùng" + (f": {dup[:10]}{'...' if len(dup) > 10 else ''}" if dup else ""))
 
     print()
-    print("=== PHÁT HIỆN QUAN TRỌNG NHẤT: nhiều Type cùng 1 TopicKey trong CONTENT ===")
+    print("=== [ĐÃ SỬA — BUG 1, 2026-07-19] Nhiều Type cùng 1 TopicKey trong CONTENT ===")
     multi = {tk: types for tk, types in report["content_topic_key_types"].items() if len(types) > 1}
     print(f"  {len(multi)}/{len(report['content_topic_key_types'])} topic_key có >1 Type"
-          f" (vd article + video_script + infographic CÙNG 1 chủ đề)")
+          f" (vd article + video + infographic CÙNG 1 chủ đề)")
     if multi:
         sample_tk = next(iter(multi))
         print(f"  Ví dụ: {sample_tk!r} -> {sorted(multi[sample_tk])}")
-    print("  -> Schema store hiện tại (topic_key, layer, version) KHÔNG có sub-key"
-          " cho 'Type' -- nếu ghi cả 3 Type vào CÙNG layer 'content_output' cho"
-          " CÙNG topic_key, chúng sẽ bị coi là 3 VERSION NỐI TIẾP của MỘT tài"
-          " liệu (version 1/2/3), dù thực chất là 3 NỘI DUNG KHÁC NHAU (định"
-          " dạng khác nhau), không phải 3 bản SỬA của cùng 1 nội dung."
-          " read_latest() sẽ chỉ trả về Type ghi SAU CÙNG, 2 Type kia bị 'chôn'"
-          " trong lịch sử version -- có thể ĐÚNG Ý (article là bản 'chính', video/"
-          " infographic là 'phái sinh') hoặc SAI Ý (3 định dạng độc lập, cần đọc"
-          " được cả 3 cùng lúc qua read_latest() một lần gọi) -- KHÔNG tự quyết,"
-          " CẦN LEAD XÁC NHẬN Ý ĐỊNH trước khi backfill thật.")
+    print("  -> ĐÃ SỬA: schema.sql thêm cột content_type vào khoá UNIQUE"
+          " (topic_key, layer, content_type, version) -- mỗi Type giờ có dải"
+          " version RIÊNG, độc lập nhau. write_document() layer='content_output'"
+          " giờ BẮT BUỘC content_type (raise ValueError nếu thiếu). Xem"
+          " write_to_temp_store() bên dưới -- tự lấy content_type từ payload['type'].")
 
     print()
     print("=== Type trong CONTENT (đối chiếu ContentFormat enum) ===")
@@ -206,18 +201,43 @@ def write_to_temp_store(report: dict) -> Path:
     errors = []
     for layer in ("raw", "brief", "content_output", "infographic"):
         for topic_key, payload in report[layer]:
+            # BUG 1 (2026-07-19): content_output BẮT BUỘC content_type -- payload
+            # của layer này luôn có key "type" (gán ở analyze(), từ CONTENT.Type
+            # thật trên Sheet). Layer khác không có đa loại -> "" (mặc định).
+            content_type = payload.get("type", "") if layer == "content_output" else ""
             try:
-                ds.write_document(topic_key, layer, payload, "ma", db_path=db_path)
+                ds.write_document(topic_key, layer, payload, "ma", content_type=content_type, db_path=db_path)
                 written[layer] += 1
             except Exception as e:  # noqa: BLE001 -- backfill thử nghiệm, muốn thấy MỌI lỗi, không phân loại trước
                 errors.append((layer, topic_key, str(e)))
 
     print()
     print(f"=== Đã ghi vào DB TẠM: {db_path} ===")
+    total_written = sum(written.values())
     for layer, n in written.items():
         print(f"  {layer}: {n} bản ghi thành công")
+    print(f"  TỔNG: {total_written} bản ghi")
     if errors:
         print(f"  ⚠️  {len(errors)} lỗi ghi (ví dụ 5 đầu): {errors[:5]}")
+
+    # Xác nhận yêu cầu #6: sau khi đổi khoá UNIQUE, đọc lại TỪNG content_type
+    # của MỖI topic_key có >1 Type -- PHẢI đọc được ĐỘC LẬP, không cái nào
+    # "chôn" mất (đúng ý BUG 1 vừa sửa).
+    multi_type_topics = {tk: types for tk, types in report["content_topic_key_types"].items() if len(types) > 1}
+    if multi_type_topics:
+        print()
+        print("=== Xác minh đọc lại độc lập (BUG 1 fix) — mọi topic_key đa Type ===")
+        all_ok = True
+        for tk, types in multi_type_topics.items():
+            readback = {t: ds.read_latest(tk, "content_output", t, db_path=db_path) for t in types}
+            missing = [t for t, v in readback.items() if v is None]
+            if missing:
+                all_ok = False
+                print(f"  ⚠️  {tk!r}: THIẾU content_type {missing} (đáng lẽ đọc được)")
+            else:
+                print(f"  OK {tk!r}: đọc được độc lập cả {sorted(types)}")
+        print("  -> TẤT CẢ topic_key đa Type đọc lại ĐÚNG, ĐỘC LẬP, không cái nào chôn."
+              if all_ok else "  -> ⚠️ CÓ topic_key đọc lại THIẾU dữ liệu -- BUG 1 CHƯA sửa hết, kiểm lại.")
     return db_path
 
 
