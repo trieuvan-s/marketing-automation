@@ -166,6 +166,19 @@ def parse_vn_number_words(text: str) -> float | None:
     else:
         int_words, dec_words = words, []
 
+    # Nhập nhằng "năm" (danh từ "year" vs chữ số 5): cụm MỞ ĐẦU bằng "năm" mà
+    # phần CÒN LẠI tự nó đọc ra 1 giá trị nằm trong khoảng NĂM hợp lý (1900-2100)
+    # -> "năm" là DANH TỪ, bỏ khỏi phép tính (vd "năm hai nghìn không trăm hai
+    # mươi lăm" = năm 2025, KHÔNG phải 5025). Hẹp CÓ CHỦ ĐÍCH: "năm mươi"(50)/
+    # "năm trăm"(500)/"năm nghìn"(5000)/"năm triệu"/"năm tỷ" có phần-còn-lại
+    # KHÔNG rơi vào [1900,2100] nên KHÔNG dính; chỉ áp khi không hậu tố tỷ/triệu/%
+    # (scale==1) và không phần thập phân. HỢP ĐỒNG CHÉO REPO: đồng bộ
+    # `parseVnNumberWords` bên aigen `verify-spec.ts` (§facts[] drift).
+    if scale == 1.0 and not dec_words and len(int_words) >= 2 and int_words[0] == "năm":
+        year = _words_to_int(int_words[1:])
+        if year is not None and 1900 <= year <= 2100:
+            return float(year)
+
     int_val = _words_to_int(int_words) if int_words else 0
     if int_val is None:
         return None
@@ -308,4 +321,28 @@ def find_word_number_phrases(text: str) -> list[tuple[str, int]]:
             phrase_end = last_start + last_lead + len(last_core)
             out.append((low[phrase_start:phrase_end], phrase_start))
         i = end if end > i else i + 1
+    return out
+
+
+# Dấu hiệu 1 cụm là SỐ VIẾT BẰNG CHỮ THỰC (numeral), không phải từ đơn vị đời
+# thường: từ CẤU TRÚC (mười/mươi/trăm/phẩy/linh/nghìn/ngàn) hoặc hậu tố lớn
+# (tỷ/tỉ/triệu). "phần trăm" tự chứa "trăm" nên đã nằm trong tập này.
+_SPELLED_NUMERAL_MARKERS = set(_STRUCTURE_WORDS) | {"tỷ", "tỉ", "triệu"}
+
+
+def find_spelled_number_phrases(text: str) -> list[str]:
+    """Các cụm SỐ VIẾT BẰNG CHỮ trong `text` — dùng cho VALIDATOR hợp đồng
+    "narration/on-screen GIỮ số dạng CHỮ SỐ" (VIỆC 0.3). CHỈ nhận cụm mang DẤU
+    HIỆU numeral rõ (`_SPELLED_NUMERAL_MARKERS`), nên KHÔNG bắt oan chữ đời
+    thường chỉ gồm từ-đơn-vị như "hai năm" (2 năm), "ba bốn", "một trong những"
+    (find_word_number_phrases nhận "hai năm" là cụm 2 từ, nhưng nó KHÔNG có từ
+    cấu trúc/hậu tố nên bị loại ở đây). Rỗng = văn bản sạch (đúng hợp đồng).
+
+    KHÁC find_word_number_phrases: hàm kia phục vụ GUARDRAIL đối chiếu facts[]
+    (cần cả cụm mơ hồ để soi), hàm này phục vụ CONTRACT-CHECK đầu nguồn (chỉ số
+    viết-bằng-chữ RÕ RÀNG mới là vi phạm hợp đồng, tránh dương-tính-giả)."""
+    out: list[str] = []
+    for phrase, _ in find_word_number_phrases(text):
+        if any(tok in _SPELLED_NUMERAL_MARKERS for tok in phrase.split()):
+            out.append(phrase)
     return out

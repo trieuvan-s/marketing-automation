@@ -75,6 +75,7 @@ from ._jsonparse import try_json_object
 from ._numeric import has_approx_word, parse_magnitude_token
 from ..config import load_brand, load_settings
 from ..guardrails import compliance
+from ..media_factory.numbers import find_spelled_number_phrases
 from ..media_factory.spec import DEFERRED_VISUAL_KINDS, VISUAL_KINDS
 from ..models import ContentDraft, ContentFormat, Fact
 from .base import Agent, LLMClient
@@ -585,6 +586,30 @@ def _ensure_outro_scene(sc: dict, brief: ProductionBrief) -> dict:
     return {"role": "outro", "visual_kind": "outro", "payload": payload, "narration": narration}
 
 
+class SpelledNumberContractError(ValueError):
+    """CONTENT.Output vi phạm hợp đồng "narration giữ số dạng CHỮ SỐ" — Composer
+    viết số bằng chữ (VIỆC 0.3). CỨNG NGAY (luật chống-bịa), KHÔNG self-review
+    mềm: bắt ở ĐẦU NGUỒN thay vì để tầng voice/guardrail-2 phía aigen đoán mò."""
+
+
+def _assert_scenes_narration_use_digits(scenes: list[dict]) -> None:
+    """VALIDATOR TẤT ĐỊNH (VIỆC 0.3): quét `narration` mọi cảnh, phát hiện SỐ
+    VIẾT BẰNG CHỮ tiếng Việt (vd "hai nghìn không trăm hai mươi lăm", "mười ba
+    phẩy tám tỷ", "năm phần trăm") -> raise SpelledNumberContractError nêu RÕ
+    cảnh nào + chuỗi nào. KHÔNG dựa vào việc Opus nghe lời prompt. Chỉ áp cho
+    narration do LLM sinh (đường Composer), KHÔNG áp cho fallback tất định (đi
+    qua evidence nguồn có thể chứa số-chữ tự nhiên — xem video_fields_from_data)."""
+    problems: list[str] = []
+    for i, sc in enumerate(scenes):
+        for phrase in find_spelled_number_phrases(str(sc.get("narration", ""))):
+            problems.append(f'scene[{i}].narration: "{phrase}"')
+    if problems:
+        raise SpelledNumberContractError(
+            "narration chứa SỐ VIẾT BẰNG CHỮ (hợp đồng CONTENT.Output: giữ dạng "
+            "CHỮ SỐ, tầng voice tất định phía sau lo phần đọc) — "
+            + "; ".join(problems))
+
+
 def video_fields_from_data(data: dict | None, brief: ProductionBrief):
     """JSON LLM (hoặc None/rỗng) -> (title, scenes, disclaimer) khớp
     ContentOutputVideo (docs/CONTENT_OUTPUT_SCHEMA.md) — `schema_version`/
@@ -604,6 +629,9 @@ def video_fields_from_data(data: dict | None, brief: ProductionBrief):
         if scenes:
             scenes[0]["role"] = "hook"
             scenes[-1] = _ensure_outro_scene(scenes[-1], brief)
+            # VIỆC 0.3 — CONTRACT CHECK tất định trên OUTPUT COMPOSER (chỉ đường
+            # LLM này, KHÔNG áp fallback bên dưới): số bằng chữ -> THROW ngay.
+            _assert_scenes_narration_use_digits(scenes)
             return title, scenes, disclaimer
     # LÙI MƯỢT: kịch bản tất định 4 cảnh (>= 1 "hook" + 1 "outro") từ dữ kiện
     # đã duyệt (KHÔNG cần Opus) — GIỮ nguyên nội dung/thứ tự ý tưởng đường cũ

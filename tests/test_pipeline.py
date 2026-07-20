@@ -2157,7 +2157,7 @@ def test_backfill_content_topic_keys_carry_forward_through_merge_blank_rows():
 
     content_rows = [
         content_row(context="Bài X", type_="article", status="DONE", output="a"),
-        content_row(context="", type_="video_script", status="DONE", output="b"),      # merge-blank
+        content_row(context="", type_="video", status="DONE", output="b"),      # merge-blank
         content_row(context="", type_="infographic", status="DONE", output="c",
                     topic_key="ALREADY-SET"),                                          # đã có -> giữ
     ]
@@ -2216,11 +2216,11 @@ def test_content_topic_keys_survives_merge_blank_context_zero_orphan():
     KEY = "topic-key-merged-001"
     rows = [
         content_row(context="Chủ đề đã merge", type_="article", status="DONE", output="a", topic_key=KEY),
-        content_row(context="", type_="video_script", status="DONE", output="b", topic_key=KEY, ts=""),
+        content_row(context="", type_="video", status="DONE", output="b", topic_key=KEY, ts=""),
         content_row(context="", type_="infographic", status="DONE", output="c", topic_key=KEY, ts=""),
     ]
     keys, missing = content_topic_keys(CONTENT_HEADER, rows)
-    assert keys == {(KEY, "article"), (KEY, "video_script"), (KEY, "infographic")}
+    assert keys == {(KEY, "article"), (KEY, "video"), (KEY, "infographic")}
     assert missing == []
 
 
@@ -2234,7 +2234,7 @@ def test_content_topic_keys_blank_topickey_row_excluded_reported_as_missing():
     rows = [
         content_row(context="Bài cũ chưa backfill", type_="article", status="DONE", output="a", topic_key=""),
         # carry-forward: Context rỗng (mô phỏng merge-blank) NHƯNG TopicKey CŨNG rỗng -> vẫn missing.
-        content_row(context="", type_="video_script", status="DONE", output="b", topic_key="", ts=""),
+        content_row(context="", type_="video", status="DONE", output="b", topic_key="", ts=""),
     ]
     keys, missing = content_topic_keys(CONTENT_HEADER, rows)
     assert keys == set()
@@ -2351,7 +2351,7 @@ def test_group_content_rows_groups_by_topic_key_preserves_order():
     from twmkt.sheets_board import group_content_rows, CONTENT_HEADER, content_row
 
     a1 = content_row(context="A", type_="article", status="DONE", output="x", topic_key="tk-a")
-    a2 = content_row(context="A", type_="video_script", status="DONE", output="x", topic_key="tk-a")
+    a2 = content_row(context="A", type_="video", status="DONE", output="x", topic_key="tk-a")
     b1 = content_row(context="B", type_="infographic", status="DONE", output="x", topic_key="tk-b")
     empty = content_row(context="C", type_="article", status="DONE", output="x", topic_key="")
     groups = group_content_rows(CONTENT_HEADER, [a1, b1, a2, empty])
@@ -2369,7 +2369,7 @@ def test_regroup_content_rows_makes_same_topic_key_contiguous():
     a1 = content_row(context="A", type_="infographic", status="DONE", output="x", topic_key="tk-a")
     b1 = content_row(context="B", type_="infographic", status="DONE", output="x", topic_key="tk-b")
     a2 = content_row(context="A", type_="article", status="DONE", output="x", topic_key="tk-a")
-    a3 = content_row(context="A", type_="video_script", status="DONE", output="x", topic_key="tk-a")
+    a3 = content_row(context="A", type_="video", status="DONE", output="x", topic_key="tk-a")
     out = regroup_content_rows(CONTENT_HEADER, [a1, b1, a2, a3])
     assert out == [a1, a2, a3, b1]   # tk-a liền kề (giữ thứ tự trong-nhóm), tk-b sau
 
@@ -2383,7 +2383,7 @@ def test_content_band_ranges_bands_every_group_no_type_threshold():
 
     a_info = content_row(context="A", type_="infographic", status="DONE", output="x", topic_key="tk-a")
     a_art = content_row(context="A", type_="article", status="DONE", output="x", topic_key="tk-a")
-    a_vid = content_row(context="A", type_="video_script", status="DONE", output="x", topic_key="tk-a")
+    a_vid = content_row(context="A", type_="video", status="DONE", output="x", topic_key="tk-a")
     b_info = content_row(context="B", type_="infographic", status="DONE", output="x", topic_key="tk-b")
     b_art = content_row(context="B", type_="article", status="DONE", output="x", topic_key="tk-b")
     c_info = content_row(context="C", type_="infographic", status="DONE", output="x", topic_key="tk-c")
@@ -2403,7 +2403,7 @@ def test_regroup_and_band_content_reorders_and_sends_band_requests():
     a_info = content_row(context="A", type_="infographic", status="DONE", output="x", topic_key="tk-a")
     b_info = content_row(context="B", type_="infographic", status="DONE", output="x", topic_key="tk-b")
     a_art = content_row(context="A", type_="article", status="DONE", output="x", topic_key="tk-a")
-    a_vid = content_row(context="A", type_="video_script", status="DONE", output="x", topic_key="tk-a")
+    a_vid = content_row(context="A", type_="video", status="DONE", output="x", topic_key="tk-a")
 
     class _FakeContentWS:
         id = 7
@@ -2478,7 +2478,7 @@ def test_regroup_and_band_content_never_blanks_context_or_timestamp():
                          topic_key="tk-a", ts="2026-07-16T00:00:00")
     a_art = content_row(context="A", type_="article", status="DONE", output="x",
                         topic_key="tk-a", ts="2026-07-16T00:00:01")
-    a_vid = content_row(context="A", type_="video_script", status="DONE", output="x",
+    a_vid = content_row(context="A", type_="video", status="DONE", output="x",
                         topic_key="tk-a", ts="2026-07-16T00:00:02")
     b_info = content_row(context="B", type_="infographic", status="DONE", output="x",
                          topic_key="tk-b", ts="2026-07-16T00:00:03")
@@ -3322,14 +3322,14 @@ class _FakeProc:
 
 
 def test_is_fully_produced_requires_all_three_types():
-    """_is_fully_produced: CHỈ True khi CẢ 3 loại (infographic/article/video_script)
+    """_is_fully_produced: CHỈ True khi CẢ 3 loại (infographic/article/video)
     đã có trong CONTENT (`seen`) — tín hiệu đặt Execute=DONE."""
     sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
     import produce_from_sheet as pfs
 
     seen = {("Bài A", "infographic"), ("Bài A", "article")}
-    assert pfs._is_fully_produced("Bài A", seen) is False   # thiếu video_script
-    seen.add(("Bài A", "video_script"))
+    assert pfs._is_fully_produced("Bài A", seen) is False   # thiếu video
+    seen.add(("Bài A", "video"))
     assert pfs._is_fully_produced("Bài A", seen) is True
     assert pfs._is_fully_produced("Bài B", seen) is False   # chưa có gì
 
@@ -3826,7 +3826,7 @@ def test_run_twice_same_topic_key_no_duplicate_content_rows():
         pfs.factory.make_llm = orig["make_llm"]
         pfs.factory.build_writer_llm = orig["build_writer_llm"]
 
-    for t in ("article", "video_script", "infographic"):
+    for t in ("article", "video", "infographic"):
         matching = [r for r in board.appended_content if r[2] == t]
         assert len(matching) == 1, f"{t}: kỳ vọng đúng 1 dòng sau 2 lượt chạy, thực tế {len(matching)}"
     assert board.execute_updates.get(2) == "DONE"
@@ -3851,7 +3851,7 @@ def test_run_against_already_merged_content_no_duplicate_no_orphan():
     seeded_rows = [
         content_row(context="Chủ đề đã merge", type_="article", status="DONE", output="x", topic_key=KEY),
         # mergeCells đã xoá Context+Timestamp của 2 dòng này -- TopicKey vẫn còn nguyên.
-        content_row(context="", type_="video_script", status="DONE", output="x", topic_key=KEY, ts=""),
+        content_row(context="", type_="video", status="DONE", output="x", topic_key=KEY, ts=""),
         content_row(context="", type_="infographic", status="DONE", output="x", topic_key=KEY, ts=""),
     ]
 
@@ -3960,9 +3960,9 @@ def test_run_content_row_missing_topic_key_marks_needs_human_no_production():
 
 def test_phase3_adversarial_reorder_insert_delete_sort_topic_key_invariant_and_reproduce():
     """Lớp 5 Phase 3.1 — PROBE ĐỐI KHÁNG: dựng 3 chủ đề (A đủ 3 loại, B thiếu
-    video_script, C chưa có gì), chụp ánh xạ {TopicKey: nội dung} GỐC, rồi:
+    video, C chưa có gì), chụp ánh xạ {TopicKey: nội dung} GỐC, rồi:
       (a) chèn 1 dòng KHÔNG liên quan lên ĐẦU block (CONTENT lẫn CONTEXT),
-      (b) xóa 1 dòng Ở GIỮA (CONTENT: video_script của A; CONTEXT: 1 dòng phụ),
+      (b) xóa 1 dòng Ở GIỮA (CONTENT: video của A; CONTEXT: 1 dòng phụ),
       (c) re-sort (CONTENT: đảo thứ tự; CONTEXT: Hot% GIẢM DẦN — đúng hành vi
           sort_context_by_hot() thật).
     Assert ánh xạ TopicKey BẤT BIẾN (0 lệch, 0 mồ côi), rồi PRODUCE LẠI —
@@ -3990,10 +3990,10 @@ def test_phase3_adversarial_reorder_insert_delete_sort_topic_key_invariant_and_r
                     score=2, hot_pct=10.0, status="APPROVE", execute="RUN", topic_key=KEY_C),
     ]
 
-    # ---- 2) Dựng CONTENT gốc: A đủ 3 loại, B thiếu video_script, C chưa có gì ----
+    # ---- 2) Dựng CONTENT gốc: A đủ 3 loại, B thiếu video, C chưa có gì ----
     content_rows = [
         content_row(context="Chủ đề A probe", type_="article", status="DONE", output="A-article", topic_key=KEY_A),
-        content_row(context="Chủ đề A probe", type_="video_script", status="DONE", output="A-video", topic_key=KEY_A),
+        content_row(context="Chủ đề A probe", type_="video", status="DONE", output="A-video", topic_key=KEY_A),
         content_row(context="Chủ đề A probe", type_="infographic", status="DONE", output="A-info", topic_key=KEY_A),
         content_row(context="Chủ đề B probe", type_="article", status="DONE", output="B-article", topic_key=KEY_B),
         content_row(context="Chủ đề B probe", type_="infographic", status="DONE", output="B-info", topic_key=KEY_B),
@@ -4009,7 +4009,7 @@ def test_phase3_adversarial_reorder_insert_delete_sort_topic_key_invariant_and_r
     # ---- 3) Chụp ánh xạ GỐC {TopicKey: nội dung} ----
     original_map, original_keys = _snapshot(content_rows)
     assert original_keys == {
-        (KEY_A, "article"), (KEY_A, "video_script"), (KEY_A, "infographic"),
+        (KEY_A, "article"), (KEY_A, "video"), (KEY_A, "infographic"),
         (KEY_B, "article"), (KEY_B, "infographic"),
     }
 
@@ -4017,7 +4017,7 @@ def test_phase3_adversarial_reorder_insert_delete_sort_topic_key_invariant_and_r
     unrelated_content = content_row(context="Chủ đề KHÔNG liên quan", type_="article",
                                     status="DONE", output="unrelated", topic_key="unrelated-probe-key")
     content_rows = [unrelated_content] + content_rows                       # (a) chèn đầu block
-    del_i = next(i for i, r in enumerate(content_rows) if r[ik] == KEY_A and r[it] == "video_script")
+    del_i = next(i for i, r in enumerate(content_rows) if r[ik] == KEY_A and r[it] == "video")
     del content_rows[del_i]                                                  # (b) xóa 1 dòng Ở GIỮA
     content_rows = list(reversed(content_rows))                              # (c) re-sort (đảo thứ tự)
 
@@ -4037,7 +4037,7 @@ def test_phase3_adversarial_reorder_insert_delete_sort_topic_key_invariant_and_r
     # ---- 6) Đọc lại -> assert ánh xạ TopicKey BẤT BIẾN (0 lệch, 0 mồ côi) ----
     after_map, after_keys = _snapshot(content_rows)
     expected_after_keys = {
-        (KEY_A, "article"), (KEY_A, "infographic"),         # video_script A đã bị xóa CHỦ Ý ở bước (b)
+        (KEY_A, "article"), (KEY_A, "infographic"),         # video A đã bị xóa CHỦ Ý ở bước (b)
         (KEY_B, "article"), (KEY_B, "infographic"),
         ("unrelated-probe-key", "article"),
     }
@@ -4112,7 +4112,7 @@ def test_phase3_adversarial_reorder_insert_delete_sort_topic_key_invariant_and_r
     final_keys, final_missing = content_topic_keys(CONTENT_HEADER, all_rows_after)
     assert final_missing == []
     for key in (KEY_A, KEY_B, KEY_C):
-        for t in ("article", "video_script", "infographic"):
+        for t in ("article", "video", "infographic"):
             assert (key, t) in final_keys, f"THIẾU {(key, t)} sau produce-lại"
 
     counts = Counter((r[ik], r[it]) for r in all_rows_after if r[it])
@@ -4303,7 +4303,7 @@ def test_vertical_slice_a_full_quantitative_topic_three_channels_clean():
 
     # --- Mắt xích: produce chỉ sinh tuyến true + outcome DONE ---
     types_status = {r[2]: r[3] for r in board.appended_content}
-    assert types_status == {"article": "DONE", "video_script": "DONE", "infographic": "DONE"}
+    assert types_status == {"article": "DONE", "video": "DONE", "infographic": "DONE"}
     assert board.execute_updates.get(2) == "DONE"
     assert route_llm.router_calls == 1
 
@@ -4365,7 +4365,7 @@ def test_vertical_slice_b_router_disables_one_channel_no_error():
 
     types_status = {r[2]: r[3] for r in board.appended_content}
     assert types_status["article"] == "DONE"
-    assert types_status["video_script"] == "DONE"
+    assert types_status["video"] == "DONE"
     assert types_status["infographic"] == "SKIPPED"           # KHÔNG phải ERROR
 
     infographic_row = next(r for r in board.appended_content if r[2] == "infographic")
@@ -4622,6 +4622,61 @@ def test_render_analysis_and_video_use_dynamic_cta_not_hardcoded_brand():
     _title2, _scenes2, disc2 = video_fields_from_data(None, brief)
     assert _scenes2[-1]["payload"]["cta"] == _default_cta()
     assert disc2 != ""   # vẫn có disclaimer hợp lệ (brand-driven), không rỗng
+
+
+def test_find_spelled_number_phrases_flags_real_numerals_not_plain_words():
+    """VIỆC 0.3 — detector CHỈ bắt số VIẾT-BẰNG-CHỮ thực (có từ cấu trúc/hậu tố
+    lớn/%), KHÔNG bắt oan chữ đời thường chỉ gồm từ-đơn-vị ("hai năm"=2 năm)."""
+    from twmkt.media_factory.numbers import find_spelled_number_phrases as f
+
+    # VI PHẠM
+    assert f("năm hai nghìn không trăm hai mươi lăm") == ["năm hai nghìn không trăm hai mươi lăm"]
+    assert f("đạt mười ba phẩy tám tỷ đồng") == ["mười ba phẩy tám tỷ"]
+    assert f("tăng hai mươi ba phần trăm") == ["hai mươi ba phần trăm"]
+    assert f("doanh thu một tỷ đồng") == ["một tỷ"]
+    # SẠCH (không oan)
+    assert f("năm 2025, tăng 4,98%") == []
+    assert f("Quý hai năm nay giảm") == []            # "hai năm" = 2 năm
+    assert f("một trong những doanh nghiệp") == []
+    assert f("giá 66.800 đồng, lãi 585 tỷ") == []      # chữ số + 'tỷ' sau CHỮ SỐ
+    assert f("linh hồn thương hiệu") == []
+
+
+def test_video_narration_contract_rejects_spelled_out_numbers():
+    """VIỆC 0.3 — video_fields_from_data (đường Composer/LLM) THROW khi narration
+    chứa số viết bằng chữ, nêu rõ cảnh + chuỗi. Đường fallback (data=None) KHÔNG
+    bị áp (đi qua evidence nguồn, có thể chứa số-chữ tự nhiên)."""
+    import pytest
+    from twmkt.agents.production import (
+        ProductionBrief, SpelledNumberContractError, video_fields_from_data,
+    )
+
+    brief = ProductionBrief(title="X", hook="Hook thường", url="https://cafef.vn/x.chn",
+                            evidence="Doanh thu tăng.")
+
+    bad = {"title": "T", "scenes": [
+        {"role": "hook", "visual_kind": "statement", "payload": {"hero": "a", "desc": "b"},
+         "narration": "Báo cáo năm hai nghìn không trăm hai mươi lăm cho thấy đà tăng."},
+        {"role": "outro", "visual_kind": "outro", "payload": {"brand_name": "FVA"}, "narration": "Cảm ơn."},
+    ]}
+    with pytest.raises(SpelledNumberContractError) as ei:
+        video_fields_from_data(bad, brief)
+    assert "scene[0]" in str(ei.value)
+    assert "hai nghìn không trăm" in str(ei.value)
+
+    # narration dạng CHỮ SỐ -> KHÔNG throw.
+    ok = {"title": "T", "scenes": [
+        {"role": "hook", "visual_kind": "statement", "payload": {"hero": "a", "desc": "b"},
+         "narration": "Báo cáo năm 2025 cho thấy đà tăng 4,98%."},
+        {"role": "outro", "visual_kind": "outro", "payload": {"brand_name": "FVA"}, "narration": "Cảm ơn."},
+    ]}
+    _t, scenes, _d = video_fields_from_data(ok, brief)
+    assert scenes[0]["narration"].startswith("Báo cáo năm 2025")
+
+    # Fallback (data=None) KHÔNG bị validator chặn, kể cả khi hook có số-chữ.
+    brief_fb = ProductionBrief(title="Năm hai nghìn không trăm hai mươi lăm mở màn",
+                               hook="", url="https://cafef.vn/x.chn", evidence="")
+    _t2, _s2, _d2 = video_fields_from_data(None, brief_fb)   # không raise
 
 
 def test_infographic_composer_falls_back_to_deterministic_spec_when_llm_fails():
@@ -6562,7 +6617,7 @@ def test_content_row_shape():
                  "Output": "nội dung", "Notes": "ok", GATE2_COL: "PENDING",
                  "TopicKey": "key-a", "Facts": "", "AssetPath": "", "Social Link": "",
                  GATE3_COL: "PENDING", "Posting Status": ""}
-    row2 = content_row(context="Bài B", type_="video_script", status="ERROR",
+    row2 = content_row(context="Bài B", type_="video", status="ERROR",
                        output="x", approve="APPROVE", ts="ts2")
     d2 = dict(zip(CONTENT_HEADER, row2))
     assert d2[GATE2_COL] == "APPROVE"
@@ -7545,12 +7600,11 @@ def test_find_word_number_phrases_ignores_edge_punctuation():
     assert phrase == "năm hai nghìn không trăm hai mươi lăm", phrase
     # offset trả về phải trỏ ĐÚNG vị trí trong text gốc (dùng để dò từ xấp xỉ).
     assert text[start:].startswith("năm hai")
-    # LƯU Ý: cụm này parse ra 5025 chứ KHÔNG phải 2025 — chữ "năm" (year) bị
-    # đọc thành chữ số 5. Đó là lỗi (c) NHẬP NHẰNG "năm", TÁCH BẠCH với (b) và
-    # CHƯA sửa (chờ Lead chốt hướng, xem tasks/ACTIVE_TASK.md §V2). Ghim lại
-    # hành vi hiện tại để khi (c) được sửa thì test này ĐỎ và buộc cập nhật có
-    # chủ đích, thay vì trôi âm thầm.
-    assert parse_vn_number_words(phrase) == 5025.0, "lỗi (c) đã được sửa? cập nhật test này"
+    # (c) 2026-07-20 — ĐÃ SỬA nhập nhằng "năm": cụm mở đầu "năm" + phần còn lại
+    # là năm hợp lý (1900-2100) -> "năm" là DANH TỪ (year), bỏ khỏi phép tính.
+    # Nay parse ra ĐÚNG 2025 (trước đây 5025 vì "năm" bị đọc thành chữ số 5).
+    # Đồng bộ `parseVnNumberWords` bên aigen verify-spec.ts.
+    assert parse_vn_number_words(phrase) == 2025.0, phrase
 
     # Dấu phẩy giữa cụm cũng không được cắt.
     out2 = find_word_number_phrases("thời kỳ hai nghìn ba mươi, tầm nhìn xa")
@@ -7561,6 +7615,31 @@ def test_find_word_number_phrases_ignores_edge_punctuation():
     out3 = find_word_number_phrases("đạt mười sáu phẩy ba tỷ.")
     assert [p for p, _ in out3] == ["mười sáu phẩy ba tỷ"], out3
     assert parse_vn_number_words(out3[0][0]) == 16.3e9
+
+
+def test_parse_vn_number_words_disambiguates_leading_nam_as_year():
+    """(c) 2026-07-20 — "năm" mở đầu cụm + phần còn lại là năm hợp lý (1900-2100)
+    -> "năm" = DANH TỪ (year), bỏ khỏi phép tính. HỢP ĐỒNG CHÉO REPO: đồng bộ
+    `parseVnNumberWords` bên `aigen/src/production-spec/guardrail/verify-spec.ts`.
+    """
+    from twmkt.media_factory.numbers import parse_vn_number_words as p
+
+    # "năm" là DANH TỪ (year) -> bỏ khỏi phép tính.
+    assert p("năm hai nghìn không trăm hai mươi lăm") == 2025.0
+    assert p("năm hai nghìn không trăm hai mươi") == 2020.0
+    assert p("năm hai nghìn không trăm ba mươi") == 2030.0
+    assert p("năm hai nghìn hai mươi sáu") == 2026.0   # dạng đọc tắt (bộ sinh date)
+
+    # "năm" là CHỮ SỐ 5 — phần còn lại KHÔNG rơi vào [1900,2100] -> GIỮ NGUYÊN.
+    assert p("năm mươi") == 50.0
+    assert p("năm mươi lăm") == 55.0
+    assert p("năm trăm") == 500.0
+    assert p("năm nghìn") == 5000.0
+    assert p("năm triệu") == 5_000_000.0
+    assert p("năm tỷ") == 5_000_000_000.0
+    assert p("năm") == 5.0
+    # Không có "năm" mở đầu -> không chạm.
+    assert p("hai nghìn không trăm hai mươi lăm") == 2025.0
 
 
 def test_parse_vn_number_words_invalid_returns_none():

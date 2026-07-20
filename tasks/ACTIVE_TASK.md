@@ -154,16 +154,18 @@ GIỮ offset gốc để lookback từ xấp xỉ vẫn đúng. Cố ý KHÔNG g
 "/" (ngày tháng đi đường chữ số). Test 2 phía dùng đúng ca thật.
 Kết quả: Python **405 passed**, TS **215 passed**, `tsc --noEmit` sạch.
 
-### ⚠️ (c) — VẪN MỞ, cần Lead chốt (test đã GHIM hành vi hiện tại)
-Sau khi vá (b), cụm "năm hai nghìn không trăm hai mươi lăm" nay NGUYÊN VẸN
-nhưng parse ra **5025** thay vì 2025 — chữ "năm" (year) bị đọc thành chữ số 5.
-Đây là lỗi TÁCH BẠCH với (b). Test 2 phía ghim 5025 kèm ghi chú, để khi sửa (c)
-thì test ĐỎ và buộc cập nhật có chủ đích thay vì trôi âm thầm.
-Đề xuất hướng sửa (chưa làm): nếu cụm MỞ ĐẦU bằng "năm" và phần CÒN LẠI parse
-ra giá trị nằm trong khoảng năm hợp lý (vd 1900-2100) → coi "năm" là DANH TỪ
-(year), bỏ khỏi phép tính. Hẹp, có thể kiểm bằng test, không đụng ca khác.
-Lưu ý: sau V1, narration đúng hợp đồng là dạng CHỮ SỐ nên đường này ít bị chạm
-hơn nhiều — (c) chủ yếu còn ảnh hưởng nhánh ẢNH Python và lớp phòng vệ.
+### ✅ (c) — ĐÃ VÁ ĐỒNG BỘ 2 REPO (2026-07-20, agent-B)
+Cụm "năm hai nghìn không trăm hai mươi lăm" trước parse ra **5025** (chữ "năm"
+year bị đọc thành chữ số 5). Đã sửa theo đúng hướng đề xuất: trong
+`parse_vn_number_words` (Python `numbers.py`) + `parseVnNumberWords` (TS
+`verify-spec.ts`), nếu cụm MỞ ĐẦU bằng "năm", `scale==1`, không thập phân, và
+phần CÒN LẠI tự đọc ra giá trị ∈ [1900,2100] → coi "năm" là DANH TỪ, bỏ khỏi
+phép tính → nay ra **2025**. Hẹp có chủ đích: "năm mươi"(50)/"năm trăm"(500)/
+"năm nghìn"(5000)/"năm triệu"/"năm tỷ" phần-còn-lại KHÔNG rơi vào [1900,2100]
+nên KHÔNG dính (đã có test khẳng định). Round-trip property test không đụng vì
+bộ sinh số thường không phát "năm" mở đầu (chỉ dạng date "năm <year>" — nay
+parser đọc ĐÚNG luôn). 2 test ghim 5025 đã đổi sang 2025 + thêm 1 test chuyên
+mỗi phía. Python 406 pass, TS 223 pass, tsc sạch.
 
 ### V1 (bản gốc, giữ để đối chiếu) — Composer VI PHẠM HỢP ĐỒNG narration
 Bài `vietnam_airlines_co_dong`: Opus tự viết số bằng CHỮ ngay trong
@@ -217,10 +219,15 @@ sinh delta fact thiếu canonical), `vietnam_airlines_co_dong` = lỗi (c) "năm
 Kết quả: TS **217 passed**, `tsc --noEmit` sạch, Python **405 passed**.
 
 ⚠️ **NỢ CÒN LẠI, ĐỪNG QUÊN** (ghi ngay trong code, có comment ⚠️):
-- `frame-pentagram-stat` KHÔNG có ô `value` — con số CHÍNH của scene `stat`
-  hiện **không có chỗ đổ**. Phải đọc `templates/frame-pentagram-stat/
-  compositions/portrait.html` xem ô nào hiện số lớn rồi map. Scene stat hiện
-  render THIẾU SỐ. Chưa xong.
+- ✅ **ĐÃ VÁ (2026-07-20, agent-B)** — `frame-pentagram-stat` KHÔNG có ô
+  `value`. Đọc `portrait.html`: ô số lớn là `headline` (font 300px). Đã thêm 2
+  phép đổi tên tất định ở `production-spec/index.ts::withChromeSlots`
+  (`value → headline`, `note → subtitle`) + khôi phục `headline` về
+  `required:true` ở `required-slot-fields.ts` (value là required ở payload nên
+  headline luôn có nguồn). `anchor` (số nền trang trí) CỐ Ý để trống (map sẽ là
+  đoán ngữ nghĩa). Test: `index.test.ts` +2 ca (map đúng ô + thiếu value phải
+  nổ). TS 222 pass, tsc sạch. KHÔNG đụng repo Python (không phải logic số/
+  guardrail; hợp đồng CONTENT.Output giữ nguyên).
 - Ngữ nghĩa biên tập của `eyebrow`/`side_left`/`side_right`/`badge`/`footer_*`/
   `author_role`/`subline`/`tag`... vẫn trống → video ra sẽ thiếu chrome.
 - Cảnh báo độ dài lúc chạy: `primary_url` 67 ký tự vs giới hạn CATALOG 40, và
@@ -285,9 +292,24 @@ của `eyebrow`/`side_left`/`side_right`/`badge` cho từng loại scene. Đây 
 đây. → Phải chốt: nới template hay bắt Composer sinh thêm field.
 
 ### Còn nguyên (không đổi sau R2)
-- **R3 — Brief sinh fact `delta` với `canonical_from/to = null`** cho số tiền
-  ("9,34 tỷ" → null) → mọi scene dùng số đó bị chặn cấp (a). Đây là lý do
-  chính bài `cong_ty_lo_q2` không qua. Sửa ở Brief, kèm test.
+- **R3 — ĐÃ XÁC ĐỊNH LẠI ROOT CAUSE (2026-07-20, agent-B): KHÔNG phải "canonical
+  null" như mô tả cũ.** Kiểm trên fixture THẬT `cong_ty_lo_q2_new.txt`: mọi
+  delta trong facts[] ĐÃ có canonical đúng (16,3 tỷ → 16.3e9...). Vấn đề thật:
+  khoản LỖ `9,34 tỷ` và `12,6 tỷ` nằm ở **2 CÂU LIỀN KỀ KHÁC NHAU** trong
+  evidence ("...là 9,34 tỷ đồng. Con số này...so với mức lỗ 12,6 tỷ đồng...") →
+  quy tắc chống-bịa `_find_shared_sentence` (from/to delta phải CÙNG 1 câu) TỪ
+  CHỐI ghép chúng thành delta (ĐÚNG chức năng), và Brief cũng không emit chúng
+  dưới dạng scalar → Composer dùng 2 số này ở scene → guardrail chặn cấp (a).
+  Đã chứng minh bằng `facts_from_llm_output` trên evidence thật (2 câu → delta
+  bị loại; nếu 1 câu → canonical tính đúng). Parser `parse_magnitude_token`
+  KHÔNG có bug ở đây (đã thử vá dấu âm rồi REVERT vì Brief nhận value từ evidence
+  = prefix CHỮ, không phải dấu "-").
+  **CẦN LEAD QUYẾT + LLM THẬT** (không phải sửa code tất định): (A) sửa PROMPT
+  Brief để emit thêm SCALAR cho từng con số khoản lỗ dù nằm khác câu; hoặc (B)
+  chấp nhận chặn (Composer không nên trình bày so sánh chéo-câu như 1 delta đã
+  kiểm); hoặc (C) nới `_find_shared_sentence` (RỦI RO chống-bịa, không khuyến
+  nghị). Cả 3 đều cần chạy Brief Opus thật để kiểm — hiện `claude -p` chưa
+  đăng nhập (xem VIỆC KẾ TIẾP #5). ĐỪNG tự sửa máy móc.
 - **(b) lỗi tokenize dấu câu** trong `find_word_number_phrases` (cả 2 repo):
   "…hai mươi lăm**.**" bị cắt mất "lăm" → parse 5020 thay vì 2025. Sau R2 ít
   ảnh hưởng hơn (word-scan chỉ còn chạm bài vi phạm V1) nhưng VẪN LÀ BUG, và

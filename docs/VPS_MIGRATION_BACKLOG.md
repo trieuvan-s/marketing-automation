@@ -150,6 +150,62 @@ Phụ thuộc A1 (endpoint) và B1 (LOG neo theo TopicKey, không theo dòng).
   phía Content Factory, KHÔNG thêm từ điển vào adapter.
 - **C5.** Quirk #1/#2 (demo placeholder lòi lên video) KHÔNG test nào bắt
   được — phải soi frame sau mỗi lần render thật.
+- **C6.** [2026-07-20, nghiệm thu VIỆC 3 trên video thật `4_cang_bien_dac_biet`]
+  **`frame-build-minimal` hero TRÀN/VỠ TỪ khi text dài.** `visual_kind=
+  "statement"` map sang template này, ô `hero` giới hạn CATALOG 10 ký tự (thiết
+  kế cho cụm ngắn kiểu "82%") nhưng renderer KHÔNG auto-shrink (khác
+  `frame-pentagram-stat` đã có `fitText`). Bằng chứng: scene 2 hero "Bỏ phân
+  nhóm cảng" (17ch) → "cảng" vỡ "cả"/"ng"; scene 4 "Hòn Khoai: bến cảng lưỡng
+  dụng" (30ch) → vỡ 4 dòng cắt giữa từ. Lead chọn CHẤP NHẬN TẠM (2026-07-20),
+  sửa ở vòng tối ưu sau. 3 hướng đã cân nhắc: (a) thêm fitText vào template
+  [agent-B, render], (b) siết contract hero statement ≤10-12 ký tự [Composer],
+  (c) đổi mapping statement-dài sang template khác. KHÔNG có test nào bắt —
+  cùng lớp C5, soi frame thủ công.
+- **C7.** [2026-07-20] Outro `primary_url` = link FB profile thô 67 ký tự
+  (`BRAND_PRIMARY_URL` trong `aigen production-spec/index.ts`) wrap 2 dòng
+  uppercase, xấu. Cân nhắc link rút gọn cho kênh (đã ghi từ HANDOFF, chưa làm).
+
+---
+
+## D. HƯỚNG PHÁT TRIỂN MỞ RỘNG (chưa chốt — chờ Lead duyệt)
+
+### D1. Trục AVATAR VIDEO (HeyGen) song song luồng template trong Production Factory
+Thêm 2026-07-20. Đề xuất ĐẦY ĐỦ (agent-B → Lead) ở
+`aigen/docs/AVATAR_HEYGEN_PROPOSAL.md` (ngày viết 2026-07-19). Ghép thêm một
+trục sản xuất Avatar Video dùng HeyGen chạy **song song** luồng template hiện
+tại, trong cùng Production Factory.
+
+**Đã đánh giá lại 2026-07-20 (agent-B) — 3 claim kỹ thuật cốt lõi VẪN ĐÚNG với
+code hiện tại**, xác minh trực tiếp:
+- `render/video-tools.ts::overlayAvatarVideo` chỉ `-map "[out]"` (video-only,
+  `[0:v][am]overlay`) → audio clip avatar KHÔNG được map = bỏ hoàn toàn
+  (docstring tự khai "muted — the scene's TTS narration remains the only audio").
+- Avatar clip bị `-stream_loop -1` + `shortest=1` → lặp/cắt theo clip nền.
+- `render/template-pipeline.ts` (~L168-188): `clipToFit = avatarClip` rồi
+  `fitClipToDuration(clipToFit, visualDur, ...)` — khớp avatar vào duration
+  suy từ audio TTS riêng, độc lập nội dung avatar.
+→ Kết luận: cơ chế `frame-avatar-presenter` hiện tại giả định avatar là b-roll
+CÂM; thả thẳng output HeyGen (đã lip-sync sẵn) vào sẽ lệch khẩu hình. Đề xuất
+đúng vấn đề, hướng giải (audio-driven lip-sync, TTS AIGEN vẫn là nguồn giọng
+duy nhất) hợp lý.
+
+**Ràng buộc kiến trúc đề xuất giữ**: giọng cho HeyGen PHẢI ra từ OmniVoice/
+ElevenLabs (không dùng voice riêng HeyGen) → `AvatarSpec` cố ý không có field
+chọn voice. Đúng tinh thần quyết định (b) "một text chuẩn hoá dùng chung mọi
+engine".
+
+**Chia 2 tầng** (đề xuất mục 4): Tầng 1 = thêm 2 field optional `avatar`/
+`audioSource` vào `TemplateScript` (additive, không đổi hành vi render, 3 file
+test PNJ/FPT/FVA vẫn valid nguyên xi). Tầng 2 = sửa THẬT `template-pipeline.ts`
++ `video-tools.ts` + viết HeyGen API client (giống `elevenlabs-client.ts`) —
+việc kỹ thuật có gọi API async, lên task riêng, KHÔNG phải "chỉ thêm field".
+
+**Cần Lead chốt** (mục 6 của proposal, e–h): (e) duyệt Tầng 1 ngay?; (f) lịch
+Tầng 2; (g) ai gọi HeyGen API — đề xuất là AIGEN/agent-B vì cần audio AIGEN vừa
+TTS; (h) `avatarId` lấy từ đâu (Content Factory tự chọn hay danh sách cố định).
+
+⚠️ File `AVATAR_HEYGEN_PROPOSAL.md` hiện UNTRACKED bên aigen — người vận hành
+`git add` để đưa vào lịch sử repo (đề xuất đã đánh giá là chính xác, nên giữ).
 
 ---
 

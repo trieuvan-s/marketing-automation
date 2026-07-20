@@ -98,7 +98,7 @@ from twmkt.sheets_board import SheetsBoard, content_row, facts_to_json  # noqa: 
 from twmkt.utils.telegram_notifier import make_notifier  # noqa: E402
 
 _OUTPUT_PREVIEW = 1500   # số ký tự Output đưa lên Sheet (đủ xem; full lưu ra file)
-_ALL_TYPES = ("infographic", "article", "video_script")   # 3 loại all_production_agents() sinh
+_ALL_TYPES = ("infographic", "article", "video")   # 3 loại all_production_agents() sinh (C7: "video" khớp Sheet)
 _DEFAULT_ACTOR = "[user request]"
 
 
@@ -110,7 +110,7 @@ def _writer_notify_adapter(notifier):
 
 
 def _is_fully_produced(topic_key: str, seen: set[tuple[str, str]]) -> bool:
-    """True nếu CẢ 3 loại (infographic/article/video_script) của chủ đề (tra
+    """True nếu CẢ 3 loại (infographic/article/video) của chủ đề (tra
     theo `topic_key` — Lớp 5 Phase 2, KHÔNG theo Context) đã có trong CONTENT
     (`seen`) — tín hiệu để đặt Execute=DONE (idempotent). Dùng cho run_draft()/
     run_ingest() (đường --draft/--ingest, KHÔNG đọc RouterDecision.output_
@@ -119,10 +119,11 @@ def _is_fully_produced(topic_key: str, seen: set[tuple[str, str]]) -> bool:
 
 
 # Phase 4.13 Mục A: output_channels dùng tên "video" (khớp RouterDecision),
-# CONTENT dùng tên "video_script" (khớp ContentFormat.VIDEO_SCRIPT.value) —
-# 2 vocabulary khác nhau có chủ đích (channels = ý định của router, content
-# type = định dạng sản phẩm), map ở ĐÚNG 1 chỗ để khỏi lẫn lộn rải rác.
-_CHANNEL_TO_TYPE = {"article": "article", "infographic": "infographic", "video": "video_script"}
+# CONTENT Type cũng là "video" (C7 2026-07-20: khớp Sheet thật + đồng bộ với
+# ContentFormat.VIDEO_SCRIPT.value đã đổi). Trước đây content-type là
+# "video_script" nên map ở đây có tác dụng; nay 2 tên TRÙNG nhưng GIỮ map tường
+# minh để nếu tách lại vocabulary về sau chỉ sửa 1 chỗ.
+_CHANNEL_TO_TYPE = {"article": "article", "infographic": "infographic", "video": "video"}
 
 
 def _is_fully_produced_channels(topic_key: str, seen: set[tuple[str, str]], channels: dict) -> bool:
@@ -686,7 +687,7 @@ def run_draft(*, limit: int = 5, setup: bool = False) -> dict:
         need_brief = False
         for type_, ctype, prompt_fn in (
             ("article", "article", build_analysis_prompt),
-            ("video", "video_script", build_video_prompt),
+            ("video", "video", build_video_prompt),
         ):
             if (topic_key, ctype) in seen:
                 continue
@@ -792,7 +793,7 @@ def run_ingest(*, setup: bool = False) -> dict:
         topic_key = assign_topic_key("", url=brief.url)
 
         remaining = False
-        for type_, ctype in (("article", "article"), ("video", "video_script")):
+        for type_, ctype in (("article", "article"), ("video", "video")):
             answer_path = day_dir / f"{slug}.{type_}.json"
             prompt_path = day_dir / f"{slug}.{type_}.prompt.md"
             if not answer_path.exists():
