@@ -6403,6 +6403,53 @@ def test_prompts_v1_files_match_code_defaults_no_drift():
     assert read_prompt_file("video", "v1", prompts_dir="prompts") == VideoScriptAgent.system
 
 
+def test_video_prompt_states_narration_number_format_contract():
+    """V1 (2026-07-19) — prompt Composer PHẢI dạy rõ định dạng `narration`.
+
+    Lỗi thật đã gặp: Opus viết "năm hai nghìn không trăm hai mươi lăm" vào
+    narration, vi phạm `docs/CONTENT_OUTPUT_SCHEMA.md` ("narration giữ nguyên
+    số + ticker, KHÔNG viết số bằng chữ") — vì prompt CŨ không có DÒNG NÀO nói
+    về định dạng số. Test này khoá phần dạy đó lại, để không ai xoá nhầm khi
+    biên tập prompt sau này.
+
+    Test drift ở trên chỉ bảo đảm file .md == chuỗi trong code (2 bản GIỐNG
+    NHAU); test này bảo đảm nội dung ĐÚNG (có thật quy tắc), là 2 việc khác
+    nhau — cả hai đều cần.
+    """
+    from twmkt.agents.production import VideoScriptAgent
+
+    system = VideoScriptAgent.system
+    # Cấm dạy ngược (số→chữ, phiên âm) — việc của tầng voice tất định phía sau.
+    assert "TUYỆT ĐỐI KHÔNG viết số thành chữ" in system
+    assert "KHÔNG phiên âm" in system
+    # Áp cho CẢ 2 field, không chỉ narration.
+    assert "`narration` LẪN mọi field chữ trong `payload`" in system
+    # Có ví dụ SAI cụ thể — mẫu Opus thật sự đã sinh ra.
+    assert "hai nghìn không trăm hai mươi lăm" in system
+    # Ticker/viết tắt GIỮ NGUYÊN (ghi đè luật voice-over cũ ở §4.5).
+    assert "GHI ĐÈ §4.5" in system
+    for keep_as_is in ("HVN", "VN-Index", "Q2/2026", "4,98%"):
+        assert keep_as_is in system, f"thiếu ví dụ giữ-nguyên-dạng: {keep_as_is}"
+
+
+def test_content_writer_rules_no_longer_bans_tickers_in_voice_over():
+    """§4.5 từng CẤM mã CK trong voice-over — mâu thuẫn với hợp đồng narration mới.
+
+    `_load_content_writer_rules(sections=("2","4"))` nối §4 vào system prompt
+    SAU CÙNG (xem VideoScriptAgent.run), nên luật cũ ở đây sẽ THẮNG luật mới nếu
+    còn nguyên văn → Composer nhận 2 chỉ thị ngược nhau → output không nhất quán.
+    Đây chính là thứ cần chặn.
+    """
+    from twmkt.agents.production import _load_content_writer_rules
+
+    rules = _load_content_writer_rules(sections=("2", "4"))
+    assert rules, "không đọc được content_writer_rules.md"
+    assert "Voice-over CẤM dùng mã chứng khoán" not in rules, (
+        "§4.5 vẫn còn luật cũ nguyên văn — sẽ ghi đè hợp đồng narration mới"
+    )
+    assert "GIỮ NGUYÊN mã chứng khoán" in rules
+
+
 def test_match_source_by_domain_and_fetch_full_evidence_fallback():
     """match_source_by_domain khớp theo TÊN MIỀN (không cần đúng path); fetch lỗi/
     rỗng -> fallback (KHÔNG crash, KHÔNG gọi mạng thật trong test)."""
@@ -7442,6 +7489,80 @@ def test_parse_vn_number_words_simple_hundreds_and_units():
     assert parse_vn_number_words("hai mươi mốt") == 21.0
 
 
+def test_parse_vn_number_words_linh_filler_zero_tens():
+    """R2 (2026-07-19) — "linh" là ĐỆM hàng-chục-bằng-không, KHÔNG mang giá trị.
+
+    Phát hiện bằng property round-trip test bên aigen
+    (`src/production-spec/voice/spell-out-numbers.test.ts`): bộ SINH số→chữ
+    phát ra "một trăm linh năm" cho 105, nhưng parser ở đây KHÔNG có "linh"
+    trong từ vựng nên trả None → 162/2001 số nguyên (TẤT CẢ dạng x0y) không
+    đọc ngược được → guardrail chặn oan mọi bài chứa số dạng đó.
+
+    HỢP ĐỒNG CHÉO REPO: quy tắc này phải khớp
+    `aigen/src/production-spec/guardrail/verify-spec.ts::parseSmallGroup`
+    (xem `docs/ARCHITECTURE_MODULES.md` §facts[]) — sửa 1 bên phải sửa bên kia
+    cùng lượt.
+    """
+    from twmkt.media_factory.numbers import parse_vn_number_words
+
+    assert parse_vn_number_words("một trăm linh năm") == 105.0
+    assert parse_vn_number_words("một trăm linh một") == 101.0
+    assert parse_vn_number_words("một nghìn chín trăm linh ba") == 1903.0
+    assert parse_vn_number_words("một trăm linh năm tỷ") == 105e9
+    # Không có "linh" thì vẫn như cũ (không hồi quy).
+    assert parse_vn_number_words("một trăm mười lăm") == 115.0
+
+
+def test_find_word_number_phrases_keeps_linh_phrase_contiguous():
+    """R2 — "linh" phải nằm trong từ vựng số để cụm KHÔNG bị cắt làm đôi.
+
+    Thiếu nó, "một trăm linh năm tỷ" bị tách thành "một trăm" (=100) và
+    "năm tỷ" (=5e9) — cả hai đều không khớp fact 105e9 nào → 2 vi phạm oan.
+    """
+    from twmkt.media_factory.numbers import find_word_number_phrases
+
+    out = find_word_number_phrases("lợi nhuận đạt một trăm linh năm tỷ đồng")
+    assert len(out) == 1, f"cụm bị cắt rời: {out}"
+    assert out[0][0] == "một trăm linh năm tỷ"
+
+
+def test_find_word_number_phrases_ignores_edge_punctuation():
+    """(b) 2026-07-19 — dấu câu dính token KHÔNG được cắt cụt cụm số.
+
+    Ca THẬT (bài `vietnam_airlines_co_dong`): "...hai mươi lăm." — token cuối
+    là "lăm." (có dấu chấm) nên trước đây rơi khỏi từ vựng số, cụm bị cắt thành
+    "năm hai nghìn không trăm hai mươi" = 5020 thay vì 2025 -> guardrail chặn oan.
+
+    HỢP ĐỒNG CHÉO REPO: khớp `findWordNumberPhrases` bên
+    `aigen/src/production-spec/guardrail/verify-spec.ts`.
+    """
+    from twmkt.media_factory.numbers import find_word_number_phrases, parse_vn_number_words
+
+    text = "kiểm toán năm hai nghìn không trăm hai mươi lăm. Vốn chủ"
+    out = find_word_number_phrases(text)
+    assert len(out) == 1, f"cụm bị cắt rời: {out}"
+    phrase, start = out[0]
+    assert phrase == "năm hai nghìn không trăm hai mươi lăm", phrase
+    # offset trả về phải trỏ ĐÚNG vị trí trong text gốc (dùng để dò từ xấp xỉ).
+    assert text[start:].startswith("năm hai")
+    # LƯU Ý: cụm này parse ra 5025 chứ KHÔNG phải 2025 — chữ "năm" (year) bị
+    # đọc thành chữ số 5. Đó là lỗi (c) NHẬP NHẰNG "năm", TÁCH BẠCH với (b) và
+    # CHƯA sửa (chờ Lead chốt hướng, xem tasks/ACTIVE_TASK.md §V2). Ghim lại
+    # hành vi hiện tại để khi (c) được sửa thì test này ĐỎ và buộc cập nhật có
+    # chủ đích, thay vì trôi âm thầm.
+    assert parse_vn_number_words(phrase) == 5025.0, "lỗi (c) đã được sửa? cập nhật test này"
+
+    # Dấu phẩy giữa cụm cũng không được cắt.
+    out2 = find_word_number_phrases("thời kỳ hai nghìn ba mươi, tầm nhìn xa")
+    assert [p for p, _ in out2] == ["hai nghìn ba mươi"], out2
+    assert parse_vn_number_words(out2[0][0]) == 2030.0
+
+    # Hậu tố lớn dính dấu chấm vẫn phải được nhận (không mất "tỷ").
+    out3 = find_word_number_phrases("đạt mười sáu phẩy ba tỷ.")
+    assert [p for p, _ in out3] == ["mười sáu phẩy ba tỷ"], out3
+    assert parse_vn_number_words(out3[0][0]) == 16.3e9
+
+
 def test_parse_vn_number_words_invalid_returns_none():
     from twmkt.media_factory.numbers import parse_vn_number_words
 
@@ -7449,6 +7570,10 @@ def test_parse_vn_number_words_invalid_returns_none():
     assert parse_vn_number_words("con mèo") is None
     assert parse_vn_number_words("tỷ") is None            # chỉ có đơn vị, không có số
     assert parse_vn_number_words("mười ba phẩy con mèo") is None   # phần thập phân hỏng
+    # "lẻ" CỐ Ý không nằm trong từ vựng (xem ghi chú _STRUCTURE_WORDS ở
+    # numbers.py): bộ sinh không bao giờ phát ra nó, còn "bán lẻ" là từ thường
+    # gặp trong văn tài chính — nhận nó chỉ tạo thêm dương tính giả.
+    assert parse_vn_number_words("một trăm lẻ năm") is None
 
 
 def test_find_word_number_phrases_min_length_and_suffix_rule():
