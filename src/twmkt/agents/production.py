@@ -479,6 +479,46 @@ class VideoScriptAgent(Agent):
         'ticker:{"items":[{"symbol":str,"value":str}]}; '
         'news:{"headline":str,"source":str}; '
         'outro:{"brand_name":str,"tagline":str?,"cta":str}.'
+        # V1 (2026-07-19) — HỢP ĐỒNG ĐỊNH DẠNG. Phải GIỐNG HỆT khối cùng tên ở
+        # `prompts/video.v1.md` (file .md là bản NẠP THẬT khi có; chuỗi này là
+        # fallback khi thiếu file — lệch nhau = 2 hành vi khác nhau tuỳ máy).
+        # Lý do tồn tại: Opus từng tự viết "năm hai nghìn không trăm hai mươi
+        # lăm" vào narration, vi phạm `docs/CONTENT_OUTPUT_SCHEMA.md` (narration
+        # giữ nguyên số) — prompt cũ KHÔNG có dòng nào nói về định dạng số.
+        "\n\n---\n\n"
+        "ĐỊNH DẠNG ĐẦU RA — VĂN VIẾT THƯỜNG (quy tắc CỨNG, đọc kỹ TRƯỚC KHI viết)\n\n"
+        "CONTENT.Output là VĂN BẢN ĐỌC BẰNG MẮT (người biên tập duyệt, hệ thống khác\n"
+        "đọc lại) — KHÔNG phải bản ghi âm. Viết mọi con số, mã, ký hiệu, tên riêng Y\n"
+        "HỆT cách viết trong một bài báo tài chính bình thường.\n\n"
+        "TUYỆT ĐỐI KHÔNG viết số thành chữ. TUYỆT ĐỐI KHÔNG phiên âm mã/viết tắt.\n"
+        "Lý do: một tầng TỰ ĐỘNG phía sau (KHÔNG phải bạn) chuyển số→chữ và mã→phiên\n"
+        "âm để sinh giọng đọc TTS. Bạn làm thay = nội dung bị xử lý HAI LẦN = sai.\n"
+        "Việc của bạn là giữ nguyên dạng viết.\n\n"
+        "Áp dụng cho CẢ `narration` LẪN mọi field chữ trong `payload`.\n\n"
+        "| Loại | VIẾT THẾ NÀY | KHÔNG BAO GIỜ viết |\n"
+        "|---|---|---|\n"
+        "| Năm | 2025 · thời kỳ 2021-2030 · tầm nhìn 2050 | hai nghìn không trăm hai mươi lăm |\n"
+        "| Ngày | 14/7 · ngày 14/7/2026 | ngày mười bốn tháng Bảy |\n"
+        "| Quý | Q2/2026 · quý 2/2026 | quý hai năm hai nghìn hai mươi sáu |\n"
+        "| Tỷ lệ | 4,98% · giảm 4,98% · 1-1,4%/năm | bốn phẩy chín tám phần trăm |\n"
+        "| Tiền | 9,34 tỷ đồng · 66.800 đồng · 1.396 triệu tấn | chín phẩy ba bốn tỷ đồng |\n"
+        "| Số đếm | 3 khu công nghiệp · 15 cảng biển loại I | ba khu công nghiệp |\n"
+        "| Mã chứng khoán | HVN · FPT · VNM · HPG | hát vê en · ép pê tê |\n"
+        "| Viết tắt, chỉ số | VN-Index · GDP · CPI · LNG · Teu | vê en in-đéc · giê đê pê |\n"
+        "| Tên riêng | Vietnam Airlines · Hòa Phát · Hòn Khoai | (giữ nguyên, không dịch) |\n\n"
+        "GIỮ NGUYÊN VĂN dạng số như trong evidence: dấu phẩy là THẬP PHÂN (4,98), dấu\n"
+        "chấm là PHÂN CÁCH NGHÌN (66.800). KHÔNG đổi 66.800 thành 66800 hay 66,800.\n\n"
+        "NGOẠI LỆ DUY NHẤT — số dùng như TỪ NGỮ THÔNG THƯỜNG, không mang dữ liệu:\n"
+        '"một trong những", "hai mặt của vấn đề", "vài phiên gần đây", "hàng loạt" —\n'
+        "viết chữ bình thường. Bảng trên áp cho MỌI số MANG GIÁ TRỊ: lượng, tiền, tỷ\n"
+        "lệ, ngày/tháng/quý/năm, thứ hạng, mã số.\n\n"
+        "GHI ĐÈ §4.5 CONTENT_WRITER_RULES: luật \"voice-over cấm dùng mã chứng khoán/\n"
+        "viết tắt\" KHÔNG áp cho `narration` của schema JSON này. `narration` là VĂN\n"
+        "VIẾT, không phải lời đọc — giữ nguyên mã (HVN, VN-Index). Tầng voice phía sau\n"
+        "lo phần đọc.\n\n"
+        "TỰ KIỂM TRƯỚC KHI TRẢ JSON: quét lại từng `narration` và từng field `payload`\n"
+        "— nếu thấy BẤT KỲ con số MANG DỮ LIỆU nào đang viết bằng chữ (không/một/hai/\n"
+        "ba/mười/mươi/trăm/nghìn/triệu/tỷ/phẩy), sửa về dạng chữ số rồi mới trả kết quả."
     )
 
     def run(self, brief: ProductionBrief, decision=None) -> ContentDraft:
