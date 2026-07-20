@@ -33,7 +33,14 @@ storage:
   # http://127.0.0.1:PORT/ để link AssetPath trên Sheet bấm mở được (thay
   # cho file:// — bị trình duyệt chặn khi mở từ trang HTTPS, xác nhận THẬT
   # trên Sheet sống ở Phase 6b).
-  asset_server_port: 8899
+  # ĐỔI 8899 -> 8898 (2026-07-20): 8899 TRÙNG cổng OmniVoice TTS server của
+  # aigen-pipeline (`config/tts.config.json: omnivoiceLocal.endpoint` +
+  # `scripts/omnivoice_server.py --port 8899`). Trên VPS cả hai cùng chạy nên
+  # sẽ tranh cổng ngay khi bật asset_server_enabled. Đổi BÊN NÀY vì không có
+  # dữ liệu nào phụ thuộc: link AssetPath trên Sheet được ghi lại mỗi lần
+  # render (scripts/render_production_assets.py), còn cổng OmniVoice thì nằm
+  # rải trong config + client TS + tài liệu.
+  asset_server_port: 8898
   # Sheet UI cleanup Phase 6d — TẮT mặc định trên máy dev cục bộ.
   # system_power_on.py (thư mục gốc dự án — lệnh gọi hệ thống, không còn nằm
   # trong scripts/) đọc cờ này để TỰ khởi động asset server cùng 2 lịch
