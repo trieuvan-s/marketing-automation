@@ -24,6 +24,8 @@ secrets/
 !.vscode/*.json
 !.claude/*.json
 !tsconfig*.json
+# ...trừ settings.local.json — cấu hình quyền CÁ NHÂN theo máy, không commit
+.claude/settings.local.json
 # Golden set (Phase 3 A/B) — THƯỚC ĐO facts người liệt kê tay, PHẢI ở trong git
 # (khác tests/golden/_raw/*.txt — dữ liệu vận hành, .txt không bị *.json chặn).
 !tests/golden/*.json
