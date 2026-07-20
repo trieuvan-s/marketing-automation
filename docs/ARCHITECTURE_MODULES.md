@@ -72,17 +72,43 @@ Renderer Infographic (GIỮ Ở ĐÂY)     │    spec.ts          (PORT: Produc
 ```
 CONTENT.Output (từ marketing-automation, qua data_root hoặc DB chung sau này)
   → scene-builder (map thuần tất định)
+  → guardrail-2 (đối chiếu facts[], như bên ảnh nhưng cho scenes[])
   → voice (chuẩn hoá: số→chữ, ticker→phiên âm)
   → alias-guardrail (VERIFY sau chuẩn hoá — ticker lạ → throw, nêu rõ mã thiếu)
-  → guardrail-2 (đối chiếu facts[], như bên ảnh nhưng cho scenes[])
   → adapter (sceneToTemplateScene, ĐÃ XONG)
   → TemplateScript (script.json)
   → src/render/ (AIGEN thật — agent-B sở hữu)
 ```
 
-`alias-guardrail.ts` **giữ nguyên code**, chỉ đổi VAI TRÒ trong tài liệu: từ
-"chặn output Opus trực tiếp" thành "lưới verify SAU lớp chuẩn hoá tất định"
-— vì giờ `voice/` đã chuẩn hoá trước khi guardrail thấy text.
+### Vì sao guardrail-2 chạy TRƯỚC voice (R2, chốt 2026-07-19)
+
+Thứ tự ban đầu đặt `voice` trước `guardrail-2`. **Đã đổi** sau lần chạy
+end-to-end đầu tiên trên output Composer THẬT (3 bài trong
+`reports/regression_video_prompt/`): guardrail chặn CẢ 3 bài, và phần lớn vi
+phạm là DƯƠNG TÍNH GIẢ.
+
+Nguyên nhân gốc: đứng sau `voice`, guardrail buộc phải **đọc ngược văn xuôi
+tiếng Việt** thành số — việc này nhập nhằng không gỡ được bằng quy tắc:
+- "năm" vừa là chữ số 5 vừa là "year" → "năm 2020" ra 5020.
+- "Quý **hai năm** nay" bị đọc thành số 2.
+- Bộ SINH phát ra "một trăm linh năm" (105) nhưng từ vựng parser thiếu
+  "linh" → **162/2001 số nguyên** không đọc ngược được (mọi số dạng x0y).
+
+Đứng TRƯỚC `voice`, guardrail thấy `narration` NGUYÊN DẠNG CHỮ SỐ (theo
+`docs/CONTENT_OUTPUT_SCHEMA.md`: narration giữ nguyên số/ticker) → đối chiếu
+`facts[].canonical_*` là khớp CHÍNH XÁC, không phải đoán.
+
+**Phần đánh đổi** — mất lớp kiểm trên output của chính normalizer — được mua
+lại RẺ HƠN và CHẶT HƠN bằng **property round-trip test**
+(`aigen/src/production-spec/voice/spell-out-numbers.test.ts`): mọi số mà
+`spellOutNumbers()` sinh ra PHẢI đọc ngược đúng giá trị qua
+`parseVnNumberWords()`. Nguyên tắc: **kiểm CÁI MÁY SINH, không đọc lại văn
+xuôi tự do.** Chính test này đã phát hiện lỗi "linh" ở trên.
+
+`alias-guardrail.ts` **giữ nguyên vị trí SAU `voice`** và giữ nguyên code —
+việc của nó là bắt ticker mà `voice/` cố ý không đoán phiên âm, thứ chỉ tồn
+tại sau chuẩn hoá. Vai trò trong tài liệu vẫn là "lưới verify SAU lớp chuẩn
+hoá tất định", không phải "chặn output Opus trực tiếp".
 
 ## `facts[]` — hợp đồng CHÉO REPO, điểm drift tiềm tàng DUY NHẤT
 
