@@ -48,7 +48,17 @@ _GROUP_WORDS = ("nghìn", "ngàn")           # bội số ×1.000, xử Ở BẤ
 # ở find_word_number_phrases) dù bản thân nó không có giá trị số — thiếu nó,
 # 1 cụm như "tám phẩy một tám" sẽ bị cắt làm 2 mảnh ("tám" và "một tám") ngay
 # tại "phẩy", làm find_word_number_phrases bỏ sót phần thập phân.
-_STRUCTURE_WORDS = ("mười", "mươi", "trăm", "phẩy") + _GROUP_WORDS
+# "linh" = ĐỆM HÀNG-CHỤC-BẰNG-KHÔNG, KHÔNG mang giá trị ("một trăm linh năm"
+# = 105). PHẢI nằm trong từ vựng số vì 2 lý do tách biệt: `_words_to_int` trả
+# None nếu cụm chứa từ lạ, VÀ `find_word_number_phrases` dùng chính tập này để
+# biết cụm số KẾT THÚC ở đâu — thiếu nó, "một trăm linh năm" vừa không parse
+# được vừa bị cắt làm đôi (phát hiện 2026-07-19 qua property round-trip test
+# `aigen/src/production-spec/voice/spell-out-numbers.test.ts`: 162/2001 số
+# nguyên không đọc ngược được, TẤT CẢ đều dạng x0y).
+# CỐ Ý KHÔNG thêm biến thể "lẻ": bộ SINH (aigen `voice/spell-out-numbers.ts`)
+# chỉ phát ra "linh", trong khi "lẻ" là từ thường gặp trong văn tài chính
+# ("bán lẻ") — đưa vào đây chỉ tạo thêm bề mặt dương-tính-giả, không được gì.
+_STRUCTURE_WORDS = ("mười", "mươi", "trăm", "phẩy", "linh") + _GROUP_WORDS
 _NUMBER_CORE = set(_ONES) | set(_STRUCTURE_WORDS)
 _CURRENCY_WORDS = ("đồng", "usd")   # hậu tố tiền tệ, KHÔNG đổi hệ số (giống %) — chỉ bỏ khỏi
                                     # chuỗi trước khi dò hệ số tỷ/triệu (vd "... tỷ đồng")
@@ -74,6 +84,10 @@ def _parse_small_group(words: list[str]) -> int:
     if len(words) >= 2 and words[1] == "trăm" and words[0] in _ONES:
         total += _ONES[words[0]] * 100
         i = 2
+    # Bỏ từ đệm "linh" trước khi đọc hàng chục/đơn vị — nó đánh dấu "hàng chục
+    # bằng 0", không mang giá trị (xem ghi chú ở _STRUCTURE_WORDS).
+    if i < len(words) and words[i] == "linh":
+        i += 1
     rest = words[i:]
     if not rest:
         return total
@@ -230,6 +244,31 @@ def has_approx_word(text: str) -> bool:
 
 _MIN_STANDALONE_LEN = 2   # cụm < 2 từ CHỈ được nhận nếu có hậu tố lớn theo sau
 
+# Dấu câu bám 2 mép token. CỐ Ý KHÔNG gồm gạch nối "-" (còn dùng giữa từ ghép)
+# và "/" (ngày tháng đi đường CHỮ SỐ, không qua đây).
+_TRIM_CHARS = ".,;:!?…()[]{}\"'“”‘’«»–—"
+
+
+def _strip_token_punct(raw: str) -> tuple[str, int]:
+    """1 token thô -> (LÕI đã bỏ dấu câu 2 mép, số ký tự đã bỏ ở ĐẦU).
+
+    Vì sao cần: tokenize bằng `\\S+` giữ nguyên dấu câu dính vào từ, nên
+    "mươi," / "lăm." KHÔNG khớp `_NUMBER_CORE` -> cụm số bị CẮT CỤT giữa chừng
+    -> parse ra giá trị SAI -> guardrail chặn oan. Ca thật đã gặp
+    (2026-07-19, bài `vietnam_airlines_co_dong`): "...hai mươi lăm." bị cắt
+    thành "năm hai nghìn không trăm hai mươi" = 5020 thay vì 2025.
+
+    Trả thêm `lead` để nơi gọi tính lại offset ký tự CHÍNH XÁC trong text gốc
+    (cần cho việc dò từ xấp xỉ đứng ngay trước cụm).
+
+    HỢP ĐỒNG CHÉO REPO: phải khớp `stripTokenPunct` ở
+    `aigen/src/production-spec/guardrail/verify-spec.ts` — xem
+    `docs/ARCHITECTURE_MODULES.md` §facts[].
+    """
+    core = raw.strip(_TRIM_CHARS)
+    lead = len(raw) - len(raw.lstrip(_TRIM_CHARS)) if core else 0
+    return core, lead
+
 
 def find_word_number_phrases(text: str) -> list[tuple[str, int]]:
     """Tìm các CỤM SỐ VIẾT BẰNG CHỮ trong `text` (chuỗi liên tiếp "từ số" +
@@ -240,13 +279,14 @@ def find_word_number_phrases(text: str) -> list[tuple[str, int]]:
     Giới hạn dương-tính-giả: xem docstring đầu module — cụm 1 từ CHỈ được nhận
     khi có hậu tố lớn/% theo ngay sau (vd "một tỷ" nhận, "một" đứng lẻ KHÔNG)."""
     low = text.lower()
-    # tokenize giữ vị trí ký tự để tính offset chính xác (khác text.split()).
-    tokens = [(m.group(0), m.start()) for m in re.finditer(r"\S+", low)]
+    # tokenize giữ vị trí ký tự để tính offset chính xác (khác text.split()),
+    # kèm LÕI đã bỏ dấu câu 2 mép — xem _strip_token_punct.
+    tokens = [(*_strip_token_punct(m.group(0)), m.start())
+              for m in re.finditer(r"\S+", low)]   # (lõi, lead, start)
     out: list[tuple[str, int]] = []
     i, n = 0, len(tokens)
     while i < n:
-        word, start = tokens[i]
-        if word not in _NUMBER_CORE:
+        if tokens[i][0] not in _NUMBER_CORE:
             i += 1
             continue
         j = i
@@ -262,9 +302,10 @@ def find_word_number_phrases(text: str) -> list[tuple[str, int]]:
             has_suffix = True
         core_len = j - i
         if core_len >= _MIN_STANDALONE_LEN or has_suffix:
-            phrase_start = tokens[i][1]
-            phrase_end_tok = tokens[end - 1]
-            phrase_end = phrase_end_tok[1] + len(phrase_end_tok[0])
+            first_core, first_lead, first_start = tokens[i]
+            last_core, last_lead, last_start = tokens[end - 1]
+            phrase_start = first_start + first_lead
+            phrase_end = last_start + last_lead + len(last_core)
             out.append((low[phrase_start:phrase_end], phrase_start))
         i = end if end > i else i + 1
     return out
