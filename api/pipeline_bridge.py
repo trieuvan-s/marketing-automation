@@ -1,35 +1,43 @@
-"""Điểm ráp DUY NHẤT giữa webhook và pipeline sản xuất thật — STUB, KHÔNG
-gọi gì thật ở nấc này (xem tasks/ACTIVE_TASK.md / docs/VPS_MIGRATION_BACKLOG.md A1).
+"""Điểm ráp DUY NHẤT webhook -> pipeline sản xuất thật (VIỆC 5.2, ráp
+2026-07-20 sau khi produce_from_sheet.run() có tham số `topic_keys`).
 
-GIẢ ĐỊNH CHỮ KÝ (CHƯA XÁC NHẬN — đối chiếu với scripts/produce_from_sheet.py
-THẬT khi ráp, KHÔNG tin giả định này mù quáng):
-    produce_from_sheet(topic_key: str) -> status
-    # status kiểu str, một trong {"DONE", "FAILED", "NEEDS_HUMAN"} — khớp
-    # 3 trạng thái Execute cuối trong state machine
-    # (empty -> RUN -> DONE/FAILED/NEEDS_HUMAN) đã có trên Sheet.
+NGUYÊN TẮC (Lead chốt 5.2/5.3): `run()` là NƠI DUY NHẤT ghi cờ Execute
+(DONE/FAILED/NEEDS_HUMAN) lên Sheet. Bridge CHỈ kích hoạt
+`run(topic_keys=[topic_key])`; client đọc lại trạng thái THẬT qua
+GET /status/{topic_key} (VIỆC 5.4). KHÔNG ghi Execute ở đây (tránh 2 nguồn
+trạng thái cho cùng dữ liệu — chính điều 5.2 cấm).
 
-KHÔNG import `scripts.produce_from_sheet` hay bất kỳ module thật nào của
-pipeline sản xuất ở đây — tại thời điểm viết module này, `scripts/
-produce_from_sheet.py` đang nằm trong vùng agent-B sửa dở (diff lớn chưa
-commit trên `develop`), import lúc này rủi ro lấy nhầm phiên bản/đụng độ.
-RÁP SAU (xem api/README.md): thay thân `run_pipeline()` bằng lệnh gọi thật,
-đối chiếu chữ ký/kiểu trả về ở trên trước khi thay.
+`produce_from_sheet` nằm trong `scripts/` (KHÔNG phải package) -> thêm `scripts/`
+vào sys.path để import `run` (cùng nếp `tests/test_pipeline.py`).
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import sys
 
 logger = logging.getLogger("webhook.pipeline_bridge")
 
+# api/ -> repo root; thêm CẢ scripts/ (import `run`) LẪN src/ (import `twmkt`,
+# dùng bởi đường đọc Sheet trực tiếp ở api/main.py::_read_topic_context) vào
+# sys.path Ở MODULE-LEVEL — main.py import module này TRƯỚC khi phục vụ request,
+# nên twmkt importable ngay cả khi produce_from_sheet chưa được import (lazy).
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for _p in (os.path.join(_REPO_ROOT, "scripts"), os.path.join(_REPO_ROOT, "src")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
 
 async def run_pipeline(topic_key: str) -> str:
-    """STUB — mô phỏng xử lý 1 `topic_key`, trả về status cuối cùng.
+    """Gọi `produce_from_sheet.run(topic_keys=[topic_key])` trong THREAD (run()
+    đồng bộ + nặng: full-fetch/LLM/Sheet) để KHÔNG chẹn event loop FastAPI.
 
-    RÁP SAU: thay toàn bộ thân hàm bằng lệnh gọi `produce_from_sheet`
-    thật (đối chiếu chữ ký trong docstring module trước khi thay — CHƯA
-    xác nhận đây là chữ ký đúng)."""
-    logger.info("STUB run_pipeline(%s) bắt đầu", topic_key)
-    await asyncio.sleep(0.1)  # mô phỏng độ trễ xử lý thật, KHÔNG có ý nghĩa gì khác
-    logger.info("STUB run_pipeline(%s) kết thúc -- status giả lập DONE", topic_key)
-    return "DONE"
+    Trả CHUỖI tóm tắt CHỈ để log — trạng thái THẬT (DONE/FAILED/NEEDS_HUMAN) do
+    `run()` tự ghi lên cột Execute, client đọc qua GET /status/{topic_key}."""
+    from produce_from_sheet import run  # import trễ (sau khi set sys.path)
+
+    logger.info("run_pipeline(%s): produce_from_sheet.run(topic_keys=[...])", topic_key)
+    result = await asyncio.to_thread(run, topic_keys=[topic_key])
+    logger.info("run_pipeline(%s) xong: %s", topic_key, result)
+    return str(result)
