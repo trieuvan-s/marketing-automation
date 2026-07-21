@@ -13,8 +13,8 @@ paths:
 
 # --- Lưu trữ tài liệu sạch (persist / audit) ------------------------
 # PHASE DATA-ROOT: mọi dữ liệu runtime giờ nằm dưới storage.data_root (NGOÀI
-# repo, mặc định "../marketing-automation-database" — override qua biến môi
-# trường DATA_ROOT, xem src/twmkt/config.data_root()). documents_dir/
+# repo, mặc định "../marketing-database/marketing-automation" — override qua
+# biến môi trường DATA_ROOT, xem src/twmkt/config.data_root()). documents_dir/
 # output_dir/drafts_dir bên dưới là đường dẫn CON tính từ data_root (KHÔNG
 # còn tiền tố "storage/" — resolve qua config.data_path(), xem factory.py).
 # Partition theo NGÀY: <data_root>/documents/<YYYY-MM-DD>/<content_hash>.json.
@@ -22,7 +22,12 @@ paths:
 # bản trùng. Chỉ giữ `retention_days` ngày mới nhất (folder cũ hơn bị xoá).
 storage:
   type: "file"                    # file | memory
-  data_root: "../marketing-automation-database"   # GỐC DUY NHẤT dữ liệu runtime, NGOÀI repo
+  # KHO CHUNG 2 repo (2026-07-21): `marketing-database/` là thư mục dùng CHUNG,
+  # mỗi repo ghi vào thư mục con MANG TÊN REPO — marketing-automation/ và
+  # aigen-pipeline/ — KHÔNG ghi đè, KHÔNG lẫn lộn. Tên "marketing-database"
+  # trung lập có chủ đích (tên cũ "marketing-automation-database" gây hiểu nhầm
+  # là của riêng repo này). aigen đọc cùng kho qua config/paths.config.json.
+  data_root: "../marketing-database/marketing-automation"   # GỐC DUY NHẤT dữ liệu runtime, NGOÀI repo
   documents_dir: "documents"
   output_dir: "output"
   drafts_dir: "state/production_drafts"   # hàng chờ --draft/--ingest (Claude Code viết nội dung)

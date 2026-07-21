@@ -7,11 +7,16 @@
 ## Vị trí thư mục (sibling, KHÔNG lồng nhau)
 
 ```
-D:\trung-temp\
-  marketing-automation\            <- repo này
-  aigen\                           <- repo TypeScript (LƯU Ý: tên thư mục là "aigen",
-                                      KHÔNG phải "aigen-pipeline")
-  marketing-automation-database\   <- data_root (storage.data_root = "../marketing-automation-database")
+trung-temp\
+  marketing-automation\      <- repo này
+  aigen\                     <- repo TypeScript (⚠️ tên thư mục THẬT là "aigen",
+                                nhưng media_factory.aigen_repo_path = "../aigen-pipeline"
+                                -> SEAM ĐANG TRỎ SAI, xem backlog)
+  marketing-database\        <- KHO CHUNG 2 repo (đổi tên 2026-07-21), NGOÀI git
+    marketing-automation\    <- data_root repo này (storage.data_root =
+                                "../marketing-database/marketing-automation")
+      documents\ output\ state\ logs\        (output\ partition theo NGÀY)
+    aigen-pipeline\          <- data_root của aigen (config/paths.config.json)
 ```
 
 ## Tầng 1 — ĐÃ DỰNG (suite Python chạy được)
@@ -71,7 +76,7 @@ có classifier duyệt từng lệnh.
 |---|---|---|
 | Service Account Google Sheet | `sheets.creds_path: "secrets/sa.json"` | CÓ |
 | Biến bí mật | `secrets/.env` — `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | CÓ (đủ 2 biến settings.yaml tham chiếu) |
-| data_root | `storage.data_root: "../marketing-automation-database"` | CÓ |
+| data_root | `storage.data_root: "../marketing-database/marketing-automation"` | CÓ |
 
 Không có `secrets/.env.example` trong repo — danh sách biến cần lấy từ
 `grep '${' config/settings.yaml`. `ANTHROPIC_API_KEY` để trống là HỢP LỆ khi

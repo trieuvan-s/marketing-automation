@@ -236,6 +236,10 @@ LLMClient.complete(system, prompt, *, model=None, fail_loud=False)   # mở rộ
 ### 5.7 Hạ tầng: KHÔNG engineer cho 2 DB, dồn về 1 VPS — CHỐT
 - `data_root` (config-first): mọi ghi dữ liệu runtime qua `config.data_path(*parts)`; mặc định
   `storage.data_root: "../marketing-automation-database"` (ngoài repo, override qua `${DATA_ROOT}`).
+  > ⚠️ **LỖI THỜI 2026-07-21** (ghi chú sửa tại chỗ, cùng nếp các mục lỗi thời khác của file này):
+  > kho đổi tên thành `marketing-database/` (TRUNG LẬP, dùng chung 2 repo) và mỗi repo ghi vào thư
+  > mục con MANG TÊN REPO. Giá trị đúng hiện nay: `storage.data_root:
+  > "../marketing-database/marketing-automation"`. Cơ chế `data_path()`/`${DATA_ROOT}` KHÔNG đổi.
 - Đây **KHÔNG phải web app**. Kỷ luật TẠM THỜI tới khi có VPS: **một máy crawl/ghi tại một thời
   điểm**; TOCTOU (2 máy ghi ĐỒNG THỜI) **cố ý CHƯA xử lý** — khảo code xác nhận chỉ có
   `system_power_on.py: acquire_lock()/release_lock()` (trước đây `scripts/power_on.py`, đã chuyển ra

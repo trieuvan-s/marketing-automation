@@ -9,9 +9,14 @@
 
 ## MÁY MỚI (2026-07-19) — vị trí/môi trường
 
-- Repo nằm ở `D:\trung-temp\`: `marketing-automation` + `aigen` (LƯU Ý: thư
-  mục đổi tên, KHÔNG còn là "aigen-pipeline") + `marketing-automation-database`
-  (data_root, đúng vị trí sibling theo `settings.yaml`).
+- Repo nằm ở `trung-temp\`: `marketing-automation` + `aigen` (LƯU Ý: thư mục
+  đổi tên, KHÔNG còn là "aigen-pipeline") + **`marketing-database`** (KHO CHUNG).
+- **KHO DỮ LIỆU ĐỔI 2026-07-21** — tên cũ `marketing-automation-database` ĐÃ BỎ.
+  Kho chung tên trung lập, mỗi repo 1 thư mục con MANG TÊN REPO:
+  `marketing-database/marketing-automation/` (documents·output·state·logs,
+  `output/` partition theo NGÀY) và `marketing-database/aigen-pipeline/`
+  (`<job>/` render). Dữ liệu cũ đã move, kho cũ đã xoá. Config:
+  `settings.yaml storage.data_root` + `aigen config/paths.config.json dataRoot`.
 - Secrets ĐÃ ĐỦ: `secrets/.env` (732B) + `secrets/sa.json` (2389B) bên
   marketing-automation; `.env.local` bên aigen.
 - **Node v24.18.0 + npm 11.16.0 CÓ; ffmpeg/ffprobe 8.1.2 CÓ (trên PATH)** —

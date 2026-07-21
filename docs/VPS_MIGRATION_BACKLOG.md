@@ -196,13 +196,30 @@ Phụ thuộc A1 (endpoint) và B1 (LOG neo theo TopicKey, không theo dòng).
   `frame-pentagram-stat` đã có `fitText`). Bằng chứng: scene 2 hero "Bỏ phân
   nhóm cảng" (17ch) → "cảng" vỡ "cả"/"ng"; scene 4 "Hòn Khoai: bến cảng lưỡng
   dụng" (30ch) → vỡ 4 dòng cắt giữa từ. Lead chọn CHẤP NHẬN TẠM (2026-07-20),
-  sửa ở vòng tối ưu sau. 3 hướng đã cân nhắc: (a) thêm fitText vào template
-  [agent-B, render], (b) siết contract hero statement ≤10-12 ký tự [Composer],
-  (c) đổi mapping statement-dài sang template khác. KHÔNG có test nào bắt —
-  cùng lớp C5, soi frame thủ công.
+  sửa ở vòng tối ưu sau.
+
+  ✅ **ĐÃ SỬA 2026-07-21 (P0-1) — Lead RÚT LẠI "chấp nhận tạm".** Chẩn đoán ban
+  đầu (thiếu fitText) SAI: template ĐÃ CÓ auto-fit. Nguyên nhân THẬT: JS tách
+  hero thành **từng KÝ TỰ** `<span class="ch">` với `display:inline-block` (cho
+  animation), **và đổi khoảng trắng thành NBSP** → nbsp CẤM ngắt ở khoảng trắng
+  nên trình duyệt buộc ngắt **GIỮA 2 KÝ TỰ** ⇒ vỡ âm tiết. (Không hề có
+  `word-break:break-all` trong repo — đã grep.) Sửa: gom ký tự theo **TỪ**, mỗi
+  từ 1 `<span class="w">` (inline-block + `white-space:nowrap`), giữa các từ là
+  SPACE THẬT = điểm ngắt hợp lệ duy nhất; thêm `word-break:keep-all` +
+  `overflow-wrap:break-word`; hạ sàn auto-fit 60→44px. Chỉ
+  `frame-build-minimal` tách ký tự (đã grep toàn templates) nên khu trú.
+  Nghiệm thu video thật: 12s/22s "Bỏ phân/nhóm/cảng", 55s "Hòn/Khoai:/bến cảng/
+  lưỡng/dụng" — mọi từ NGUYÊN VẸN.
 - **C7.** [2026-07-20] Outro `primary_url` = link FB profile thô 67 ký tự
   (`BRAND_PRIMARY_URL` trong `aigen production-spec/index.ts`) wrap 2 dòng
   uppercase, xấu. Cân nhắc link rút gọn cho kênh (đã ghi từ HANDOFF, chưa làm).
+
+  ✅ **ĐÃ XONG 2026-07-21 (P0-3).** Gỡ hard-code, chuyển sang CONFIG:
+  `aigen/config/brand.config.json::primaryUrl` (env `AIGEN_BRAND_PRIMARY_URL`),
+  loader `aigen/src/brand.ts`. Mặc định `fb.com/61591919403758` — đường dẫn
+  THẬT của Facebook (redirect đúng profile), 21 ký tự thay vì 67. Để RỖNG `""`
+  = ẩn hẳn slot (đã hạ `primary_url` xuống `required:false`). Nghiệm thu 76s:
+  hiện `FB.COM/61591919403758` gọn 1 dòng.
 - **C8.** [nhánh `feature/webhook-store`, đánh số lại từ C6 trùng khi rebase
   lên develop 2026-07-21 — nội dung KHÔNG đổi] Service webhook chết giữa
   chừng → cờ `Execute` kẹt `RUN` vĩnh viễn, user không kích hoạt lại được.
@@ -220,6 +237,68 @@ Phụ thuộc A1 (endpoint) và B1 (LOG neo theo TopicKey, không theo dòng).
   enum này tồn tại khi bắt đầu sửa file) — **người merge/rebase SAU CÙNG (khi
   cả 2 agent xong) phải chủ động rà lại `scripts/produce_from_sheet.py` tìm
   `"video_script"` còn sót**, đừng để mỗi bên tưởng bên kia đã sửa.
+
+  ✅ **ĐÃ XONG 2026-07-21 (agent-B) — GHI CHÚ TRÊN LÀ STALE.** Note này viết
+  TRƯỚC khi agent-B sửa; agent-B đã migration enum trong cùng phiên đó (VIỆC 2/
+  C7). Xác minh SAU merge trên develop mới nhất:
+  `grep -rn "video_script" scripts/ src/ --include=*.py` → chỉ còn **3 COMMENT**
+  giải thích migration (`produce_from_sheet.py:124`, `models.py:34`,
+  `sheets_board.py:625`), **KHÔNG còn literal code nào**. Giá trị thật:
+  `models.py::ContentFormat.VIDEO_SCRIPT = "video"` ·
+  `sheets_board.py::_FULL_TYPES = {"article","video","infographic"}` ·
+  `produce_from_sheet.py::_ALL_TYPES = ("infographic","article","video")` ·
+  `_CHANNEL_TO_TYPE = {..., "video": "video"}`. KHÔNG cần hành động thêm.
+
+- **C10.** ✅ **ĐÃ SỬA 2026-07-21 (P0-2) — quirk #1/#2 THẬT, lần đầu bắt được.**
+  Chuỗi `9:16` hiện ở góc phải trên cảnh hook như thể là nội dung. KHÔNG phải
+  adapter đẩy `aspect` vào `inputs` (đã grep: `aspect` chỉ ở cấp `script`,
+  không vào inputs) mà là **hardcode thẳng trong markup template**:
+  `frame-liquid-bg-hero/compositions/portrait.html` có `<span>9:16</span>` cạnh
+  ô `kicker` (sót từ bản demo). Gỡ ở cả `compositions/portrait.html` và
+  `index.html` (bản 16:9 có `<span>16:9</span>` cùng lỗi). Nghiệm thu 3s: sạch.
+- **C11.** ✅ **ĐÃ SỬA 2026-07-21 (P0-4).** 2 ô bo tròn TRỐNG TRƠN ở vị trí icon
+  trong `frame-icon-list`. Template mong `items[].icon` là **EMOJI** (xem demo
+  `data-composition-variables`), nhưng hợp đồng `ListItem` của CONTENT.Output là
+  `{title, desc, tag?}` — **KHÔNG có `icon`**, nên Composer không bao giờ cấp →
+  vẫn tạo `.chip` với text rỗng → ô trống. Sửa: không có icon thì KHÔNG tạo ô
+  (ẩn hẳn); áp cùng cách cho `tag` rỗng. Nghiệm thu 30s/42s: card sạch.
+- **C12.** ⛔ **NHẠC NỀN — CHẶN vì GIẤY PHÉP (B2, 2026-07-21).** Repo KHÔNG có
+  file nhạc nào (chỉ `tests/fixtures/sample-audio-*.mp3` là fixture test).
+  `assets/sfx/` RỖNG. Script `scripts/download-sfx.ts` sẵn có **scrape
+  myinstants.com** — sound do người dùng upload, **giấy phép không rõ, phần lớn
+  là clip có bản quyền** → KHÔNG dùng được cho nội dung đăng công khai (đúng
+  rủi ro pháp lý Lead nêu). Agent KHÔNG tải gì. **CẦN LEAD**: cung cấp 1 track
+  royalty-free (CC0/CC-BY hoặc đã mua) + ghi nguồn/giấy phép, rồi mới ráp
+  plumbing (ffmpeg đã mix `sfx` từng cảnh nên thêm track nền là thay đổi nhỏ:
+  volume ~15-20%, fade in/out, bật/tắt qua config).
+- **C14.** ✅ **ĐÃ SỬA 2026-07-21 — "video mất giọng đọc" (KHÔNG phải lỗi audio).**
+  Triệu chứng: 2 lần render gần nhất bị báo không có voice. Truy bằng đo đạc,
+  KHÔNG đoán: cả 3 lần render (`e2e` được xác nhận có tiếng, `e2e-real`,
+  `e2e-cang-bien`) đều có luồng **AAC 44.1kHz mono ~150kbps GIỐNG HỆT NHAU**,
+  `volumedetect` mean ≈ −20.5 dB / max ≈ −0.9 dB, `silencedetect` cho cấu trúc
+  THOẠI liên tục (chỉ 5 khoảng nghỉ 0.6–0.8s trong 78s) ⇒ **pipeline audio
+  KHÔNG hề hỏng, không có regression**.
+  Gốc THẬT: `template-pipeline.ts` để lại file trung gian **`video-silent.mp4`
+  (KHÔNG có luồng audio) NGAY TRONG thư mục giao hàng**, cạnh `video.mp4`, và
+  `video-silent` **sắp xếp ĐỨNG TRƯỚC** trong file explorer → mở nhầm = không
+  tiếng. Sửa: `rm(silentVideo)` sau khi mux xong (trung gian thuần, chỉ là đầu
+  vào cho mux, tái tạo được từ `clips/`) ⇒ thư mục output chỉ còn ĐÚNG 1 video.
+  Đã dọn 2 file sót ở `e2e/`, `e2e-real/`. (Còn 2 file trong
+  `output/golden-fixtures/`, `output/omnivoice-pipeline-test/` — CỐ Ý GIỮ, là
+  fixture đối chiếu, không thuộc thư mục giao hàng.)
+  **BÀI HỌC**: nghiệm thu video lần trước chỉ soi `script.txt` (văn bản) mà
+  KHÔNG `ffprobe` luồng audio — từ nay nghiệm thu PHẢI kiểm luồng audio + đo
+  `volumedetect`, không suy từ việc "voice.mp3 có tồn tại".
+- **C13.** [GHI NHẬN 2026-07-21, Lead hoãn — không làm đợt này] Chất lượng
+  DỰNG HÌNH, xếp theo thứ tự đề nghị:
+  1. **Video gần như BẤT ĐỘNG** — frame 12s≡22s, 30s≡42s giống hệt; mỗi cảnh
+     đứng yên 8-13s, không chuyển động, không chuyển cảnh. Hướng: `xfade` giữa
+     cảnh + Ken Burns (zoom chậm) trong cảnh.
+  2. **Bỏ trống ~60% màn hình** ở cảnh `frame-icon-list` (nội dung dồn 40% trên)
+     — xác nhận lại ở 30s/42s sau khi sửa P0-4.
+  3. **BA bảng màu trong 1 video**: hồng-tím (hook) → xanh lá (build-minimal) →
+     trắng-cam (icon-list). Không cái nào khớp brand FVA (xanh dương/vàng gold
+     như logo). Cần thống nhất palette theo brand.
 
 ---
 
