@@ -13,9 +13,11 @@ dist/
 .vscode/
 
 # Phase DATA-ROOT: dữ liệu runtime (documents/output/state/logs/ab) chuyển
-# sang storage.data_root NGOÀI repo (mặc định ../marketing-automation-database,
-# xem config/settings.yaml + src/twmkt/config.data_path()) — không còn thư mục
-# storage/ trong repo nên KHÔNG cần rule gitignore riêng cho nó nữa.
+# sang storage.data_root NGOÀI repo (mặc định
+# ../marketing-database/marketing-automation — thư mục CON riêng của repo
+# này dưới DB dùng chung với aigen-pipeline, xem config/settings.yaml +
+# src/twmkt/config.data_path()) — không còn thư mục storage/ trong repo nên
+# KHÔNG cần rule gitignore riêng cho nó nữa.
 
 # Bí mật — KHÔNG commit khóa service account / token
 secrets/

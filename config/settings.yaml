@@ -20,6 +20,14 @@ paths:
 # Partition theo NGÀY: <data_root>/documents/<YYYY-MM-DD>/<content_hash>.json.
 # Dedup theo NỘI DUNG chéo các ngày còn giữ -> crawl nhiều lần/ngày không tạo
 # bản trùng. Chỉ giữ `retention_days` ngày mới nhất (folder cũ hơn bị xoá).
+#
+# THƯ MỤC MẸ DÙNG CHUNG (2026-07-21, xem docs/VPS_MIGRATION_BACKLOG.md A2):
+# marketing-automation VÀ aigen-pipeline cùng ghi vào 1 thư mục cha
+# "marketing-database" (sibling 2 repo) nhưng đường TÁCH BẠCH theo tên repo
+# -- marketing-database/marketing-automation/ (repo NÀY) và
+# marketing-database/aigen-pipeline/ (repo kia) -- KHÔNG BAO GIỜ ghi đè/lẫn
+# lộn 2 phần. Cấu trúc: <thư_mục_mẹ>/{marketing-automation,aigen-pipeline,
+# marketing-database/{marketing-automation,aigen-pipeline}}.
 storage:
   type: "file"                    # file | memory
   # KHO CHUNG 2 repo (2026-07-21): `marketing-database/` là thư mục dùng CHUNG,
@@ -69,6 +77,27 @@ render:
     text: "#F5F5F0"
     text_muted: "#9FB3C8"
     font_family: "Arial, 'Segoe UI', sans-serif"
+    # HYBRID (2026-07-19, xem docs/VPS_MIGRATION_BACKLOG.md C6) — "hybrid":
+    # sinh ảnh nền qua OpenAI (cache-first, tất định qua cache — xem
+    # render/ai_background.py), fallback tự động "pure_html" nếu thiếu
+    # OPENAI_API_KEY/lỗi API/timeout. "pure_html": bỏ qua HOÀN TOÀN lớp AI —
+    # không gọi API, không cần key (đường lui + mặc định an toàn cho CI/test).
+    render_mode: "hybrid"
+
+# Lớp AI (mềm) của renderer Infographic Hybrid — CHỈ sinh ẢNH NỀN, KHÔNG BAO
+# GIỜ chữ/số/bản đồ/icon (xem render/ai_background.py docstring). model/size/
+# quality CONFIG được, không hardcode trong code gọi API — đổi model/kích
+# thước/chi phí chỉ sửa Ở ĐÂY.
+infographic:
+  ai_background:
+    model: "gpt-image-1"
+    size: "1024x1536"             # portrait, gần khớp tỉ lệ canvas 4:5
+    quality: "low"                 # "low"|"medium"|"high" — kiểm soát chi phí
+    # cache_dir: đường dẫn CON tính từ storage.data_root (config.data_path(),
+    # CÙNG NẾP documents_dir/output_dir) — TUYỆT ĐỐI KHÔNG để cache ảnh sinh
+    # ra (dữ liệu runtime, dù thật hay test) nằm TRONG repo. Resolve thật:
+    # <data_root>/assets/{generated/<hash>.png, manifest.json}.
+    cache_dir: "assets"
 
 # --- Prompt agent sản xuất (version-controlled, đổi văn phong không sửa code) --
 # Tab PROMPTS (Name|Version|Enable) trên Sheet chọn version đang dùng; nội dung

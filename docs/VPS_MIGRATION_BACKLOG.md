@@ -78,6 +78,27 @@ data_root KHÔNG đồng bộ giữa 2 máy là nguồn nhiều bug thật (dòn
 evidence thiếu khi đổi máy). Bản CHUẨN = PC-A. Lên VPS: copy từ PC-A lên, VPS
 là nơi ở VĨNH VIỄN, không đồng bộ ngược, không giữ bản song song.
 
+**Bổ sung 2026-07-21 (nhánh `feature/infographic-hybrid`) — chốt TÊN + cấu
+trúc thư mục DB dùng chung trên VPS:**
+```
+<thư mục mẹ>/
+  marketing-automation/                       <- repo này
+  aigen-pipeline/                             <- repo kia
+  marketing-database/                         <- DB DÙNG CHUNG (đổi tên từ
+                                                  "marketing-automation-database")
+    marketing-automation/                     <- data_root CỦA repo này
+    aigen-pipeline/                           <- data_root của aigen-pipeline
+```
+2 repo ghi vào 2 thư mục CON riêng theo TÊN REPO dưới `marketing-database/`
+— KHÔNG ghi thẳng vào gốc `marketing-database/`, KHÔNG ghi lẫn/đè giữa 2
+repo. Đã cập nhật `storage.data_root` mặc định trong
+`config/settings.yaml` + `src/twmkt/config.py::_DEFAULT_DATA_ROOT` sang
+`"../marketing-database/marketing-automation"`. **aigen-pipeline (repo
+KHÁC, không sửa từ đây) cũng cần đổi data_root tương ứng sang
+`marketing-database/aigen-pipeline/` khi ghép nối trên VPS** — nằm ngoài
+phạm vi sửa của nhánh này, cần agent/dev phụ trách repo aigen-pipeline tự
+làm.
+
 ### A3. Hợp nhất repo thành sibling directory
 marketing-automation và **aigen-pipeline** (KHÔNG phải aigen-fva-capital — đã
 chết) nằm cạnh nhau. Sau đó mới test được seam THẬT.
@@ -299,6 +320,16 @@ Phụ thuộc A1 (endpoint) và B1 (LOG neo theo TopicKey, không theo dòng).
   3. **BA bảng màu trong 1 video**: hồng-tím (hook) → xanh lá (build-minimal) →
      trắng-cam (icon-list). Không cái nào khớp brand FVA (xanh dương/vàng gold
      như logo). Cần thống nhất palette theo brand.
+- **C15.** [nhánh `feature/infographic-hybrid`, đánh số lại từ C6 TRÙNG khi
+  rebase lên develop 2026-07-22 (C6 đã có sẵn — hero frame-build-minimal) —
+  nội dung KHÔNG đổi] `OPENAI_API_KEY` (2026-07-20) — bí mật MỚI cho lớp AI
+  Background của Infographic Hybrid (`src/twmkt/render/ai_background.py`).
+  Hiện chỉ có ở `secrets/.env` máy local (gitignored, KHÔNG commit) → khi lên
+  VPS phải cấu hình lại `OPENAI_API_KEY` trong `secrets/.env` của VPS, cùng
+  nếp với `ANTHROPIC_API_KEY` hiện có. Thiếu key KHÔNG crash (tự fallback
+  `render_mode=pure_html`, xem cảnh báo trong log) nhưng mất lớp nền AI — cần
+  xác nhận key có mặt sau mọi lần chuyển máy/VPS nếu muốn giữ chế độ hybrid
+  mặc định.
 
 ---
 
