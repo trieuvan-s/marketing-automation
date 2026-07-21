@@ -3446,14 +3446,17 @@ class _EmptyRouteLLM:
         return ""
 
 
-def _run_produce_scenario(writer_llm, approved_row: dict, route_llm=None, decisions_path=None):
+def _run_produce_scenario(writer_llm, approved_row: dict | None = None, route_llm=None, decisions_path=None,
+                          *, approved_rows: list[dict] | None = None, run_kwargs: dict | None = None):
     """Chạy produce_from_sheet.run() THẬT với board/notifier/route_llm/writer_llm
     giả lập qua monkeypatch — trả (result, board, notifier). Khôi phục mọi
     monkeypatch trong finally (không rò rỉ sang test khác). `route_llm` mặc
     định _EmptyRouteLLM() (Phase 4.9); Phase 4.12 truyền route_llm riêng để mô
     phỏng Brief trả no_numeric_content=True. `decisions_path` (Phase (a)-SEAL):
     truyền CÙNG path ở 2 lần gọi để mô phỏng route-once BỀN qua 2 lần chạy
-    produce() thật (mặc định mỗi lần gọi 1 thư mục tạm RIÊNG — không persist)."""
+    produce() thật (mặc định mỗi lần gọi 1 thư mục tạm RIÊNG — không persist).
+    `approved_rows`/`run_kwargs` (VIỆC 5.1): nhiều dòng + kwargs cho run() (vd
+    topic_keys); mặc định 1 dòng `approved_row` + run(limit=5) như cũ."""
     import tempfile
     from pathlib import Path
     sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
@@ -3466,7 +3469,8 @@ def _run_produce_scenario(writer_llm, approved_row: dict, route_llm=None, decisi
     data["router"] = {"decisions_path": str(decisions_path)}
     test_settings = Settings(data)
 
-    board = _FakeProduceBoard([approved_row])
+    rows = approved_rows if approved_rows is not None else [approved_row]
+    board = _FakeProduceBoard(rows)
     notifier = _FakeProduceNotifier()
     route_llm = route_llm if route_llm is not None else _EmptyRouteLLM()
 
@@ -3481,7 +3485,7 @@ def _run_produce_scenario(writer_llm, approved_row: dict, route_llm=None, decisi
     pfs.factory.make_llm = lambda settings: route_llm
     pfs.factory.build_writer_llm = lambda settings: writer_llm
     try:
-        result = pfs.run(limit=5)
+        result = pfs.run(**(run_kwargs if run_kwargs is not None else {"limit": 5}))
     finally:
         pfs.load_settings = orig["load_settings"]
         pfs._open_board = orig["_open_board"]
@@ -3513,6 +3517,41 @@ def test_run_article_done_writes_content_marks_execute_done_and_notifies():
     article_events = [e for e, ctx in notifier.events if ctx.get("type") == "article"]
     assert "start" in events and "gate2_done" in events
     assert "draft_changed" in article_events and "error" not in article_events
+
+
+def test_run_topic_keys_filters_to_matched_rows_and_ignores_limit():
+    """VIỆC 5.1 (điểm ráp webhook per-topic):
+    - topic_keys=[k] -> CHỈ dòng có TopicKey=k được xử lý (Execute cập nhật);
+      dòng khác KHÔNG chạm.
+    - limit KHÔNG cắt cụt khi topic_keys được truyền (danh sách user bấm).
+    - topic_keys=None -> hành vi cũ (xử tất cả) — tương thích ngược scheduler 30'.
+    run() vẫn là NƠI DUY NHẤT ghi Execute (webhook chỉ đọc lại)."""
+    class _CleanWriterLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            return _clean_writer_json()
+
+    def rows():
+        return [
+            _approved_row("Bài A 5.1", row=2, topic_key="tk-A"),
+            _approved_row("Bài B 5.1", row=3, topic_key="tk-B"),
+        ]
+
+    # topic_keys=[tk-A] -> CHỈ dòng 2 chạm Execute, dòng 3 không.
+    _r, board_a, _n = _run_produce_scenario(
+        _CleanWriterLLM(), approved_rows=rows(), run_kwargs={"topic_keys": ["tk-A"]})
+    assert 2 in board_a.execute_updates
+    assert 3 not in board_a.execute_updates
+
+    # limit=1 nhưng topic_keys 2 phần tử -> XỬ CẢ HAI (limit bị bỏ qua).
+    _r2, board_both, _n2 = _run_produce_scenario(
+        _CleanWriterLLM(), approved_rows=rows(),
+        run_kwargs={"topic_keys": ["tk-A", "tk-B"], "limit": 1})
+    assert 2 in board_both.execute_updates and 3 in board_both.execute_updates
+
+    # topic_keys=None -> hành vi cũ: xử tất cả.
+    _r3, board_all, _n3 = _run_produce_scenario(
+        _CleanWriterLLM(), approved_rows=rows(), run_kwargs={"limit": 5})
+    assert 2 in board_all.execute_updates and 3 in board_all.execute_updates
 
 
 def test_run_infographic_composer_swaps_to_route_llm_and_flags_needs_human_when_facts_empty():

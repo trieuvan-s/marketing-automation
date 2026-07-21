@@ -201,7 +201,18 @@ def run_sync_only() -> dict:
 
 
 def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
-        setup: bool = False) -> dict:
+        setup: bool = False, topic_keys: list[str] | None = None) -> dict:
+    """Sản xuất cho các dòng CONTEXT Status=APPROVE + Execute∈{RUN,FAILED}.
+
+    `topic_keys` (VIỆC 5.1 — điểm ráp webhook per-topic):
+      - None (mặc định) -> HÀNH VI CŨ: quét TẤT CẢ dòng đủ điều kiện, cắt theo
+        `limit`. Scheduler 30' (system_power_on) KHÔNG phải sửa — tương thích ngược.
+      - list -> CHỈ xử lý các dòng có TopicKey nằm trong danh sách (dòng user bấm
+        Execute qua webhook). `limit` BỊ BỎ QUA để không âm thầm cắt cụt danh sách.
+    Trả dict tổng hợp {approved, produced, skipped}. `run()` là NƠI DUY NHẤT ghi
+    cờ Execute (DONE/FAILED/NEEDS_HUMAN) lên Sheet — webhook chỉ đọc lại để trả
+    trạng thái (xem api/, VIỆC 5.2-5.5), KHÔNG tự ghi Execute (tránh 2 nguồn
+    trạng thái, VIỆC 5.2/5.3)."""
     settings = load_settings()
     board = _open_board(settings, setup=setup)
     notifier = make_notifier(settings)   # PHASE TELE — no-op êm nếu chưa cấu hình; KHỞI TẠO Ở TẦNG CAO NHẤT
@@ -236,11 +247,20 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
     # đang chờ người can thiệp.
     board.sync_approve_execute_flags()
     approved = [a for a in board.read_approved_context() if a["execute"] in ("RUN", "FAILED")]
+    # VIỆC 5.1: webhook per-topic -> lọc ĐÚNG các dòng user bấm (khớp TopicKey
+    # đã lưu ở cột CONTEXT). None = quét cả lô như cũ. Dòng chưa có TopicKey
+    # (rỗng) KHÔNG khớp bất kỳ key nào -> tự loại, đúng ý (không target được).
+    if topic_keys is not None:
+        wanted = set(topic_keys)
+        approved = [a for a in approved if a["topic_key"] in wanted]
     if not approved:
         print("Không có dòng CONTEXT nào Status=APPROVE và Execute=RUN/FAILED (chưa sản xuất "
               "hoặc đang chờ NEEDS_HUMAN). Duyệt ở tab CONTEXT trước.")
         return {"approved": 0, "produced": 0, "skipped": 0}
-    approved = approved[:limit]
+    # `limit` CHỈ áp đường quét-cả-lô. Khi lọc theo topic_keys, xử ĐỦ danh sách
+    # (BỎ QUA limit — không để limit=5 cắt cụt danh sách user bấm, VIỆC 5.1).
+    if topic_keys is None:
+        approved = approved[:limit]
 
     # PROMPTS: đọc LIVE tab (Name|Version|Enable) -> resolve prompts/<name>.<v>.md;
     # thiếu tab/dòng/file -> giữ default nội bộ trong code (KHÔNG crash). LƯU Ý
