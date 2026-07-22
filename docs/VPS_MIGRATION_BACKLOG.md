@@ -331,6 +331,52 @@ Phụ thuộc A1 (endpoint) và B1 (LOG neo theo TopicKey, không theo dòng).
   xác nhận key có mặt sau mọi lần chuyển máy/VPS nếu muốn giữ chế độ hybrid
   mặc định.
 
+  **CẬP NHẬT 2026-07-21**: `pure_html` ĐÃ XOÁ KHỎI CODE (xem C16) — dòng
+  "thiếu key KHÔNG crash, tự fallback pure_html" ở trên KHÔNG còn đúng cho
+  render_mode mặc định mới ("ai_full"); xem chi tiết ở C16.
+- **C16.** [nhánh `feature/infographic-hybrid`, 2026-07-21, QUYẾT ĐỊNH LEAD —
+  ĐẢO HƯỚNG render Infographic] `render.infographic.render_mode` mặc định đổi
+  `"hybrid"` → **`"ai_full"`** (AI, model `gpt-image-2`, sinh TOÀN BỘ ảnh —
+  xem `render/ai_full.py` + `render/brand_stamp.py`). Căn cứ: spike so sánh
+  ảnh AI 100% với renderer HTML/SVG thuần (2 vòng cải tiến template) cho AI
+  vượt xa rõ rệt — xem lịch sử hội thoại 2026-07-21 để có bằng chứng ảnh đầy đủ.
+  - **`pure_html` (renderer SVG làm đường CHÍNH + `block_kind`/`BLOCK_KINDS`
+    13 giá trị + guardrail-2 nhánh `blocks` của `verify_spec()` +
+    `build_spec_from_content()`) ĐÃ XOÁ KHỎI CODE** — `media_factory/spec.py`
+    giờ chỉ còn phục vụ trục video (`scenes`). `render/infographic.py`
+    (renderer SVG) và `render/ai_background.py` **GIỮ NGUYÊN, CHẠY ĐƯỢC** —
+    đây là engine của `render_mode="hybrid"` (giữ làm đường tối ưu tương lai,
+    KHÔNG phát triển thêm đợt này) — KHÔNG xoá vì hybrid vẫn cần nó.
+  - **RỦI RO ĐÃ BIẾT, CHẤP NHẬN CÓ CHỦ ĐÍCH**: guardrail-2 nhánh ảnh (đối
+    chiếu output_data với facts[] TRƯỚC KHI RENDER) không còn tồn tại cho
+    infographic — nếu người sửa tay output_data ở Gate 2 gõ nhầm số, AI
+    (ai_full) vẽ NGUYÊN VĂN số sai vào ảnh, không gì tự động bắt trước khi
+    ghi AssetPath. Gate 2 (duyệt người) + Gate 3 (duyệt asset) là 2 lớp chặn
+    còn lại — KHÔNG có lớp code ở giữa nữa (khác trục video, vẫn giữ
+    nguyên qua `ProductionScene`).
+  - `OPENAI_API_KEY` (C15) từ đây là secret **BẮT BUỘC** để render_mode mặc
+    định hoạt động — thiếu key KHÔNG còn có đường lui "tự về pure_html" (đã
+    xoá), chỉ còn NEEDS_HUMAN. VPS PHẢI có key trước khi bật `ai_full`.
+  - `scripts/render_infographic.py` (SVG-only) giữ nguyên, dùng cho hybrid.
+    `scripts/render_production_assets.py` viết lại để gọi `render_ai_full()`.
+  - **CHƯA có bảng giá `gpt-image-2` xác nhận** — chi phí ghi qua token usage
+    THẬT (`manifest.json`), không tự quy đổi USD. Đo thật 2026-07-21: ~55-95s/
+    ảnh (quality medium), 3 tỷ lệ (1:1/4:5/9:16) mỗi tỷ lệ 1 lệnh gọi riêng
+    (size chính xác, không crop).
+  - **ĐÃ QUYẾT (2026-07-22, Lead)**: ảnh AI vẽ logo/livery THẬT của DOANH
+    NGHIỆP KHÁC (không phải FVA) khi họ là CHỦ THỂ bài viết (vd logo Vietnam
+    Airlines trên máy bay) — **CHẤP NHẬN ĐƯỢC**, đây là ảnh minh hoạ chủ thể,
+    khác hẳn logo FVA Capital (nhận diện thương hiệu CỦA TA). Ranh giới CHỐT:
+    (1) KHÔNG để AI vẽ SAI thành hãng khác, hoặc vẽ méo/phản cảm — nếu phát
+    hiện lúc kiểm ảnh (xem assets/README_AI_FULL.md mục "QUY TRÌNH BẮT BUỘC"),
+    coi như ảnh KHÔNG ĐẠT, xoá + `regenerate=True`, KHÔNG dùng; (2) logo FVA
+    Capital LUÔN LUÔN là đóng dấu tất định (`render/brand_stamp.py`), KHÔNG
+    BAO GIỜ để AI tự vẽ (đã cấm rõ trong prompt `ai_full.py` từ đầu, không
+    đổi).
+  - Bản đồ Việt Nam: KHÔNG có asset chuẩn trong repo (đã tìm kỹ 2026-07-21)
+    — prompt `ai_full` cấm AI vẽ map TUYỆT ĐỐI, chưa có nhánh "dán bản đồ
+    thật" (chờ Lead cấp asset).
+
 ---
 
 ## D. HƯỚNG PHÁT TRIỂN MỞ RỘNG (chưa chốt — chờ Lead duyệt)

@@ -7296,43 +7296,70 @@ def _render_prod_assets_module():
     return rpa
 
 
-def test_render_one_clean_spec_returns_svg_no_violations():
+def test_render_one_clean_spec_returns_png_bytes(monkeypatch, tmp_path):
+    """render_one() giờ gọi ai_full (AI thật, MOCK ở đây) thay vì SVG tất
+    định — 2026-07-21, xem docstring render_production_assets.py."""
     import json as _json
+    import httpx
+    from twmkt.config import Settings
+
     rpa = _render_prod_assets_module()
+    tiny_png_b64 = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+
+    def _fake_success(*a, **kw):
+        return httpx.Response(200, json={"data": [{"b64_json": tiny_png_b64}]},
+                              request=httpx.Request("POST", "https://api.openai.com/v1/images/generations"))
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-fake-key-not-real")
+    monkeypatch.setattr(httpx, "post", _fake_success)
 
     output = {"title": "GDP tăng mạnh", "hero": [{"label": "GDP", "value": "8,18%"}]}
-    item = {"output": _json.dumps(output), "facts": _json.dumps([
-        {"value": "8,18", "label": "GDP", "unit": "%", "source": "", "kind": "percent",
-         "raw": "8,18%", "canonical_value": 8.18, "approx": False}]),
-           "topic_key": "tk-1", "context": "GDP tăng mạnh"}
-    brand = {"width": 1080, "height": 1350, "bg": "#000", "surface": "#111", "primary": "#fff",
-            "text": "#fff", "text_muted": "#ccc", "font_family": "Arial", "wordmark": "FVA",
-            "disclaimer": "test"}
-    svg, violations, err = rpa.render_one(item, brand)
-    assert svg is not None and svg.startswith("<svg ")
-    assert violations == [] and err == ""
+    item = {"output": _json.dumps(output), "topic_key": "tk-1", "context": "GDP tăng mạnh"}
+    settings = Settings({"storage": {"data_root": str(tmp_path)}})
+    png_bytes, warning = rpa.render_one(item, settings=settings)
+    assert png_bytes is not None and warning == ""
 
 
-def test_render_one_gate2_typo_returns_violations_no_svg():
+def test_render_one_gate2_typo_flows_through_unchecked_known_risk(monkeypatch, tmp_path):
+    """KHÔNG PHẢI hành vi mong muốn -- ghi lại RÕ đây là đánh đổi CỐ Ý (Lead
+    2026-07-21): guardrail-2 nhánh ảnh (verify_spec trên block_kind) đã XOÁ
+    cùng lượt chuyển renderer sang ai_full, nên số gõ nhầm ở Gate 2 KHÔNG còn
+    bị chặn tự động trước render -- Gate 2/Gate 3 (duyệt người) là lớp chặn
+    còn lại duy nhất. Test này khoá lại hành vi HIỆN TẠI, không phải khẳng
+    định đây là an toàn."""
     import json as _json
-    rpa = _render_prod_assets_module()
+    import httpx
+    from twmkt.config import Settings
 
-    output = {"title": "GDP", "hero": [{"label": "GDP", "value": "99%"}]}   # gõ nhầm ở Gate 2
-    item = {"output": _json.dumps(output), "facts": _json.dumps([
-        {"value": "8,18", "label": "GDP", "unit": "%", "source": "", "kind": "percent",
-         "raw": "8,18%", "canonical_value": 8.18, "approx": False}]),
-           "topic_key": "tk-1", "context": "GDP"}
-    brand = {"width": 1080, "height": 1350}
-    svg, violations, err = rpa.render_one(item, brand)
-    assert svg is None and len(violations) == 1 and err == ""
+    rpa = _render_prod_assets_module()
+    tiny_png_b64 = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+
+    def _fake_success(*a, **kw):
+        return httpx.Response(200, json={"data": [{"b64_json": tiny_png_b64}]},
+                              request=httpx.Request("POST", "https://api.openai.com/v1/images/generations"))
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-fake-key-not-real")
+    monkeypatch.setattr(httpx, "post", _fake_success)
+
+    output = {"title": "GDP", "hero": [{"label": "GDP", "value": "99%"}]}   # gõ nhầm ở Gate 2, KHÔNG khớp facts[]
+    item = {"output": _json.dumps(output), "topic_key": "tk-1", "context": "GDP"}
+    settings = Settings({"storage": {"data_root": str(tmp_path)}})
+    png_bytes, warning = rpa.render_one(item, settings=settings)
+    assert png_bytes is not None and warning == ""   # KHÔNG bị chặn -- đúng đánh đổi đã ghi trong docstring
 
 
 def test_render_one_bad_output_json_returns_error_reason():
+    from twmkt.config import Settings
+
     rpa = _render_prod_assets_module()
 
-    item = {"output": "khong phai JSON", "facts": "", "topic_key": "tk-1", "context": "X"}
-    svg, violations, err = rpa.render_one(item, {})
-    assert svg is None and violations == [] and "JSON hợp lệ" in err
+    item = {"output": "khong phai JSON", "topic_key": "tk-1", "context": "X"}
+    png_bytes, warning = rpa.render_one(item, settings=Settings({}))
+    assert png_bytes is None and "JSON hợp lệ" in warning
 
 
 def test_asset_hyperlink_formula_wraps_url_string():
@@ -8108,130 +8135,6 @@ def test_verify_spec_empty_facts_flags_everything_with_numbers():
     assert len(verify_spec(spec)) == 1
 
 
-def test_build_spec_from_content_maps_8field_to_blocks():
-    from twmkt.media_factory.spec import build_spec_from_content
-    from twmkt.models import Fact
-
-    output = {
-        "title": "GDP tăng mạnh", "subtitle": "6 tháng đầu năm 2026",
-        "hero": [{"label": "GDP", "value": "8,18%"}],
-        "market": [{"label": "Thu ngân sách", "value": "1,57 triệu tỷ đồng"}],
-        "highlights": ["Tăng trưởng lan toả nhiều địa phương."],
-        "render_hint": {"ratio": "1:1"},
-    }
-    facts = [Fact(value="8,18", label="GDP", unit="%", canonical_value=8.18)]
-    spec = build_spec_from_content(output, facts, topic_key="tk-1",
-                                   source_url="https://x.vn", channel="linkedin_square")
-    assert spec.topic_key == "tk-1" and spec.channel == "linkedin_square"
-    assert spec.aspect == "1:1" and spec.title == "GDP tăng mạnh"
-    assert spec.scenes == []   # nhánh video chưa có nguồn dữ liệu, luôn rỗng
-    # Content Factory Phase 2: block thứ 5 route "related". Phase 2b: block
-    # thứ 6 route "priority.primary" — cả 2 vào guardrail tên (xem
-    # test_build_spec_from_content_routes_related_into_entity_guardrail).
-    assert len(spec.blocks) == 6
-    kinds = [b.block_kind for b in spec.blocks]
-    assert kinds == ["", "metric_cards", "comparison_grid", "insight_cards",
-                     "entity_map", "ranking"]
-    assert spec.blocks[0].slots["title"] == "GDP tăng mạnh"
-    assert spec.blocks[1].slots["stats"][0]["value"] == "8,18%"
-    assert spec.blocks[2].slots["items"][0]["label"] == "Thu ngân sách"
-    assert spec.blocks[3].slots["lines"] == ["Tăng trưởng lan toả nhiều địa phương."]
-    assert spec.blocks[4].slots["related"] == []   # output không có "related" -> rỗng, KHÔNG lỗi
-    assert spec.blocks[5].slots["priority_primary"] == []   # output không có priority -> rỗng, KHÔNG lỗi
-    # block "hero" render ra "8,18%" -> fact_ref phải trỏ đúng fact GDP (index 0)
-    assert spec.blocks[1].fact_ref == [0]
-    assert spec.blocks[0].fact_ref == []   # title/subtitle không chứa số/tên nào khớp facts
-
-
-def test_build_spec_from_content_routes_related_into_entity_guardrail():
-    """Content Factory Phase 2 constraint #1: 'related' (Output 8-field, TRƯỚC
-    ĐÂY bị bỏ qua khỏi scenes) giờ PHẢI được guardrail lần 2 quét — Composer
-    bịa 1 tên KHÔNG có trong facts[] phải bị verify_spec() bắt."""
-    from twmkt.media_factory.spec import build_spec_from_content, verify_spec
-    from twmkt.models import Fact
-
-    facts = [Fact(value="", label="4 cảng biển đặc biệt", shape="entity_list",
-                  entities=["Cần Giờ", "Liên Chiểu", "Nam Đồ Sơn", "Vân Phong"],
-                  source="4 cảng: Cần Giờ, Liên Chiểu, Nam Đồ Sơn, Vân Phong")]
-    output_clean = {"title": "4 Cảng Biển Đặc Biệt", "subtitle": "", "hero": [], "market": [],
-                    "related": ["Cần Giờ", "Vân Phong"]}
-    assert verify_spec(build_spec_from_content(output_clean, facts, topic_key="tk-1")) == []
-
-    output_bilia = {"title": "4 Cảng Biển Đặc Biệt", "subtitle": "", "hero": [], "market": [],
-                    "related": ["Cần Giờ", "Hải Phòng cũ"]}   # "Hải Phòng cũ" KHÔNG có trong facts[]
-    violations = verify_spec(build_spec_from_content(output_bilia, facts, topic_key="tk-1"))
-    assert len(violations) == 1
-    assert violations[0].token == "Hải Phòng cũ" and violations[0].reason == "unmatched_entity"
-
-
-def test_verify_spec_rejects_real_context_entity_leaking_into_related():
-    """Content Factory Phase 2b — TÁI HIỆN ĐÚNG lỗi THẬT phát hiện trên bài
-    cảng biển: 1 tên THẬT/verify được (không phải bịa) nhưng salience="context"
-    (hội thảo/hiệp hội — phông nền) lọt vào 'related' PHẢI bị guardrail chặn,
-    KHÁC với chặn bịa tên (đây là chặn SAI SALIENCE, tên hoàn toàn có thật)."""
-    from twmkt.media_factory.spec import build_spec_from_content, verify_spec
-    from twmkt.models import Fact
-
-    facts = [
-        Fact(value="", label="4 cảng được quy hoạch", shape="entity_list",
-            entities=["Cần Giờ", "Liên Chiểu"], salience="subject", source="..."),
-        Fact(value="Hiệp hội Bất động sản Việt Nam", label="Đơn vị tổ chức hội thảo",
-            shape="entity", entity_type="policy", salience="context", source="..."),
-    ]
-    output = {"title": "X", "subtitle": "", "hero": [], "market": [],
-             "related": ["Cần Giờ", "Hiệp hội Bất động sản Việt Nam"]}
-    violations = verify_spec(build_spec_from_content(output, facts, topic_key="tk-1"))
-    assert len(violations) == 1
-    assert violations[0].token == "Hiệp hội Bất động sản Việt Nam"
-    assert violations[0].reason == "unmatched_entity"   # THẬT nhưng sai salience -> vẫn coi là "chưa khớp"
-
-
-def test_verify_spec_priority_primary_accepts_stat_label_or_subject_entity_rejects_context():
-    """'priority_primary' (Phase 2b) khớp CẢ nhãn hero/market LẪN tên subject —
-    NHƯNG vẫn từ chối tên context, giống 'related'. Nhãn hero/market chỉ được
-    _known_stat_labels đọc từ spec.blocks (khái niệm infographic-only, xem
-    docstring _known_stat_labels) -> dùng ProductionBlock, KHÔNG dùng
-    ProductionScene (đó là trục video, không có "priority_primary")."""
-    from twmkt.media_factory.spec import ProductionBlock, ProductionSpec, verify_spec
-    from twmkt.models import Fact
-
-    facts = [
-        Fact(value="10", label="GDP", unit="%", canonical_value=10.0, source="..."),
-        Fact(value="Hải Phòng", label="Địa điểm", shape="entity",
-            entity_type="place", salience="subject", source="..."),
-    ]
-    spec = ProductionSpec(
-        topic_key="tk-1", title="t", source_url="u", channel="facebook_feed", facts=facts,
-        blocks=[
-            ProductionBlock(role="body", block_kind="metric_cards",
-                            slots={"stats": [{"label": "GDP", "value": "10%"}]}),
-            ProductionBlock(role="body", block_kind="ranking",
-                            slots={"priority_primary": ["GDP", "Hải Phòng", "Hiệp hội (context, bịa vị trí)"]}),
-        ],
-    )
-    violations = verify_spec(spec)
-    assert len(violations) == 1
-    assert violations[0].token == "Hiệp hội (context, bịa vị trí)"
-
-
-def test_build_spec_from_content_then_verify_catches_gate2_typo():
-    """Mô phỏng ĐÚNG kịch bản Phase 1.3: người sửa tay Output ở Gate 2, gõ
-    nhầm số (99% thay vì 8,18%) -> verify_spec() TRÊN SPEC DẪN XUẤT LẠI phải
-    bắt được, dù bước guardrail (a) lúc Composer sinh ra đã sạch."""
-    from twmkt.media_factory.spec import build_spec_from_content, verify_spec
-    from twmkt.models import Fact
-
-    output_after_gate2_edit = {
-        "title": "GDP tăng mạnh", "subtitle": "",
-        "hero": [{"label": "GDP", "value": "99%"}],   # người gõ nhầm ở Gate 2
-        "market": [], "highlights": [],
-    }
-    facts = [Fact(value="8,18", label="GDP", unit="%", canonical_value=8.18)]
-    spec = build_spec_from_content(output_after_gate2_edit, facts, topic_key="tk-1")
-    violations = verify_spec(spec)
-    assert len(violations) == 1 and violations[0].token == "99%"
-
-
 def test_verify_spec_no_numbers_no_facts_clean():
     from twmkt.media_factory.spec import ProductionScene, ProductionSpec, verify_spec
 
@@ -8368,54 +8271,41 @@ def test_check_plain_list_item_entity_ignores_prose_slot_keys():
     list[str] (field dạng "key[i]" giống entity_list). Câu KHÔNG có chữ số nào
     (vd bình luận định tính) TUYỆT ĐỐI KHÔNG được flag là 'unmatched_entity' —
     chỉ _ENTITY_LIST_SLOT_KEYS (names/entities/related) mới bị soi tên."""
-    from twmkt.media_factory.spec import build_spec_from_content, verify_spec
+    from twmkt.media_factory.spec import ProductionScene, ProductionSpec, verify_spec
+    from twmkt.models import Fact
 
-    output = {
-        "title": "X", "subtitle": "Y",
-        "hero": [{"label": "A", "value": "4"}], "market": [],
-        "highlights": ["Doanh nghiệp đầu tiên báo lỗ trong ngành.",
-                       "Không có số nào ở câu này cả."],
-    }
-    spec = build_spec_from_content(output, [], topic_key="tk-1")
+    facts = [Fact(value="4", label="A", canonical_value=4.0)]
+    spec = ProductionSpec(
+        topic_key="tk-1", title="t", source_url="u", channel="facebook_feed", facts=facts,
+        scenes=[ProductionScene(role="body", visual_kind="list",
+                                slots={"lines": ["Doanh nghiệp đầu tiên báo lỗ trong ngành.",
+                                                  "Không có số nào ở câu này cả."]})],
+    )
     assert verify_spec(spec) == []
 
 
 # =====================================================================
-# Rà soát + tái thiết ProductionSpec, Phase 2 — 2 trục tách bạch
-# (block_kind cho SVG infographic, visual_kind cho video/AIGEN) + fact_ref.
+# Rà soát + tái thiết ProductionSpec, Phase 2 — trục visual_kind (video/AIGEN)
+# + fact_ref. (Trục block_kind cho SVG infographic ĐÃ XOÁ 2026-07-21, xem
+# QUYẾT ĐỊNH LEAD/docs/VPS_MIGRATION_BACKLOG.md — renderer Infographic chuyển
+# hẳn sang render/ai_full.py, AI-only.)
 # =====================================================================
-def test_block_kind_and_visual_kind_are_disjoint_closed_sets():
-    """block_kind (infographic, 0/13 khớp template AIGEN — đối chiếu
-    CATALOG.md thật) và visual_kind (video, khớp 15 template AIGEN) là 2 tập
-    ĐÓNG, TÁCH BẠCH — không chung giá trị nào (khác trục, khác renderer)."""
-    from twmkt.media_factory.spec import BLOCK_KINDS, DEFERRED_VISUAL_KINDS, VISUAL_KINDS
+def test_visual_kind_closed_set_and_deferred_avatar():
+    """visual_kind (video, khớp 15 template AIGEN thật) là 1 tập ĐÓNG."""
+    from twmkt.media_factory.spec import DEFERRED_VISUAL_KINDS, VISUAL_KINDS
 
-    assert BLOCK_KINDS.isdisjoint(VISUAL_KINDS)
-    assert len(BLOCK_KINDS) == 13
     # 10 giá trị thật (đếm lại — thông báo "5->9" trước đó ĐẾM NHẦM, danh sách
     # liệt kê ra luôn là 10: title/stat/statement/list/comparison/quote/
-    # ticker/news/avatar/outro): title|stat|statement|list|comparison|quote|
-    # ticker|news|avatar|outro.
+    # ticker/news/avatar/outro).
     assert len(VISUAL_KINDS) == 10
     assert DEFERRED_VISUAL_KINDS == {"avatar"}
     assert DEFERRED_VISUAL_KINDS <= VISUAL_KINDS   # avatar CÓ trong tập, chỉ chưa kích hoạt
 
 
-def test_build_spec_from_content_never_produces_avatar_or_deferred_kinds():
-    """build_spec_from_content chỉ dựng blocks[] (infographic) — scenes[]
-    (nơi avatar mới có thể xuất hiện) luôn rỗng, nên avatar KHÔNG BAO GIỜ bị
-    build tự động cho tới khi có video-scene builder thật (ngoài scope)."""
-    from twmkt.media_factory.spec import build_spec_from_content
-
-    spec = build_spec_from_content({"title": "X"}, [], topic_key="tk-1")
-    assert spec.scenes == []
-    assert all(b.block_kind != "avatar" for b in spec.blocks)
-
-
 def test_fact_ref_scalar_range_delta_entity_entity_list_all_populate():
     """Rà soát ProductionSpec điểm B — mỗi shape trong 5-shape Fact khi render
     ra slots PHẢI khiến fact_ref trỏ đúng index, KHÔNG chỉ scalar."""
-    from twmkt.media_factory.spec import ProductionBlock, _fact_ref_for_texts
+    from twmkt.media_factory.spec import _fact_ref_for_texts
     from twmkt.models import Fact
 
     facts = [
@@ -8436,32 +8326,16 @@ def test_fact_ref_scalar_range_delta_entity_entity_list_all_populate():
     assert _fact_ref_for_texts(["không khớp gì cả"], facts) == []
 
 
-def test_build_spec_from_content_is_deterministic():
-    """dựng lại tất định (Phase 2 nghiệm thu) — cùng input -> cùng spec,
-    KHÔNG có ngẫu nhiên/thời gian nào lẫn vào."""
-    from twmkt.media_factory.spec import build_spec_from_content
-    from twmkt.models import Fact
-
-    output = {"title": "X", "subtitle": "Y", "hero": [{"label": "GDP", "value": "8,18%"}],
-             "market": [], "highlights": [], "related": ["Hàn Quốc"]}
-    facts = [Fact(value="8,18", label="GDP", canonical_value=8.18),
-            Fact(value="", label="QG", shape="entity_list", entities=["Hàn Quốc"])]
-    spec1 = build_spec_from_content(output, facts, topic_key="tk-1")
-    spec2 = build_spec_from_content(output, facts, topic_key="tk-1")
-    assert spec1 == spec2
-
-
-def test_verify_spec_scans_blocks_and_scenes_independently():
-    """verify_spec quét CẢ spec.blocks (infographic) LẪN spec.scenes (video) —
-    1 spec thường chỉ có 1 trong 2 khác rỗng, nhưng hàm phải xử lý đúng khi
-    scenes[] có nội dung (video, thủ công dựng để test vì chưa có builder thật)."""
+def test_verify_spec_scans_slots_and_voice_text_together():
+    """verify_spec quét CẢ slots LẪN voice_text của MỌI scene trong cùng 1
+    lượt — số bịa ở 1 trong 2 nơi (hoặc cả 2) đều phải bị bắt."""
     from twmkt.media_factory.spec import ProductionScene, ProductionSpec, verify_spec
     from twmkt.models import Fact
 
     facts = [Fact(value="8,18", label="GDP", canonical_value=8.18)]
     spec = ProductionSpec(
         topic_key="tk-1", title="t", source_url="u", channel="facebook_feed",
-        facts=facts, blocks=[], variant="video",
+        facts=facts,
         scenes=[ProductionScene(role="body", visual_kind="stat",
                                 slots={"stats": [{"label": "GDP", "value": "99%"}]},
                                 voice_text="tăng chín mươi chín phần trăm")],

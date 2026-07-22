@@ -77,18 +77,32 @@ render:
     text: "#F5F5F0"
     text_muted: "#9FB3C8"
     font_family: "Arial, 'Segoe UI', sans-serif"
-    # HYBRID (2026-07-19, xem docs/VPS_MIGRATION_BACKLOG.md C6) — "hybrid":
-    # sinh ảnh nền qua OpenAI (cache-first, tất định qua cache — xem
-    # render/ai_background.py), fallback tự động "pure_html" nếu thiếu
-    # OPENAI_API_KEY/lỗi API/timeout. "pure_html": bỏ qua HOÀN TOÀN lớp AI —
-    # không gọi API, không cần key (đường lui + mặc định an toàn cho CI/test).
-    render_mode: "hybrid"
+    # ĐẢO HƯỚNG (2026-07-21, QUYẾT ĐỊNH LEAD — xem docs/VPS_MIGRATION_BACKLOG.md):
+    # spike so sánh ảnh AI 100% (gpt-image-2) với renderer HTML/SVG thuần (2
+    # vòng cải tiến template) cho thấy AI vượt xa — quyết định cũ "chất lượng
+    # phụ thuộc template" ĐÃ BỊ BÁC BỎ. "pure_html" (renderer SVG tất định) đã
+    # XOÁ KHỎI CODE (không còn là lựa chọn hợp lệ).
+    # "ai_full" (MẶC ĐỊNH): AI (render/ai_full.py) sinh TOÀN BỘ ảnh (chữ/số/
+    #   layout/minh hoạ) qua gpt-image-2, lớp code chỉ đóng dấu brand LÊN TRÊN
+    #   sau cùng (render/brand_stamp.py) — KHÔNG cần OPENAI_API_KEY nếu không
+    #   gọi (nhưng thiếu key -> KHÔNG render được ảnh nào, khác hybrid không có
+    #   fallback "vẽ tất định thuần" nữa vì renderer đó đã xoá).
+    # "hybrid": GIỮ CHẠY ĐƯỢC làm đường tối ưu tương lai (kết hợp React/Vue để
+    #   giảm chi phí + giảm AI hoá) — KHÔNG phát triển thêm đợt này.
+    render_mode: "ai_full"
+    # Ghi đè disclaimer CHỈ cho infographic (2026-07-22, yêu cầu Lead) — KHÔNG
+    # đụng config/brand.yaml (dùng chung article/video, đổi ở đó sẽ ảnh hưởng
+    # ngoài phạm vi). Đọc bởi CẢ render/infographic.py (hybrid) LẪN
+    # render/ai_full.py (ai_full) — cùng 1 khoá, cùng nếp brand_kit_from_settings().
+    disclaimer: "Nội dung mang tính tham khảo, không phải khuyến nghị đầu tư."
 
 # Lớp AI (mềm) của renderer Infographic Hybrid — CHỈ sinh ẢNH NỀN, KHÔNG BAO
 # GIỜ chữ/số/bản đồ/icon (xem render/ai_background.py docstring). model/size/
 # quality CONFIG được, không hardcode trong code gọi API — đổi model/kích
 # thước/chi phí chỉ sửa Ở ĐÂY.
 infographic:
+  # Lớp AI (mềm) của render_mode="hybrid" (GIỮ CHẠY, không phát triển thêm
+  # đợt 2026-07-21) — CHỈ sinh ẢNH NỀN, KHÔNG BAO GIỜ chữ/số/bản đồ/icon.
   ai_background:
     model: "gpt-image-1"
     size: "1024x1536"             # portrait, gần khớp tỉ lệ canvas 4:5
@@ -98,6 +112,15 @@ infographic:
     # ra (dữ liệu runtime, dù thật hay test) nằm TRONG repo. Resolve thật:
     # <data_root>/assets/{generated/<hash>.png, manifest.json}.
     cache_dir: "assets"
+
+  # render_mode="ai_full" (MẶC ĐỊNH 2026-07-21) — AI sinh TOÀN BỘ ảnh, xem
+  # render/ai_full.py + render/brand_stamp.py.
+  ai_full:
+    model: "gpt-image-2"
+    quality: "medium"              # "low"|"medium"|"high" — kiểm soát chi phí
+    # cache_dir: CÙNG NẾP ai_background.cache_dir ở trên, thư mục RIÊNG (khác
+    # tên) vì cache 2 mode không tương thích nhau (ảnh nền vs ảnh đầy đủ).
+    cache_dir: "assets_ai_full"
 
 # --- Prompt agent sản xuất (version-controlled, đổi văn phong không sửa code) --
 # Tab PROMPTS (Name|Version|Enable) trên Sheet chọn version đang dùng; nội dung
