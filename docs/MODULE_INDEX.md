@@ -9,7 +9,7 @@
 
 | Cặp/nhóm dễ nhầm | Phân biệt |
 |---|---|
-| `agents/production.py` vs `media_factory/` vs `factory.py` | **production.py** = Content Factory (Milestone (a), sinh ĐẶC TẢ văn bản: bài/video-script/infographic-JSON). **media_factory/** = Production Factory, **CHỈ CÒN NHÁNH ẢNH** kể từ 2026-07-19 (biến đặc tả thành ẢNH thật, nhánh VIDEO đã move sang `aigen-pipeline/src/production-spec/` — xem `docs/ARCHITECTURE_MODULES.md`). **factory.py** = lắp ráp adapter theo `settings.yaml` (DI), không liên quan nội dung/media. |
+| `agents/production.py` vs `media_factory/` vs `factory.py` | **production.py** = Content Factory (Milestone (a), sinh ĐẶC TẢ văn bản: bài/video-script/infographic-JSON). **media_factory/** = Production Factory, **CHỈ CÒN TRỤC VIDEO** kể từ 2026-07-21 (nhánh ẢNH — `ProductionBlock`/`blocks[]` — đã XOÁ, xem mục "Production Factory" bên dưới; nhánh VIDEO đã move sang `aigen-pipeline/src/production-spec/` — xem `docs/ARCHITECTURE_MODULES.md`). Ảnh infographic giờ render qua `render/ai_full.py` (AI-only, KHÔNG qua `media_factory/`). **factory.py** = lắp ráp adapter theo `settings.yaml` (DI), không liên quan nội dung/media. |
 | `agents/producers.py` vs `agents/production.py` | **producers.py** = Luồng B (offline demo/legacy, 4 agent cũ). **production.py** = Luồng A (Milestone (a), đang dùng thật). Tên gần giống hệt — dễ gõ/import nhầm. |
 | `agents/router.py` vs `agents/structure_router.py` vs `agents/route_once.py` | **router.py** = LLMRouter (bọc cost-tracking/budget, dùng ở Luồng B/Hook). **structure_router.py** = StructureRouterAgent (chọn khung viết S1-S5 + hook, Luồng A). **route_once.py** = đóng băng quyết định của structure_router (route 1 lần/chủ đề). |
 | `curation/store.py` vs `curation/file_store.py` | **store.py** = DocumentStore Protocol, in-memory (Luồng B). **file_store.py** = FileDocumentStore, persist theo ngày+retention (Luồng A thật). |
@@ -45,15 +45,55 @@
 - `src/twmkt/agents/_numeric.py` — Parser số CANONICAL (chống bịa, "AI hiểu ở Brief, CODE phán ở Guardrail").
 - `src/twmkt/agents/_jsonparse.py` — Parse JSON object từ output LLM (hardening code-fence/lời dẫn).
 
-## Production Factory (`media_factory/` — CHỈ CÒN NHÁNH ẢNH sau tái cấu trúc 2026-07-19)
+## Production Factory (`media_factory/` — CHỈ CÒN TRỤC VIDEO sau ĐẢO HƯỚNG infographic 2026-07-21)
 > Nhánh VIDEO (`ProductionScene`, guardrail-2 video) đã MOVE sang
 > `aigen-pipeline/src/production-spec/` (TypeScript) — xem `docs/ARCHITECTURE_MODULES.md`.
-> `media_factory/` ở marketing-automation giờ CHỈ phục vụ renderer SVG nội bộ (ảnh),
-> không còn liên quan AIGEN.
-- `src/twmkt/media_factory/spec.py` — `ProductionSpec`(nhánh `blocks[]`)/`ProductionBlock`/`verify_spec()`: guardrail số LẦN 2 cho ẢNH (trước render, sau khi người có thể sửa tay Gate 2).
+> ⚠️ **CẬP NHẬT 2026-07-22 (sửa mục lỗi thời)**: nhánh ẢNH (`ProductionBlock`/
+> `block_kind`/`build_spec_from_content()`/nhánh `spec.blocks` của
+> `verify_spec()`) **ĐÃ XOÁ KHỎI CODE** cùng lượt đảo hướng render Infographic
+> sang AI-only (`render/ai_full.py`, gpt-image-2 — xem
+> `docs/VPS_MIGRATION_BACKLOG.md` mục C16). `media_factory/spec.py` từ đây
+> **CHỈ còn phục vụ trục VIDEO** (`ProductionScene`/`scenes[]`) — dùng bởi
+> `media_factory/aigen_seam.py` gọi sang AIGEN, KHÔNG còn nhánh ẢNH nào ở đây.
+- `src/twmkt/media_factory/spec.py` — `ProductionSpec`/`ProductionScene`/`verify_spec()`: guardrail số LẦN 2 cho VIDEO (đối chiếu `scenes[]` với `facts[]`). KHÔNG còn nhánh `blocks[]`/ẢNH (xem cảnh báo trên).
 - `src/twmkt/media_factory/numbers.py` — Parser NGƯỢC (chữ→số) dùng bởi `verify_spec()` để đối chiếu facts — KHÔNG phải bộ sinh số→chữ (bản sinh xuôi cho video nằm ở `aigen-pipeline/src/production-spec/voice/`).
 - `src/twmkt/media_factory/aigen_seam.py` — seam subprocess gọi `npm run pipeline` (AIGEN) từ Python. **Cần đánh giá lại còn cần không** sau khi toàn luồng video chuyển hẳn sang aigen-pipeline (xem `docs/VPS_MIGRATION_BACKLOG.md`) — chưa xoá, chỉ đánh dấu.
-- `src/twmkt/render/infographic.py` — Render spec Composer (JSON) → ảnh SVG thật ($0, tất định, brand kit từ `config/brand.yaml`).
+- `src/twmkt/render/ai_full.py` — **Đường render Infographic CHÍNH (render_mode="ai_full", MẶC ĐỊNH 2026-07-21)**: AI (gpt-image-2, `OPENAI_API_KEY` bắt buộc) sinh TOÀN BỘ ảnh (chữ/số/layout/minh hoạ). ⚠️ **KHÔNG còn guardrail-2 nhánh ẢNH đối chiếu facts[] TRƯỚC render** (đã xoá cùng `ProductionBlock`) — xem ghi chú quy trình Gate 2 bên dưới.
+- `src/twmkt/render/brand_stamp.py` — Đóng dấu brand (logo FVA, disclaimer, nguồn) TẤT ĐỊNH LÊN TRÊN ảnh AI đã sinh — dùng Pillow, chạy SAU `ai_full.py`. Logo FVA KHÔNG BAO GIỜ để AI tự vẽ.
+- `src/twmkt/render/infographic.py` — Render spec Composer (JSON) → ảnh SVG thật ($0, tất định, brand kit từ `config/brand.yaml`). Engine của `render_mode="hybrid"` (GIỮ CHẠY ĐƯỢC, không phát triển thêm — xem `render/ai_background.py` cho lớp nền AI của hybrid).
+
+### ⚠️ QUY TRÌNH GATE 2 — infographic (từ khi guardrail-2 nhánh ảnh bị xoá, 2026-07-22)
+Vì guardrail-2 nhánh ảnh (đối chiếu `output_data` với `facts[]` TRƯỚC KHI RENDER)
+**không còn tồn tại** cho infographic (`render_mode="ai_full"` là mặc định — xem
+`docs/VPS_MIGRATION_BACKLOG.md` mục C16), **duyệt Output infographic ở Gate 2
+LÀ CHỐT KIỂM SỐ CUỐI CÙNG trước khi ảnh được sinh**:
+
+- Nếu người duyệt SỬA TAY bất kỳ con số nào trong Output ở Gate 2, PHẢI đối
+  chiếu số đã sửa với `facts[]` gốc trước khi bấm Approve — không có lớp code
+  nào chặn số sai lọt vào ảnh nữa (AI vẽ NGUYÊN VĂN số trong Output, dù đúng
+  hay sai).
+- SAU KHI ảnh render xong, đối chiếu TỪNG SỐ trên ảnh với Output/`facts[]` MỘT
+  LẦN NỮA ở Gate 3 (duyệt asset) — đây là lớp chặn CUỐI CÙNG còn lại (Gate 2 +
+  Gate 3 người, không có lớp code ở giữa).
+- Khác trục VIDEO: `ProductionScene`/guardrail-2 (TypeScript, aigen-pipeline)
+  VẪN giữ nguyên, vẫn tự động đối chiếu số trước khi render.
+
+### ⚠️ Tham chiếu chéo repo — Chrome slot template AIGEN KHÔNG đồng nhất
+(Phát hiện agent-B, mục 2.1 phiên rules-v2.1/Contract Validator 2026-07-22 —
+sửa Ở REPO `aigen-pipeline`, KHÔNG phải marketing-automation, ghi ở đây để
+người đọc bản đồ code không giả định sai khi làm việc chéo repo.)
+
+`aigen-pipeline/src/adapter/required-slot-fields.ts` (`TEMPLATE_SLOTS`): các ô
+"chrome" (`kicker`/`brand`, điền tự động từ `output.source`/`outro.brand_name`,
+KHÔNG phải nội dung Composer sinh) **KHÔNG đồng nhất giữa các template**:
+- `frame-market-ticker` **KHÔNG có slot `kicker`** (chỉ có `brand`).
+- `frame-news-lower-third` **KHÔNG có slot `brand`** (chỉ có `kicker`).
+- Chỉ `frame-liquid-bg-hero` và `frame-quote-pull` có ĐỦ CẢ HAI.
+
+**Đừng giả định mọi template có đủ `kicker`+`brand`** khi sửa `withChromeSlots`
+(`aigen-pipeline/src/production-spec/index.ts`) hay viết test mới — kiểm
+`TEMPLATE_SLOTS[templateId]` trước, `fillSlotDefaults()` sẽ DROP field ngoài
+slot set của template (không phải bug, là hợp đồng đã có).
 
 ## Guardrail
 - `src/twmkt/guardrails/compliance.py` — Chặn claim cấm (hứa lợi nhuận...) + yêu cầu disclaimer, chạy trước Gate 2.
