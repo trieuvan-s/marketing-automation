@@ -82,8 +82,8 @@ from twmkt import factory  # noqa: E402
 from twmkt.agents.base import MockLLM  # noqa: E402
 from twmkt.agents.brief import BriefResult, run_brief  # noqa: E402
 from twmkt.agents.production import (  # noqa: E402
-    AnalysisWriterAgent, InfographicSpecAgent, ProductionBrief, VideoScriptAgent,
-    all_production_agents, analysis_fields_from_data, apply_guardrails,
+    AnalysisWriterAgent, InfographicSpecAgent, InsufficientScenesError, ProductionBrief,
+    VideoScriptAgent, all_production_agents, analysis_fields_from_data, apply_guardrails,
     build_analysis_prompt, build_video_prompt, render_analysis, render_video,
     video_fields_from_data,
 )
@@ -474,7 +474,25 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                 continue
 
             if isinstance(agent, VideoScriptAgent):
-                raw_draft = agent.run(brief, decision)
+                # BƯỚC 3 (rules v2.1) — nguồn không đủ SCENE cho video (sàn
+                # renderer, xem InsufficientScenesError) là tình huống RIÊNG với
+                # lỗi hạ tầng: bắt ĐÚNG loại này, ghi NEEDS_HUMAN kèm đề xuất
+                # chuyển loại, KHÔNG để crash cả lượt run() (các dòng khác vẫn
+                # phải xử tiếp). Không bắt Exception chung — lỗi khác (hỏng
+                # thật) vẫn phải nổ để không âm thầm nuốt lỗi lạ.
+                try:
+                    raw_draft = agent.run(brief, decision)
+                except InsufficientScenesError as e:
+                    if (topic_key, "video") in seen:
+                        skipped += 1
+                        continue
+                    rows.append(content_row(context=item["context"], type_="video",
+                                            status="NEEDS_HUMAN", output="", notes=str(e),
+                                            topic_key=topic_key, facts=facts_json))
+                    seen.add((topic_key, "video"))
+                    flagged += 1
+                    notifier.notify("needs_human", topic=item["context"], type="video", reason=str(e))
+                    continue
             elif isinstance(agent, InfographicSpecAgent):
                 agent.llm = route_llm
                 agent.model = factory.step_model(settings, "composer")

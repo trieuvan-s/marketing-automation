@@ -391,6 +391,16 @@ writer:
   max_retries: 1        # số lần thử LẠI (không tính lượt đầu)
   retry_backoff_s: 3     # chờ giữa các lần thử lại (giây)
   timeout_s: 120          # timeout riêng cho LLM client bước writer (factory.build_writer_llm)
+  # BƯỚC 1 (rules v2.1, 2026-07-22): rules MẶC ĐỊNH cho Composer (Analysis/
+  # Video/Infographic) — "v21" (prompts/content_composer_rules_v2_1.md, CHỐT
+  # LÀM CHÍNH — đo A/B/C thật: META-COMPLIANCE C=3/2 câu lộ rule, v21=0/0) |
+  # "A" (prompts/content_writer_rules.md, rule CŨ, dự phòng) | "C" (prompts/
+  # rules_c_unified_longform.md, hợp nhất longform — CHỈ có nội dung article,
+  # video/infographic tự lùi về "A"). Đổi qua đây, KHÔNG sửa code. Xem
+  # agents/production._load_composer_rules(). `content_rules_path` bên dưới
+  # (nếu set) LUÔN THẮNG — override tường minh cho test/legacy, giữ nguyên.
+  rules_profile: "v21"
+  # content_rules_path: "prompts/content_writer_rules.md"   # override tường minh (KHÔNG mặc định set)
 
 # --- Thông báo vận hành (PHASE TELE, src/twmkt/utils/telegram_notifier.py) --
 # 1 chiều, KHÔNG chặn luồng chính — báo qua Telegram khi bắt đầu xử lý/đổi nội

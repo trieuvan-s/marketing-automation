@@ -127,7 +127,13 @@ def _default_disclaimer(brand: dict | None = None) -> str:
 # lại/tóm tắt (file rules là NGUỒN CHUẨN). §1 (quyết định model)/§6-§9
 # (checklist/reject-conditions/meta) KHÔNG nhúng ở đây — đó là input cho
 # validator (guardrails/) và bước tự-review, không phải nội dung DẠY VĂN.
-_CONTENT_WRITER_RULES_SECTION_RE = re.compile(r"(?m)^# (\d+)\. ")
+# Cắt mục theo heading ĐÁNH SỐ CẤP 1. Chấp nhận `# N. ` LẪN `## N. ` vì 2 file
+# rule dùng 2 quy ước khác nhau (content_writer_rules.md dùng `#`,
+# longform_content_writing_rules.md dùng `##`) — KHÔNG nới thì file longform
+# khớp 0 mục và loader trả "" ÂM THẦM (rule không bao giờ được áp, không ai biết).
+# `\. ` (dấu chấm + KHOẢNG TRẮNG) giữ nguyên nên mục con `## 2.1.`/`### 2.1.`
+# VẪN KHÔNG khớp — xem test_content_writer_rules_section_re_*.
+_CONTENT_WRITER_RULES_SECTION_RE = re.compile(r"(?m)^#{1,2} (\d+)\. ")
 
 
 def _load_content_writer_rules(*, sections: tuple[str, ...], settings=None) -> str:
@@ -142,7 +148,87 @@ def _load_content_writer_rules(*, sections: tuple[str, ...], settings=None) -> s
     if not path.exists():
         print(f"[CẢNH BÁO] không thấy {path} -> bỏ qua CONTENT_WRITER_RULES (rỗng).")
         return ""
+    return _load_content_writer_rules_from_text(path.read_text(encoding="utf-8"), sections)
+
+
+# BƯỚC 1 (rules v2.1, 2026-07-22) — v2.1 là RULES MẶC ĐỊNH cho Composer, áp
+# MỌI loại content_type. A (content_writer_rules.md, rule cũ) và C (rules_c_
+# unified_longform.md, hợp nhất longform — kết quả thí nghiệm A/B/C) GIỮ làm
+# DỰ PHÒNG, chọn qua `writer.rules_profile` ("v21" mặc định | "A" | "C") —
+# KHÔNG XOÁ. Hàm này KHÔNG đụng `_load_content_writer_rules` ở trên (giữ
+# nguyên — ~10 test gọi trực tiếp, phụ thuộc đọc THẲNG content_writer_rules.md
+# qua `writer.content_rules_path`) — chỉ ĐỊNH TUYẾN profile rồi gọi lại hàm cũ
+# HOẶC logic trích riêng cho v2.1 (numbering khác hẳn, xem dưới).
+_LEGACY_SECTIONS_BY_TYPE = {"article": ("2", "3"), "video": ("2", "4"), "infographic": ("2", "5")}
+
+# v2.1 core dùng CHUNG mọi loại: §1 mục tiêu, §2 thứ tự ưu tiên, §3 ranh giới
+# bắt buộc, §4 cấu trúc vừa đủ, §5 không gian sáng tạo, §6 chất lượng lập luận/
+# văn phong. KHÔNG gồm §7 (theo loại — trích RIÊNG dưới), §8 (validation —
+# tài liệu cho VALIDATOR, không phải Composer), §9/§10 (checklist/nguyên tắc
+# cuối, giống §6-9 content_writer_rules.md CŨ cũng không nhúng — input cho
+# guardrail/self-review, không phải "dạy văn").
+_V21_CORE_SECTIONS = ("1", "2", "3", "4", "5", "6")
+_V21_PRODUCT_SUBSECTION = {"article": "7.1", "video": "7.2", "infographic": "7.3"}
+_V21_SUBSECTION_RE_CACHE: dict[str, re.Pattern] = {}
+
+
+def _v21_subsection_re(num: str) -> re.Pattern:
+    if num not in _V21_SUBSECTION_RE_CACHE:
+        _V21_SUBSECTION_RE_CACHE[num] = re.compile(
+            r"(?m)^### " + re.escape(num) + r"\. .*?(?=\n### \d|\n## \d|\Z)", re.S)
+    return _V21_SUBSECTION_RE_CACHE[num]
+
+
+def _load_composer_rules(content_type: str, *, settings=None) -> str:
+    """Điểm ĐỊNH TUYẾN DUY NHẤT rules cho 3 Composer (Analysis/Video/Infographic)
+    — chọn v2.1 (mặc định)/A/C theo `writer.rules_profile`, trích ĐÚNG phần
+    `content_type` ("article"|"video"|"infographic"). File thiếu/lỗi -> ""
+    (LÙI MƯỢT, cùng nếp `_load_content_writer_rules`).
+
+    `writer.content_rules_path` (override tường minh, DÙNG BỞI TEST CŨ để trỏ
+    file tạm) LUÔN THẮNG — đi thẳng qua `_load_content_writer_rules` KHÔNG đổi,
+    giữ nguyên hành vi hiện có, không phá test cũ.
+
+    profile "C" (hợp nhất longform) CHỈ có nội dung cho "article" (thí nghiệm
+    A/B/C không phủ video/infographic) -> LÙI VỀ "A" cho 2 loại kia (quyết định
+    thực dụng, không phải lỗi — C chưa từng được thiết kế cho video/infographic)."""
+    settings = settings or load_settings()
+    if str(settings.get("writer.content_rules_path", "")).strip():
+        return _load_content_writer_rules(sections=_LEGACY_SECTIONS_BY_TYPE[content_type], settings=settings)
+
+    profile = str(settings.get("writer.rules_profile", "v21")).strip() or "v21"
+    if profile == "C" and content_type != "article":
+        profile = "A"   # C không có mục video/infographic -> lùi về A
+
+    if profile == "A":
+        return _load_content_writer_rules(sections=_LEGACY_SECTIONS_BY_TYPE[content_type], settings=settings)
+
+    if profile == "C":
+        path = Path(settings.get("writer.rules_c_path", "prompts/rules_c_unified_longform.md"))
+        if not path.exists():
+            print(f"[CẢNH BÁO] không thấy {path} -> bỏ qua rules profile C (rỗng).")
+            return ""
+        return path.read_text(encoding="utf-8").strip()   # C không tách content_type -> dùng NGUYÊN VĂN
+
+    # v21 (mặc định) — trích core (§1-6) + đúng sub-section §7.N theo content_type.
+    path = Path(settings.get("writer.rules_v21_path", "prompts/content_composer_rules_v2_1.md"))
+    if not path.exists():
+        print(f"[CẢNH BÁO] không thấy {path} -> bỏ qua rules v2.1 (rỗng).")
+        return ""
     text = path.read_text(encoding="utf-8")
+    core = _load_content_writer_rules_from_text(text, _V21_CORE_SECTIONS)
+    sub_num = _V21_PRODUCT_SUBSECTION[content_type]
+    m = _v21_subsection_re(sub_num).search(text)
+    # rstrip dấu "---" (hr phân cách trước mục kế) lẫn vào cuối do lookahead chỉ
+    # dừng Ở HEADING kế, không loại dòng hr đứng giữa.
+    product = re.sub(r"\n+---\s*\Z", "", m.group(0).rstrip()) if m else ""
+    return "\n\n".join(b for b in (core, product) if b)
+
+
+def _load_content_writer_rules_from_text(text: str, sections: tuple[str, ...]) -> str:
+    """Lõi trích-mục DÙNG CHUNG (tách khỏi `_load_content_writer_rules` để tái
+    dùng trên văn bản đã đọc sẵn — v2.1 cần đọc 1 LẦN rồi trích 2 lượt: core +
+    sub-section, đọc đĩa 2 lần là lãng phí không cần thiết)."""
     matches = list(_CONTENT_WRITER_RULES_SECTION_RE.finditer(text))
     blocks: list[str] = []
     for i, m in enumerate(matches):
@@ -368,7 +454,7 @@ class AnalysisWriterAgent(Agent):
         # đường LEGACY này — xem agents/writer.py cho đường MỚI có router thật).
         voice = assemble_voice(None)
         extra = f"\n\n---\n\nVOICE-LOCK (giọng văn bắt buộc):\n{voice}" if voice else ""
-        rules = _load_content_writer_rules(sections=("2", "3"))
+        rules = _load_composer_rules("article")
         if rules:
             extra += f"\n\n---\n\nCONTENT_WRITER_RULES (bắt buộc, nguồn chuẩn):\n{rules}"
         data = try_json_object(self._ask(build_analysis_prompt(brief), extra_system=extra))
@@ -533,7 +619,7 @@ class VideoScriptAgent(Agent):
         voice = assemble_voice(decision)
         extra = (f"\n\n---\n\nVOICE-LOCK (giọng văn bắt buộc):\n{voice}" if voice else "")
         extra += _VIDEO_TTS_GUIDANCE
-        rules = _load_content_writer_rules(sections=("2", "4"))
+        rules = _load_composer_rules("video")
         if rules:
             extra += f"\n\n---\n\nCONTENT_WRITER_RULES (bắt buộc, nguồn chuẩn):\n{rules}"
         data = try_json_object(self._ask(build_video_prompt(brief), extra_system=extra))
@@ -610,6 +696,28 @@ def _assert_scenes_narration_use_digits(scenes: list[dict]) -> None:
             + "; ".join(problems))
 
 
+_VIDEO_SCENE_FLOOR = 3   # KHỚP aigen scene-builder (scenes[] must have 3-12 elements)
+
+
+class InsufficientScenesError(ValueError):
+    """BƯỚC 3 (rules v2.1, 2026-07-22) — Composer (LLM thật, KHÔNG phải fallback
+    tất định) chỉ dựng được ÍT HƠN sàn scene renderer đòi (aigen scene-builder:
+    3-12, cần hook+ít nhất 1 body+outro để dựng video có nghĩa). Sàn này là
+    RÀNG BUỘC RENDERER (video 1-2 cảnh không dựng được), KHÁC BẢN CHẤT với field
+    tuỳ chọn thiếu (§8.2) — GIỮ NGUYÊN, không nới.
+
+    NHƯNG tuyệt đối KHÔNG được ép Composer BỊA cảnh cho đủ số (§3.1: "không suy
+    đoán để lấp... đủ số cảnh"; §8.3.4: "giảm mật độ hoặc bỏ block thay vì yêu
+    cầu Composer bịa thêm") — độn cảnh rỗng/lặp ý sẽ tạo video vô nghĩa, tệ hơn
+    hẳn việc KHÔNG có video. Thay vào đó: THROW sớm, TẠI Content Factory (Python)
+    — không để nguồn nghèo âm thầm trôi thành CONTENT.Output x lỗi kỹ thuật khó
+    hiểu (`scenes[] must have 3-12 elements`) tận phía aigen, có thể nhiều ngày
+    sau qua webhook. `produce_from_sheet.run()` bắt lỗi này RIÊNG (không chung
+    với SpelledNumberContractError), ghi NEEDS_HUMAN kèm đề xuất chuyển loại
+    nội dung (infographic/article) — nguồn nghèo scene KHÔNG có nghĩa nguồn
+    nghèo SỐ LIỆU, infographic/article vẫn có thể sản xuất được bình thường."""
+
+
 def video_fields_from_data(data: dict | None, brief: ProductionBrief):
     """JSON LLM (hoặc None/rỗng) -> (title, scenes, disclaimer) khớp
     ContentOutputVideo (docs/CONTENT_OUTPUT_SCHEMA.md) — `schema_version`/
@@ -632,6 +740,18 @@ def video_fields_from_data(data: dict | None, brief: ProductionBrief):
             # VIỆC 0.3 — CONTRACT CHECK tất định trên OUTPUT COMPOSER (chỉ đường
             # LLM này, KHÔNG áp fallback bên dưới): số bằng chữ -> THROW ngay.
             _assert_scenes_narration_use_digits(scenes)
+            # BƯỚC 3 (rules v2.1) — sàn scene RENDERER, xem InsufficientScenesError.
+            # Đặt SAU digit-check có chủ đích: lỗi ĐỊNH DẠNG (voice_text hỏng) là
+            # vấn đề TOÀN VẸN dữ liệu, ưu tiên lộ ra trước lỗi SỐ LƯỢNG (khả thi
+            # video) — cũng giữ nguyên hành vi test_video_narration_contract_
+            # rejects_spelled_out_numbers (2 scene, cố ý test riêng digit-check).
+            if len(scenes) < _VIDEO_SCENE_FLOOR:
+                raise InsufficientScenesError(
+                    f"Nguồn chỉ đủ dựng {len(scenes)} cảnh (cần tối thiểu "
+                    f"{_VIDEO_SCENE_FLOOR} để video có hook+thân+outro) — KHÔNG bịa "
+                    f"cảnh đệm cho đủ số. Đề xuất chuyển loại nội dung sang "
+                    f"infographic/article cho chủ đề này (nguồn nghèo SCENE video, "
+                    f"KHÔNG có nghĩa nghèo SỐ LIỆU — 2 loại kia dùng chung facts[]).")
             return title, scenes, disclaimer
     # LÙI MƯỢT: kịch bản tất định 4 cảnh (>= 1 "hook" + 1 "outro") từ dữ kiện
     # đã duyệt (KHÔNG cần Opus) — GIỮ nguyên nội dung/thứ tự ý tưởng đường cũ
@@ -963,7 +1083,7 @@ class InfographicSpecAgent(Agent):
         if not brief.facts:
             spec = _empty_infographic_spec(brief)
         else:
-            rules = _load_content_writer_rules(sections=("2", "5"))
+            rules = _load_composer_rules("infographic")
             extra = (f"\n\n---\n\nCONTENT_WRITER_RULES (bắt buộc, nguồn chuẩn):\n{rules}"
                     if rules else "")
             data = try_json_object(self._ask(build_infographic_composer_prompt(brief, decision),

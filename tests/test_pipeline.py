@@ -3447,7 +3447,8 @@ class _EmptyRouteLLM:
 
 
 def _run_produce_scenario(writer_llm, approved_row: dict | None = None, route_llm=None, decisions_path=None,
-                          *, approved_rows: list[dict] | None = None, run_kwargs: dict | None = None):
+                          *, approved_rows: list[dict] | None = None, run_kwargs: dict | None = None,
+                          content_llm=None):
     """Chạy produce_from_sheet.run() THẬT với board/notifier/route_llm/writer_llm
     giả lập qua monkeypatch — trả (result, board, notifier). Khôi phục mọi
     monkeypatch trong finally (không rò rỉ sang test khác). `route_llm` mặc
@@ -3456,7 +3457,10 @@ def _run_produce_scenario(writer_llm, approved_row: dict | None = None, route_ll
     truyền CÙNG path ở 2 lần gọi để mô phỏng route-once BỀN qua 2 lần chạy
     produce() thật (mặc định mỗi lần gọi 1 thư mục tạm RIÊNG — không persist).
     `approved_rows`/`run_kwargs` (VIỆC 5.1): nhiều dòng + kwargs cho run() (vd
-    topic_keys); mặc định 1 dòng `approved_row` + run(limit=5) như cũ."""
+    topic_keys); mặc định 1 dòng `approved_row` + run(limit=5) như cũ.
+    `content_llm` (BƯỚC 3, rules v2.1): LLM cho VideoScriptAgent/InfographicSpecAgent
+    (khác route_llm/writer_llm) — mặc định None = KHÔNG patch, giữ hành vi cũ
+    (factory.build_content_llm() thật, offline->Mock)."""
     import tempfile
     from pathlib import Path
     sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
@@ -3478,12 +3482,15 @@ def _run_produce_scenario(writer_llm, approved_row: dict | None = None, route_ll
         "load_settings": pfs.load_settings, "_open_board": pfs._open_board,
         "make_notifier": pfs.make_notifier, "make_llm": pfs.factory.make_llm,
         "build_writer_llm": pfs.factory.build_writer_llm,
+        "build_content_llm": pfs.factory.build_content_llm,
     }
     pfs.load_settings = lambda *a, **kw: test_settings
     pfs._open_board = lambda settings, **kw: board
     pfs.make_notifier = lambda settings: notifier
     pfs.factory.make_llm = lambda settings: route_llm
     pfs.factory.build_writer_llm = lambda settings: writer_llm
+    if content_llm is not None:
+        pfs.factory.build_content_llm = lambda settings, **kw: content_llm
     try:
         result = pfs.run(**(run_kwargs if run_kwargs is not None else {"limit": 5}))
     finally:
@@ -3492,6 +3499,7 @@ def _run_produce_scenario(writer_llm, approved_row: dict | None = None, route_ll
         pfs.make_notifier = orig["make_notifier"]
         pfs.factory.make_llm = orig["make_llm"]
         pfs.factory.build_writer_llm = orig["build_writer_llm"]
+        pfs.factory.build_content_llm = orig["build_content_llm"]
     return result, board, notifier
 
 
@@ -4488,6 +4496,11 @@ def test_video_agent_parses_llm_json_schema():
                     {"role": "hook", "visual_kind": "stat",
                      "payload": {"label": "HPG", "value": "+40%", "note": "biểu đồ"},
                      "narration": "HPG lãi tăng mạnh"},
+                    # BƯỚC 3: sàn 3 scene (InsufficientScenesError) — thêm 1 scene
+                    # thân, KHÔNG đổi ý nghĩa test (test kiểm scene ĐẦU/CUỐI).
+                    {"role": "body", "visual_kind": "statement",
+                     "payload": {"hero": "Diễn biến", "desc": "Thông tin thêm."},
+                     "narration": "Một câu thân bài."},
                     {"role": "outro", "visual_kind": "outro",
                      "payload": {"brand_name": "FVA Capital", "cta": "CTA riêng"},
                      "narration": "CTA riêng"},
@@ -4526,6 +4539,9 @@ def test_video_agent_uses_frozen_router_decision_for_voice_lock():
                 "scenes": [
                     {"role": "hook", "visual_kind": "statement",
                      "payload": {"hero": "x", "desc": ""}, "narration": "x"},
+                    # BƯỚC 3: sàn 3 scene — thêm 1 scene thân, không đổi ý nghĩa test.
+                    {"role": "body", "visual_kind": "statement",
+                     "payload": {"hero": "y", "desc": ""}, "narration": "y"},
                     {"role": "outro", "visual_kind": "outro",
                      "payload": {"brand_name": "FVA Capital", "cta": "c"}, "narration": "c"},
                 ],
@@ -4598,6 +4614,71 @@ def test_infographic_composer_produces_condensed_8_field_spec_from_llm():
     assert spec["render_hint"] == {"theme": "dark", "palette": "teal", "ratio": "1:1"}
 
 
+def test_infographic_poor_source_title_plus_2_stat_passes_full_pipeline_no_padding():
+    """rules v2.1 §8.2/§3.1 (BƯỚC 2, 2026-07-22) — nguồn NGHÈO (chỉ đủ 2 fact)
+    -> Composer trả spec THƯA (title + 2 hero stat, subtitle/market/highlights/
+    related RỖNG) phải THÔNG hết pipeline thật (compose -> apply_guardrails ->
+    render SVG), KHÔNG bị đánh dấu ERROR/NEEDS_HUMAN, và KHÔNG có card/nhãn nào
+    bị CODE tự thêm vào cho "đủ số" (§3.1: không bịa để hoàn thiện cấu trúc).
+    Đây là ca nghiệm thu chính của BƯỚC 2 — chứng minh Contract Validator hiện
+    có (render_infographic_svg + apply_guardrails) đã giải đúng bài toán sparse,
+    không cần sửa code, chỉ cần test chứng minh."""
+    from twmkt.agents.production import InfographicSpecAgent, ProductionBrief, apply_guardrails
+    from twmkt.render import render_infographic_svg
+    import json as _json
+    import xml.dom.minidom as minidom
+
+    class _SparseComposerLLM:
+        def complete(self, system, prompt, *, model=None):
+            # Composer THẤY nguồn nghèo (2 fact) -> tự chọn spec THƯA, đúng §3.1
+            # ("nếu nguồn chỉ đủ đầu ra ngắn, hãy tạo đầu ra ngắn"), KHÔNG bịa
+            # subtitle/market/highlights/related cho "đủ mục".
+            return _json.dumps({
+                "title": "Doanh thu và lợi nhuận cùng tăng",
+                "subtitle": "", "hero": [{"label": "Tăng trưởng doanh thu", "value": "+40%"}],
+                "market": [{"label": "Lợi nhuận kỷ lục", "value": "1,2 nghìn tỷ"}],
+                "highlights": [], "related": [],
+                "priority": {"primary": [], "secondary": [], "minor": []},
+                "source": "ignored", "render_hint": {},
+            }, ensure_ascii=False)
+
+    facts = _infographic_test_facts()   # ĐÚNG 2 fact — nguồn nghèo có chủ đích
+    brief = ProductionBrief(title="Chủ đề nguồn nghèo", hook="h", tickers=["FPT"],
+                            url="https://cafef.vn/x.chn",
+                            evidence="Doanh thu tăng 40%, lợi nhuận 1.200 tỷ đồng.",
+                            facts=facts)
+    agent = InfographicSpecAgent(_SparseComposerLLM())
+    draft = agent.run(brief)
+    draft = apply_guardrails(draft, brief.evidence, brief.background, facts)
+
+    # KHÔNG reject: is_clean=True <=> Status=DONE (không ERROR/NEEDS_HUMAN).
+    assert draft.is_clean, f"bị reject oan trên nguồn nghèo hợp lệ: {draft.compliance_issues}"
+
+    spec = _json.loads(draft.body)
+    assert spec["title"] == "Doanh thu và lợi nhuận cùng tăng"
+    # PHÁT HIỆN (không sửa — ngoài phạm vi BƯỚC 2, chỉ báo cáo): khi Composer cố
+    # ý để subtitle rỗng (đúng §3.1), ràng buộc "title != subtitle" có sẵn trong
+    # infographic_spec_from_data() TỰ ĐIỀN subtitle bằng brief.title thay vì giữ
+    # rỗng — lệch nhẹ tinh thần "không đệm cấu trúc" của §3.1/§8.2, NHƯNG dùng
+    # TEXT THẬT (brief.title, không bịa fact/số) nên KHÔNG phải fabrication
+    # nghiêm trọng. Xem STOP-REPORT §"Phát hiện phụ".
+    assert spec["subtitle"] == brief.title
+    assert spec["hero"] == [{"label": "Tăng trưởng doanh thu", "value": "+40%"}]
+    assert spec["market"] == [{"label": "Lợi nhuận kỷ lục", "value": "1,2 nghìn tỷ"}]
+    assert spec["highlights"] == []                # KHÔNG bịa highlight
+    # KHÔNG có nhãn giả "Số liệu N" / card đệm nào lẫn vào 2 stat thật.
+    assert not any(s["label"].startswith("Số liệu") for s in spec["hero"] + spec["market"])
+    assert len(spec["hero"]) + len(spec["market"]) == 2   # ĐÚNG 2, không đệm thêm
+
+    # Renderer không crash với cấu trúc thưa, SVG hợp lệ, có đủ 2 số.
+    # (Title bị word-wrap thành nhiều <tspan> ở max_chars=18 nên không kiểm
+    # nguyên chuỗi liền — kiểm giá trị số, thứ không bị wrap.)
+    svg = render_infographic_svg(spec)
+    minidom.parseString(svg)
+    assert "+40%" in svg
+    assert "1,2 nghìn tỷ" in svg
+
+
 def test_infographic_composer_empty_facts_returns_empty_spec_no_llm_call():
     """facts[] rỗng (Brief timeout/lỗi) -> spec RỖNG CÓ CHỦ Ý, KHÔNG gọi LLM
     (PoisonLLM raise nếu bị gọi), KHÔNG bịa nhãn 'Số liệu N' (caller đánh dấu
@@ -4652,9 +4733,17 @@ def test_render_analysis_and_video_use_dynamic_cta_not_hardcoded_brand():
     # Video: LLM trả JSON nhưng scene CUỐI THIẾU payload.cta -> fallback _default_cta()
     # (CTA giờ nằm trong payload của scene cuối, visual_kind="outro", KHÔNG còn field
     # "cta" rời cấp top — xem docs/CONTENT_OUTPUT_SCHEMA.md).
+    # BƯỚC 3 (sàn 3 scene, InsufficientScenesError): thêm 1 scene thân, KHÔNG
+    # đổi ý nghĩa test (vẫn kiểm scene CUỐI thiếu cta -> fallback).
     _title, _scenes, _disc = video_fields_from_data(
-        {"title": "T", "scenes": [{"role": "hook", "visual_kind": "statement",
-                                   "payload": {"hero": "v", "desc": ""}, "narration": "v"}]}, brief)
+        {"title": "T", "scenes": [
+            {"role": "hook", "visual_kind": "statement",
+             "payload": {"hero": "v", "desc": ""}, "narration": "v"},
+            {"role": "body", "visual_kind": "statement",
+             "payload": {"hero": "w", "desc": ""}, "narration": "w"},
+            {"role": "outro", "visual_kind": "statement",
+             "payload": {"hero": "v", "desc": ""}, "narration": "v"},
+        ]}, brief)
     assert _scenes[-1]["payload"]["cta"] == _default_cta()
 
     # Video: data=None (LLM hỏng hoàn toàn) -> đường lùi mượt CŨNG dùng _default_cta()
@@ -4704,9 +4793,13 @@ def test_video_narration_contract_rejects_spelled_out_numbers():
     assert "hai nghìn không trăm" in str(ei.value)
 
     # narration dạng CHỮ SỐ -> KHÔNG throw.
+    # BƯỚC 3 (sàn 3 scene): thêm 1 scene thân, không đổi ý nghĩa test (vẫn kiểm
+    # narration digit-form không bị chặn oan).
     ok = {"title": "T", "scenes": [
         {"role": "hook", "visual_kind": "statement", "payload": {"hero": "a", "desc": "b"},
          "narration": "Báo cáo năm 2025 cho thấy đà tăng 4,98%."},
+        {"role": "body", "visual_kind": "statement", "payload": {"hero": "c", "desc": "d"},
+         "narration": "Một câu thân bài."},
         {"role": "outro", "visual_kind": "outro", "payload": {"brand_name": "FVA"}, "narration": "Cảm ơn."},
     ]}
     _t, scenes, _d = video_fields_from_data(ok, brief)
@@ -4716,6 +4809,96 @@ def test_video_narration_contract_rejects_spelled_out_numbers():
     brief_fb = ProductionBrief(title="Năm hai nghìn không trăm hai mươi lăm mở màn",
                                hook="", url="https://cafef.vn/x.chn", evidence="")
     _t2, _s2, _d2 = video_fields_from_data(None, brief_fb)   # không raise
+
+
+def test_video_fields_from_data_rejects_fewer_than_3_scenes_no_padding():
+    """BƯỚC 3 (rules v2.1, 2026-07-22) — nguồn chỉ đủ 1-2 cảnh (đường Composer/
+    LLM THẬT, KHÔNG phải fallback) -> InsufficientScenesError, nêu RÕ số cảnh
+    thật + đề xuất chuyển loại. TUYỆT ĐỐI KHÔNG tự độn cảnh cho đủ 3 (kiểm
+    scenes trả về KHÔNG tồn tại — hàm phải THROW trước khi return, không có
+    đường nào âm thầm vá đủ số)."""
+    import pytest
+    from twmkt.agents.production import (
+        InsufficientScenesError, ProductionBrief, video_fields_from_data,
+    )
+
+    brief = ProductionBrief(title="Tin ngắn nguồn nghèo", hook="h",
+                            url="https://cafef.vn/x.chn", evidence="Một câu tin ngắn.")
+
+    # 2 cảnh — ĐÚNG dưới sàn 3 (khớp aigen scene-builder: scenes[] 3-12).
+    two_scenes = {"title": "T", "scenes": [
+        {"role": "hook", "visual_kind": "statement", "payload": {"hero": "a", "desc": "b"},
+         "narration": "Câu dẫn."},
+        {"role": "outro", "visual_kind": "outro", "payload": {"brand_name": "FVA"}, "narration": "Cảm ơn."},
+    ]}
+    with pytest.raises(InsufficientScenesError) as ei:
+        video_fields_from_data(two_scenes, brief)
+    msg = str(ei.value)
+    assert "2 cảnh" in msg
+    assert "chuyển loại" in msg and "infographic" in msg and "article" in msg
+    assert "bịa" in msg   # tự khai rõ KHÔNG bịa, không phải im lặng vá
+
+    # 1 cảnh — càng dưới sàn, cùng hành vi.
+    with pytest.raises(InsufficientScenesError):
+        video_fields_from_data({"title": "T", "scenes": [two_scenes["scenes"][0]]}, brief)
+
+    # ĐÚNG sàn 3 -> KHÔNG throw (biên chính xác, không lệch off-by-one).
+    three_scenes = dict(two_scenes)
+    three_scenes["scenes"] = [
+        two_scenes["scenes"][0],
+        {"role": "body", "visual_kind": "statement", "payload": {"hero": "c", "desc": "d"}, "narration": "Thân."},
+        two_scenes["scenes"][1],
+    ]
+    _t, scenes, _d = video_fields_from_data(three_scenes, brief)
+    assert len(scenes) == 3
+
+
+def test_produce_from_sheet_insufficient_scenes_marks_needs_human_no_crash():
+    """BƯỚC 3 — InsufficientScenesError bắt RIÊNG ở produce_from_sheet.run():
+    dòng video ghi NEEDS_HUMAN kèm note đề xuất chuyển loại, KHÔNG crash cả
+    lượt run() (article của CÙNG dòng vẫn phải sản xuất bình thường —
+    per-row isolation, không phải lỗi hạ tầng nuốt trọn output)."""
+    import json as _json
+
+    class _CleanWriterLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            return _clean_writer_json()
+
+    class _TwoSceneVideoLLM:
+        """content_llm cho VideoScriptAgent — luôn trả 2 cảnh (dưới sàn 3).
+        `.usage` (interface LLMRouter thật, agents/router.py) — run() đọc
+        content_llm.usage.as_dict() để log chi phí, dù stub $0."""
+        def __init__(self):
+            from twmkt.agents.router import Usage
+            self.usage = Usage()
+
+        def complete(self, system, prompt, *, model=None, fail_loud=False, temperature=None):
+            return _json.dumps({
+                "schema_version": 1, "title": "T",
+                "scenes": [
+                    {"role": "hook", "visual_kind": "statement",
+                     "payload": {"hero": "a", "desc": "b"}, "narration": "Câu dẫn."},
+                    {"role": "outro", "visual_kind": "outro",
+                     "payload": {"brand_name": "FVA"}, "narration": "Cảm ơn."},
+                ],
+                "source": "ignored", "disclaimer": "d",
+            }, ensure_ascii=False)
+
+    result, board, notifier = _run_produce_scenario(
+        _CleanWriterLLM(), _approved_row("Tin nguồn nghèo BƯỚC 3", row=2),
+        content_llm=_TwoSceneVideoLLM())
+
+    # KHÔNG crash: run() trả result bình thường, article VẪN được sản xuất.
+    assert result["produced"] >= 1
+    article_rows = [r for r in board.appended_content if r[2] == "article"]
+    assert len(article_rows) == 1 and article_rows[0][3] == "DONE"
+
+    # Dòng video: NEEDS_HUMAN, note đề xuất chuyển loại — KHÔNG có cảnh bịa nào
+    # (không có content_row nào type="video" với Status=DONE).
+    video_rows = [r for r in board.appended_content if r[2] == "video"]
+    assert len(video_rows) == 1
+    assert video_rows[0][3] == "NEEDS_HUMAN"
+    assert "chuyển loại" in video_rows[0][5]   # Notes
 
 
 def test_infographic_composer_falls_back_to_deterministic_spec_when_llm_fails():
@@ -6542,6 +6725,127 @@ def test_content_writer_rules_no_longer_bans_tickers_in_voice_over():
         "§4.5 vẫn còn luật cũ nguyên văn — sẽ ghi đè hợp đồng narration mới"
     )
     assert "GIỮ NGUYÊN mã chứng khoán" in rules
+
+
+def test_content_writer_rules_section_re_accepts_both_heading_levels_no_false_match():
+    """1.2 — loader cắt mục phải nhận CẢ `# N.` LẪN `## N.`.
+
+    Vì sao: `content_writer_rules.md` dùng `#`, `longform_content_writing_rules.md`
+    dùng `##`. Regex cũ (`^# `) khớp 0 mục trên file longform -> loader trả ""
+    ÂM THẦM (rule không bao giờ được áp, KHÔNG cảnh báo) — đúng lớp lỗi hỏng-im-lặng.
+
+    Đồng thời PHẢI KHÔNG false-match mục con (`## 2.1.`, `### 3.1.`): regex đòi
+    dấu chấm + KHOẢNG TRẮNG sau số nên "2.1. " không lọt.
+    """
+    from twmkt.agents.production import _CONTENT_WRITER_RULES_SECTION_RE as RE
+
+    probe = "# 1. A\n## 2. B\n## 2.1. C\n### 3.1. D\n#### 4. E\n## 10. F\n"
+    assert [m.group(1) for m in RE.finditer(probe)] == ["1", "2", "10"], (
+        "phải bắt mục cấp 1 ở cả 2 mức #/##, KHÔNG bắt mục con và KHÔNG bắt ####"
+    )
+
+
+def test_content_writer_rules_section_re_no_regression_on_existing_file():
+    """Nới regex KHÔNG được đổi kết quả trên file rule CŨ (Article/Video/
+    Infographic đang định tuyến theo số mục — đổi là vỡ âm thầm cả 3 đường)."""
+    import re
+    from pathlib import Path
+    from twmkt.agents.production import _CONTENT_WRITER_RULES_SECTION_RE as NEW
+
+    old = re.compile(r"(?m)^# (\d+)\. ")
+    text = Path("prompts/content_writer_rules.md").read_text(encoding="utf-8")
+    assert [(m.group(1), m.start()) for m in old.finditer(text)] == \
+           [(m.group(1), m.start()) for m in NEW.finditer(text)]
+
+
+def test_longform_rules_file_present_in_repo_and_sectionable():
+    """Rule bài dài phải NẰM TRONG repo (bản ngoài repo `content-rules/` không
+    theo git -> mất khi đổi máy/VPS, CÙNG LỚP LỖI data_root) và phải cắt được
+    mục bằng loader."""
+    from pathlib import Path
+    from twmkt.agents.production import _CONTENT_WRITER_RULES_SECTION_RE as RE
+
+    p = Path("prompts/longform_content_writing_rules.md")
+    assert p.exists(), "thiếu bản copy trong repo"
+    text = p.read_text(encoding="utf-8")
+    assert "NGUỒN: content-rules/" in text, "thiếu khối ghi nguồn + ngày"
+    assert len(list(RE.finditer(text))) >= 15, "loader không cắt được mục của file longform"
+
+
+def test_composer_rules_v21_copy_present_and_sectionable():
+    """rules v2.1 (BƯỚC 1) phải NẰM TRONG repo — cùng lý do longform (bản ngoài
+    repo `content-rules/` không theo git). Đủ mục §1-10 để loader trích."""
+    from pathlib import Path
+    from twmkt.agents.production import _CONTENT_WRITER_RULES_SECTION_RE as RE
+
+    p = Path("prompts/content_composer_rules_v2_1.md")
+    assert p.exists(), "thiếu bản copy content_composer_rules_v2_1.md trong repo"
+    text = p.read_text(encoding="utf-8")
+    assert "NGUỒN: content-rules/CONTENT_COMPOSER_RULES_v2.1.md" in text
+    assert "- Hệ thống đóng dấu nguồn và disclaimer tất định" in text   # BƯỚC 0: §3.4 đã sửa
+    # Dòng BULLET gốc (không phải câu nhắc trong header giải thích) phải KHÔNG
+    # còn — chỉ kiểm PHẦN THÂN file (sau khối header <!-- ... -->).
+    body = text.split("-->", 1)[1]
+    assert "- Thêm nguồn và disclaimer khi chủ đề hoặc kênh xuất bản yêu cầu." not in body
+    assert len(list(RE.finditer(text))) == 10, "phải cắt đủ 10 mục cấp 1 (§1-10)"
+
+
+def test_load_composer_rules_defaults_to_v21_and_selects_correct_product_section():
+    """BƯỚC 1.1/1.4 — mặc định profile v21, mỗi content_type nhận ĐÚNG phần
+    §7.N của mình (article->7.1, video->7.2, infographic->7.3), core §1-6
+    dùng CHUNG. KHÔNG lẫn phần loại khác (vd video không dính "Article và
+    Long-form Article" của §7.1)."""
+    from twmkt.agents.production import _load_composer_rules
+
+    article = _load_composer_rules("article")
+    video = _load_composer_rules("video")
+    infographic = _load_composer_rules("infographic")
+
+    for r in (article, video, infographic):
+        assert "## 1. Mục tiêu" in r   # core §1 dùng chung
+        assert "## 8. Validation" not in r   # §8 KHÔNG nhúng (tài liệu validator, không phải Composer)
+
+    assert "### 7.1. Article và Long-form Article" in article
+    assert "### 7.2." not in article and "### 7.3." not in article
+
+    assert "### 7.2. Video Script" in video
+    assert "### 7.1." not in video and "### 7.3." not in video
+
+    assert "### 7.3. Infographic Script" in infographic
+    assert "### 7.1." not in infographic and "### 7.2." not in infographic
+
+
+def test_load_composer_rules_profile_switch_and_explicit_override_wins():
+    """BƯỚC 1.2 — A/C chọn được qua config `writer.rules_profile`, KHÔNG xoá.
+    C (chỉ có article) lùi về A cho video/infographic. `content_rules_path`
+    (override tường minh, TEST CŨ dùng) LUÔN THẮNG bất kể profile."""
+    from twmkt.config import Settings
+    from twmkt.agents.production import _load_composer_rules, _load_content_writer_rules
+
+    s_default = Settings({})
+    s_a = Settings({"writer": {"rules_profile": "A"}})
+    s_c = Settings({"writer": {"rules_profile": "C"}})
+
+    # Mặc định (không set gì) == profile "v21" tường minh.
+    assert _load_composer_rules("article", settings=s_default) == \
+           _load_composer_rules("article", settings=Settings({"writer": {"rules_profile": "v21"}}))
+
+    # Profile A -> đúng nội dung content_writer_rules.md (hàm cũ, KHÔNG đổi).
+    assert _load_composer_rules("video", settings=s_a) == \
+           _load_content_writer_rules(sections=("2", "4"), settings=s_a)
+
+    # Profile C: article có nội dung RIÊNG (khác A); video/infographic LÙI VỀ A
+    # (C không có mục 2 loại này) -> giống hệt profile A.
+    assert _load_composer_rules("article", settings=s_c) != _load_composer_rules("article", settings=s_a)
+    assert _load_composer_rules("video", settings=s_c) == _load_composer_rules("video", settings=s_a)
+    assert _load_composer_rules("infographic", settings=s_c) == _load_composer_rules("infographic", settings=s_a)
+
+    # Override tường minh THẮNG mọi profile (kể cả v21 mặc định) — tương thích
+    # test cũ trỏ file tạm qua content_rules_path.
+    s_override = Settings({"writer": {"content_rules_path": "prompts/content_writer_rules.md",
+                                      "rules_profile": "v21"}})
+    assert _load_composer_rules("article", settings=s_override) == \
+           _load_content_writer_rules(sections=("2", "3"), settings=s_override)
 
 
 def test_match_source_by_domain_and_fetch_full_evidence_fallback():
