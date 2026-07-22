@@ -36,4 +36,4 @@ brand:
   # NGUỒN cho article/video/infographic (agents/production.py._default_
   # disclaimer, render/infographic.py brand_kit_from_settings đều đọc TỪ ĐÂY).
   footer:
-    disclaimer: "Nội dung mang tính thông tin, không phải khuyến nghị đầu tư"
+    disclaimer: "Nội dung mang tính tham khảo, không phải khuyến nghị đầu tư"
