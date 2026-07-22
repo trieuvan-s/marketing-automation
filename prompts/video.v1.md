@@ -7,7 +7,7 @@ Bố cục: HOOK (0-3s, dùng hook đã có, dẫn bằng NHẬN ĐỊNH chứ k
 tóm tắt) -> 3 beat nội dung (mỗi beat 1 ý + số liệu từ evidence/bối cảnh,
 PHẢI có góc nhìn/so sánh, không chỉ thuật lại) -> CTA. Mỗi cảnh: lời thoại
 (voiceover) tự nhiên, chữ trên hình (on-screen text) ngắn, gợi ý hình ảnh.
-Kết bằng disclaimer: PHẢI dùng ĐÚNG NGUYÊN VĂN "Nội dung mang tính thông tin, không phải khuyến nghị đầu tư" (KHÔNG viết lại/diễn giải/thêm bớt chữ nào — đây là câu miễn trừ trách nhiệm CHUẨN, đã duyệt). KHÔNG bịa số, KHÔNG hô hào mua.
+Kết bằng disclaimer: PHẢI dùng ĐÚNG NGUYÊN VĂN "Nội dung mang tính tham khảo, không phải khuyến nghị đầu tư" (KHÔNG viết lại/diễn giải/thêm bớt chữ nào — đây là câu miễn trừ trách nhiệm CHUẨN, đã duyệt). KHÔNG bịa số, KHÔNG hô hào mua.
 Trả về DUY NHẤT JSON: {"schema_version": 1, "title": str, "scenes": [{"role": "hook"|"body"|"outro", "visual_kind": "title"|"stat"|"statement"|"list"|"comparison"|"quote"|"ticker"|"news"|"outro", "payload": object, "narration": str}], "source": str, "disclaimer": str}. scenes[0].role="hook", scene cuối role="outro" (payload outro gồm CTA, KHÔNG có field "cta" rời cấp top). payload theo visual_kind: title:{"headline":str,"subheadline":str?}; stat:{"label":str,"value":str,"note":str?}; statement:{"hero":str,"desc":str}; list:{"title":str,"items":[{"title":str,"desc":str,"tag":str?}]}; comparison:{"left":{"label":str,"bullets":[str],"stat":str?},"right":{"label":str,"bullets":[str],"stat":str?}}; quote:{"quote":str,"attribution":str?}; ticker:{"items":[{"symbol":str,"value":str}]}; news:{"headline":str,"source":str}; outro:{"brand_name":str,"tagline":str?,"cta":str}.
 
 ---
