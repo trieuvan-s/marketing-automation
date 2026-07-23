@@ -703,6 +703,33 @@ def content_band_ranges(header: list[str], rows: list[list[str]]) -> list[tuple[
     return ranges
 
 
+def content_day_border_ranges(header: list[str], rows: list[list[str]]) -> list[tuple[int, int]]:
+    """2026-07-23 (yêu cầu Lead) — dải NGÀY (cột Timestamp) trên `rows` ĐÃ
+    regroup theo TopicKey (content_band_ranges vẫn là phân nhóm CHÍNH, KHÔNG
+    đổi — đây CHỈ là 1 lớp chỉ dấu ngày PHỤ, vẽ viền TRÁI thay vì tô nền, để
+    không đấu màu với băng TopicKey đã có). Quét DÃY LIÊN TIẾP cùng Timestamp
+    trong THỨ TỰ HÀNG HIỆN TẠI (sau regroup) — 1 chủ đề có hàng từ NHIỀU ngày
+    khác nhau (vd video sinh trễ hơn article/infographic) sẽ tự nhiên có
+    nhiều dải ngày NẰM TRONG cùng 1 khối màu TopicKey, phản ánh đúng thực tế,
+    KHÔNG cố gộp giả. Trả list (start, end) 0-based/end-exclusive tính theo
+    Sheet (offset +1 vì hàng 1 là header)."""
+    low = [h.strip().lower() for h in header]
+    if "timestamp" not in low:
+        return []
+    it = low.index("timestamp")
+    ranges: list[tuple[int, int]] = []
+    n = len(rows)
+    i = 0
+    while i < n:
+        day = rows[i][it] if it < len(rows[i]) else ""
+        j = i
+        while j < n and (rows[j][it] if it < len(rows[j]) else "") == day:
+            j += 1
+        ranges.append((i + 1, j + 1))
+        i = j
+    return ranges
+
+
 # =====================================================================
 # LỚP 5 Phase 1/1R.2 — Backfill/Re-key TopicKey (curation/keys.py). Hàm THUẦN.
 # Mặc định (force=False): WRITE-ONCE — dòng ĐÃ có TopicKey GIỮ NGUYÊN, không
@@ -1552,6 +1579,16 @@ class SheetsBoard:
     )
     _CONTENT_BAND_BORDER = {"style": "SOLID_THICK", "color": {"red": 0.55, "green": 0.55, "blue": 0.55}}
 
+    # 2026-07-23 (yêu cầu Lead) — chỉ dấu NGÀY cho CONTENT: viền TRÁI (KHÔNG
+    # phải nền, tránh đấu màu với _CONTENT_BAND_COLORS ở trên vốn đã dùng để
+    # phân nhóm TopicKey — quyết định GIỮ NGUYÊN TopicKey làm băng CHÍNH, xem
+    # CLAUDE.md Lớp 5) — 2 màu xen kẽ theo khối ngày, tách biệt hẳn kênh thị
+    # giác (cạnh trái, không phải nền/cạnh trên) khỏi viền xám TopicKey.
+    _CONTENT_DAY_BORDER_COLORS = (
+        {"style": "SOLID_THICK", "color": {"red": 0.79, "green": 0.63, "blue": 0.29}},   # gold FVA
+        {"style": "SOLID_THICK", "color": {"red": 0.29, "green": 0.45, "blue": 0.68}},   # xanh lam đối trọng
+    )
+
     def regroup_and_band_content(self) -> int:
         """Sheet UI cleanup Phase 1 — THAY regroup_and_merge_content() cũ (đã
         xoá cùng mergeCells). Sắp lại tab CONTENT để các hàng CÙNG TopicKey liền
@@ -1562,8 +1599,17 @@ class SheetsBoard:
         unmergeCells ở đâu cả — Context/Timestamp (và MỌI cột khác) giữ nguyên
         giá trị trên TỪNG hàng, không còn hàng nào bị xoá rỗng vì lý do trình
         bày. Idempotent: tô lại màu/viền mỗi lần gọi (không cần unmerge trước vì
-        không còn gì để unmerge). Trả số dải đã tô (0 -> không đổi gì, kể cả khi
-        tab rỗng/thiếu cột TopicKey)."""
+        không còn gì để unmerge).
+
+        2026-07-23: THÊM viền TRÁI xen kẽ theo khối NGÀY (content_day_border_
+        ranges, quét TRÊN thứ tự đã regroup TopicKey — 1 chủ đề trải nhiều
+        ngày sẽ có nhiều dải viền ngày NẰM TRONG cùng 1 khối màu TopicKey,
+        đúng thực tế, không cố gộp giả) — lớp CHỈ DẤU PHỤ, KHÔNG thay băng
+        TopicKey (đã chốt kiến trúc, xem CLAUDE.md Lớp 5).
+
+        Trả số dải TopicKey đã tô (0 -> không đổi gì, kể cả khi tab rỗng/thiếu
+        cột TopicKey — viền ngày vẫn được vẽ độc lập nếu có cột Timestamp,
+        không tính vào số trả về)."""
         ws = self._tab("CONTENT")
         values = ws.get_all_values()
         if len(values) < 2:
@@ -1573,13 +1619,12 @@ class SheetsBoard:
         new_rows = regroup_content_rows(header, rows)
         if new_rows != rows:
             ws.update("A2", new_rows, value_input_option="RAW")
-        ranges = content_band_ranges(header, new_rows)
-        if not ranges:
-            return 0
 
         sid = ws.id
         ncols = len(header)
         reqs: list[dict] = []
+
+        ranges = content_band_ranges(header, new_rows)
         for idx, (r0, r1) in enumerate(ranges):
             color = self._CONTENT_BAND_COLORS[idx % 2]
             reqs.append({"repeatCell": {
@@ -1591,6 +1636,16 @@ class SheetsBoard:
                 "range": _grid_range(sid, r0, r0 + 1, 0, ncols),
                 "top": self._CONTENT_BAND_BORDER,
             }})
+
+        day_ranges = content_day_border_ranges(header, new_rows)
+        for idx, (r0, r1) in enumerate(day_ranges):
+            reqs.append({"updateBorders": {
+                "range": _grid_range(sid, r0, r1, 0, 1),
+                "left": self._CONTENT_DAY_BORDER_COLORS[idx % 2],
+            }})
+
+        if not reqs:
+            return 0
         self._spreadsheet().batch_update({"requests": reqs})
         return len(ranges)
 
@@ -1942,21 +1997,94 @@ class SheetsBoard:
         return priority_groups_from_rows(rows, default=default)
 
     def sort_context_by_hot(self) -> None:
-        """Sắp lại toàn bộ hàng dữ liệu CONTEXT theo Hot% GIẢM DẦN. No-op nếu
-        tab chưa có cột Hot% hoặc chưa có dữ liệu."""
+        """REGROUP theo NGÀY (cột Timestamp, DD/MM/YYYY) rồi Hot% GIẢM DẦN
+        TRONG TỪNG BLOCK NGÀY — KHÔNG sort xuyên ngày (2026-07-23, yêu cầu
+        Lead: dữ liệu đóng block theo ngày, ngày mới luôn ở DƯỚI CÙNG). Gom
+        theo GIÁ TRỊ ngày thật (KHÔNG phải dãy hàng liên tiếp — dữ liệu CŨ
+        trước bản sửa này đã bị global-sort trộn lẫn ngày, xem docs/
+        VPS_MIGRATION_BACKLOG.md, nên phải regroup THẬT mới hết trộn, không
+        chỉ giữ nguyên khối đã liên tiếp sẵn), sắp NGÀY tăng dần (cũ->mới,
+        khớp "ngày mới append cuối"; ngày rỗng/hỏng định dạng -> đẩy lên đầu,
+        an toàn không mất dữ liệu), rồi CHỈ xáo Hot% NỘI BỘ mỗi block. No-op
+        nếu tab chưa có cột Hot%/Timestamp, chưa có dữ liệu, hoặc thứ tự đã
+        đúng sẵn (khỏi tốn lượt ghi Sheets API)."""
         import gspread
+        from collections import defaultdict
 
         ws = self._tab("CONTEXT")
         header = ws.row_values(1)
         low = [h.strip().lower() for h in header]
-        if "hot%" not in low:
+        if "hot%" not in low or "timestamp" not in low:
             return
-        n_rows = len(ws.get_all_values())
-        if n_rows <= 2:   # 0-1 hàng dữ liệu, không cần sắp
+        all_values = ws.get_all_values()
+        if len(all_values) <= 2:   # 0-1 hàng dữ liệu, không cần sắp
             return
-        col = low.index("hot%") + 1   # gspread sort dùng chỉ số cột 1-based
-        end_a1 = gspread.utils.rowcol_to_a1(n_rows, len(header))
-        ws.sort((col, "des"), range=f"A2:{end_a1}")
+        hot_idx, ts_idx = low.index("hot%"), low.index("timestamp")
+        data = all_values[1:]
+
+        def _hot(row: list[str]) -> float:
+            try:
+                return float((row[hot_idx] if hot_idx < len(row) else "").replace("%", "").strip() or 0)
+            except ValueError:
+                return 0.0
+
+        def _day_key(day: str) -> tuple[int, int, int]:
+            try:
+                dd, mm, yyyy = day.split("/")
+                return (int(yyyy), int(mm), int(dd))
+            except (ValueError, AttributeError):
+                return (0, 0, 0)   # rỗng/hỏng định dạng -> đẩy lên đầu, không mất dữ liệu
+
+        groups: dict[str, list[list[str]]] = defaultdict(list)
+        for row in data:
+            groups[row[ts_idx] if ts_idx < len(row) else ""].append(row)
+
+        reordered: list[list[str]] = []
+        for day in sorted(groups, key=_day_key):
+            block = groups[day]
+            block.sort(key=_hot, reverse=True)
+            reordered.extend(block)
+
+        if reordered == data:
+            return   # đã đúng thứ tự -- khỏi tốn lượt ghi Sheets API
+        end_a1 = gspread.utils.rowcol_to_a1(len(all_values), len(header))
+        ws.update(f"A2:{end_a1}", reordered, value_input_option="RAW")
+
+    def band_context_by_day(self) -> int:
+        """2026-07-23 (yêu cầu Lead) — tô NỀN XEN KẼ theo KHỐI NGÀY (cột
+        Timestamp) cho tab CONTEXT. Gọi SAU sort_context_by_hot() (hàm đó lo
+        REGROUP/sắp thứ tự; hàm này CHỈ đo dải NGÀY liên tiếp trong thứ tự
+        hiện có rồi tô, không tự sắp lại). CÙNG bảng màu trắng/xanh rất nhạt
+        với CONTENT (_CONTENT_BAND_COLORS) để nhất quán ngôn ngữ thị giác
+        toàn Sheet -- CONTEXT không có lớp gom nhóm nào khác (khác CONTENT
+        đang dùng nền cho TopicKey) nên dùng thẳng nền làm chỉ dấu ngày CHÍNH,
+        không cần kênh viền phụ. Idempotent. Trả số khối đã tô (0 nếu tab
+        rỗng/thiếu cột Timestamp)."""
+        ws = self._tab("CONTEXT")
+        values = ws.get_all_values()
+        if len(values) < 2:
+            return 0
+        header, rows = values[0], values[1:]
+        ranges = content_day_border_ranges(header, rows)   # hàm THUẦN dùng chung, chỉ quét dải ngày
+        if not ranges:
+            return 0
+
+        sid = ws.id
+        ncols = len(header)
+        reqs: list[dict] = []
+        for idx, (r0, r1) in enumerate(ranges):
+            color = self._CONTENT_BAND_COLORS[idx % 2]
+            reqs.append({"repeatCell": {
+                "range": _grid_range(sid, r0, r1, 0, ncols),
+                "cell": {"userEnteredFormat": {"backgroundColor": color}},
+                "fields": "userEnteredFormat.backgroundColor",
+            }})
+            reqs.append({"updateBorders": {
+                "range": _grid_range(sid, r0, r0 + 1, 0, ncols),
+                "top": self._CONTENT_BAND_BORDER,
+            }})
+        self._spreadsheet().batch_update({"requests": reqs})
+        return len(ranges)
 
     def log(self, level: str, message: str, *, engine: str = "") -> None:
         """Ghi 1 dòng nhật ký vào tab LOG. `engine` (tạm, vd haiku/sonnet/mock) để

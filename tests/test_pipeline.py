@@ -1186,6 +1186,93 @@ def test_sheets_sort_context_by_hot_noop_without_hot_column():
     assert ws.sorted_with is None                          # không gọi sort
 
 
+def test_sheets_sort_context_by_hot_regroups_interleaved_days_and_sorts_within_block():
+    """2026-07-23 (yêu cầu Lead): Hot% chỉ sort TRONG TỪNG BLOCK NGÀY (cột
+    Timestamp), KHÔNG sort xuyên ngày -- ngày CŨ luôn ở TRÊN, ngày MỚI luôn ở
+    DƯỚI (append cuối). Dữ liệu THẬT trên Sheet production đã bị global-sort
+    CŨ trộn lẫn 2 ngày xen kẽ (xác nhận qua khảo sát thật 2026-07-23) -- hàm
+    PHẢI regroup theo GIÁ TRỊ ngày (không chỉ giữ nguyên dãy liên tiếp sẵn) để
+    dọn sạch kiểu trộn này, không chỉ né tránh nó ở dữ liệu mới."""
+    from twmkt.sheets_board import SheetsBoard, CONTEXT_HEADER, context_row
+
+    class _FakeWS:
+        def __init__(self, values):
+            self._v = values
+            self.updated_with = None
+        def get_all_values(self): return self._v
+        def row_values(self, n): return self._v[0]
+        def update(self, range, values, value_input_option="RAW"):
+            self.updated_with = (range, values)
+            self._v = [self._v[0]] + values
+
+    # Ngày 21/07 (Hot 10, 90) VÀ 22/07 (Hot 20, 80) XEN KẼ hàng (mô phỏng đúng
+    # kiểu trộn của global-sort CŨ) -- kỳ vọng: regroup lại theo ngày (21/07
+    # TRÊN, 22/07 DƯỚI vì mới hơn), Hot% giảm dần NỘI BỘ mỗi ngày.
+    a_thap = context_row(title="A-thap", hook_line="h", source_url="http://u/a", score=1,
+                         hot_pct=10.0, ts="21/07/2026")
+    b_thap = context_row(title="B-thap", hook_line="h", source_url="http://u/c", score=1,
+                         hot_pct=20.0, ts="22/07/2026")
+    a_cao = context_row(title="A-cao", hook_line="h", source_url="http://u/b", score=1,
+                        hot_pct=90.0, ts="21/07/2026")
+    b_cao = context_row(title="B-cao", hook_line="h", source_url="http://u/d", score=1,
+                        hot_pct=80.0, ts="22/07/2026")
+    board = SheetsBoard(spreadsheet_id="SID", creds_path="creds")
+    ws = _FakeWS([CONTEXT_HEADER, a_thap, b_thap, a_cao, b_cao])   # 2 ngày XEN KẼ
+    board._ws["CONTEXT"] = ws
+    board.sort_context_by_hot()
+
+    ctx_idx = CONTEXT_HEADER.index("Context")
+    got = [r[ctx_idx] for r in ws._v[1:]]
+    # Regroup đúng: 21/07 (cũ hơn) TRÊN, 22/07 (mới hơn) DƯỚI; mỗi block Hot% giảm dần.
+    assert got == ["A-cao", "A-thap", "B-cao", "B-thap"]
+
+    # Gọi lại lần 2 (thứ tự đã đúng) -- KHÔNG ghi lại (khỏi tốn lượt Sheets API).
+    ws.updated_with = None
+    board.sort_context_by_hot()
+    assert ws.updated_with is None
+
+
+def test_band_context_by_day_bands_each_day_block_alternating():
+    """2026-07-23 (yêu cầu Lead) -- band_context_by_day tô nền xen kẽ theo
+    khối NGÀY (Timestamp) cho CONTEXT, gọi SAU sort_context_by_hot() (đã ở
+    đúng thứ tự) -- 2 màu xen kẽ, mỗi khối 1 repeatCell + 1 updateBorders
+    (viền trên), TUYỆT ĐỐI không mergeCells."""
+    from twmkt.sheets_board import SheetsBoard, CONTEXT_HEADER, context_row
+
+    rows = [
+        context_row(title="A-cao", hook_line="h", source_url="http://u/a", score=1,
+                   hot_pct=90.0, ts="21/07/2026"),
+        context_row(title="A-thap", hook_line="h", source_url="http://u/b", score=1,
+                   hot_pct=10.0, ts="21/07/2026"),
+        context_row(title="B-cao", hook_line="h", source_url="http://u/c", score=1,
+                   hot_pct=80.0, ts="22/07/2026"),
+    ]
+
+    class _FakeContentWS:
+        id = 9
+        def __init__(self, values): self._v = values
+        def get_all_values(self): return self._v
+
+    class _FakeSheet:
+        def __init__(self): self.last_body = None
+        def batch_update(self, body): self.last_body = body; return {}
+
+    board = SheetsBoard(spreadsheet_id="X", creds_path="Y")
+    board._ws["CONTEXT"] = _FakeContentWS([list(CONTEXT_HEADER)] + rows)
+    board._sh = _FakeSheet()
+
+    n = board.band_context_by_day()
+    assert n == 2   # 21/07 (2 dòng) + 22/07 (1 dòng)
+    reqs = board._sh.last_body["requests"]
+    assert not any("mergeCells" in r or "unmergeCells" in r for r in reqs)
+    fills = [r["repeatCell"] for r in reqs if "repeatCell" in r]
+    assert len(fills) == 2
+    assert fills[0]["range"]["startRowIndex"] == 1 and fills[0]["range"]["endRowIndex"] == 3   # 21/07: dòng 1-2
+    assert fills[1]["range"]["startRowIndex"] == 3 and fills[1]["range"]["endRowIndex"] == 4   # 22/07: dòng 3
+    assert fills[0]["cell"]["userEnteredFormat"]["backgroundColor"] != \
+           fills[1]["cell"]["userEnteredFormat"]["backgroundColor"]
+
+
 # --- Retry quota 429 (call_with_retry/_RetryingProxy) + gate ensure_tabs -----
 class _FakeQuotaResp:
     """Giả lập requests.Response cho gspread.exceptions.APIError (429)."""
@@ -2392,6 +2479,27 @@ def test_content_band_ranges_bands_every_group_no_type_threshold():
     assert ranges == [(1, 4), (4, 6), (6, 7)]   # tk-a (3 loại), tk-b (2 loại), tk-c (1 loại) — CẢ 3 đều có dải
 
 
+def test_content_day_border_ranges_splits_topic_group_across_days():
+    """2026-07-23 -- content_day_border_ranges quét dải NGÀY trên thứ tự HIỆN
+    CÓ (sau regroup TopicKey), KHÔNG cố gộp giả: 1 chủ đề có video sinh TRỄ
+    hơn (ngày khác article/infographic) -> 2 dải ngày NẰM TRONG cùng 1 khối
+    màu TopicKey, phản ánh đúng thực tế."""
+    from twmkt.sheets_board import content_day_border_ranges, CONTENT_HEADER, content_row
+
+    a_info = content_row(context="A", type_="infographic", status="DONE", output="x",
+                         topic_key="tk-a", ts="22/07/2026")
+    a_art = content_row(context="A", type_="article", status="DONE", output="x",
+                        topic_key="tk-a", ts="22/07/2026")
+    a_vid = content_row(context="A", type_="video", status="DONE", output="x",
+                        topic_key="tk-a", ts="23/07/2026")   # sinh trễ hơn -- ngày khác
+    b_info = content_row(context="B", type_="infographic", status="DONE", output="x",
+                         topic_key="tk-b", ts="23/07/2026")
+    rows = [a_info, a_art, a_vid, b_info]   # ĐÃ regroup theo TopicKey (tk-a liền kề)
+    ranges = content_day_border_ranges(CONTENT_HEADER, rows)
+    # 22/07 (a_info, a_art) | 23/07 (a_vid, b_info) -- ranh giới ngày CẮT NGANG khối tk-a
+    assert ranges == [(1, 3), (3, 5)]
+
+
 def test_regroup_and_band_content_reorders_and_sends_band_requests():
     """Sheet UI cleanup Phase 1 — regroup_and_band_content THAY regroup_and_
     merge_content cũ: sắp lại CONTENT (TopicKey liền kề) + gửi repeatCell (tô
@@ -2432,15 +2540,22 @@ def test_regroup_and_band_content_reorders_and_sends_band_requests():
     reqs = board._sh.last_body["requests"]
     assert not any("mergeCells" in r or "unmergeCells" in r for r in reqs)   # KHÔNG merge ô nào
     fills = [r["repeatCell"] for r in reqs if "repeatCell" in r]
-    borders = [r["updateBorders"] for r in reqs if "updateBorders" in r]
-    assert len(fills) == 2 and len(borders) == 2      # 1 nền + 1 viền / dải, toàn bộ chiều rộng hàng
+    top_borders = [r["updateBorders"] for r in reqs if "updateBorders" in r and "top" in r["updateBorders"]]
+    left_borders = [r["updateBorders"] for r in reqs if "updateBorders" in r and "left" in r["updateBorders"]]
+    assert len(fills) == 2 and len(top_borders) == 2  # 1 nền + 1 viền trên / dải TopicKey, toàn bộ chiều rộng hàng
     assert fills[0]["range"]["startColumnIndex"] == 0 and fills[0]["range"]["endColumnIndex"] == len(CONTENT_HEADER)
     assert fills[0]["range"]["startRowIndex"] == 1 and fills[0]["range"]["endRowIndex"] == 4   # tk-a: dòng 1-3
     assert fills[1]["range"]["startRowIndex"] == 4 and fills[1]["range"]["endRowIndex"] == 5   # tk-b: dòng 4
     assert fills[0]["cell"]["userEnteredFormat"]["backgroundColor"] != \
            fills[1]["cell"]["userEnteredFormat"]["backgroundColor"]   # 2 dải liền kề PHẢI khác màu (xen kẽ)
-    for b in borders:
+    for b in top_borders:
         assert b["top"]["style"] == "SOLID_THICK"
+    # 2026-07-23: content_row() không truyền `ts` -> mọi hàng CÙNG Timestamp
+    # ("bây giờ") -> đúng 1 dải NGÀY duy nhất phủ hết 4 hàng -> 1 viền TRÁI
+    # (kênh thị giác TÁCH BIỆT viền trên TopicKey, không đấu nhau).
+    assert len(left_borders) == 1
+    assert left_borders[0]["left"]["style"] == "SOLID_THICK"
+    assert left_borders[0]["left"]["color"] not in (b["top"]["color"] for b in top_borders)
 
 
 def test_regroup_and_band_content_noop_when_empty():
@@ -3201,16 +3316,25 @@ def test_claude_code_llm_parses_result_field_from_json():
     from twmkt.agents.base import ClaudeCodeLLM
     import json as _json
 
-    seen_cmd = {}
+    seen_cmd, seen_kwargs = {}, {}
 
     def fake_run(cmd, **kwargs):
         seen_cmd["cmd"] = cmd
+        seen_kwargs.update(kwargs)
         return _FakeProc(0, _json.dumps({"is_error": False, "result": "OK"}), "")
 
     llm = ClaudeCodeLLM(run_fn=fake_run)
     out = llm.complete("bạn là trợ lý", "trả lời OK", model="claude-haiku-4-5-20251001")
     assert out == "OK"
-    assert seen_cmd["cmd"][:3] == ["claude", "-p", "bạn là trợ lý\n\ntrả lời OK"]
+    # cmd[0] = đường dẫn ĐÃ resolve qua shutil.which() (vd "claude.CMD" trên
+    # Windows) -- chỉ còn CHỨA "claude", KHÔNG còn == "claude" nguyên văn kể từ
+    # khi sửa bug FileNotFoundError trên Windows (agents/base.py, 2026-07-23).
+    assert "claude" in seen_cmd["cmd"][0].lower()
+    assert seen_cmd["cmd"][1:2] == ["-p"]
+    # Prompt qua STDIN (kwarg `input`), KHÔNG còn nằm trong argv -- xem cùng
+    # commit: claude.cmd (shim Windows) giới hạn độ dài command-line (~8KB),
+    # "The command line is too long." với prompt bài viết thật.
+    assert seen_kwargs.get("input") == "bạn là trợ lý\n\ntrả lời OK"
     assert "--model" in seen_cmd["cmd"] and "claude-haiku-4-5-20251001" in seen_cmd["cmd"]
 
 

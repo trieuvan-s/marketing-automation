@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from typing import Protocol
 
@@ -158,12 +159,22 @@ class ClaudeCodeLLM(LLMClient):
                  f"(vd residual_tension) để giảm dao động thay vì tham số.")
             self._temp_warned = True
         full_prompt = f"{system}\n\n{prompt}" if system.strip() else prompt
-        cmd = [self.binary, "-p", full_prompt, "--output-format", "json"]
+        # shutil.which() resolve ĐÚNG file thật (vd "claude.cmd" trên Windows —
+        # npm cài CLI global bằng shim .cmd/.ps1) -- subprocess.run(shell=False)
+        # KHÔNG tự thử phần mở rộng PATHEXT như shell, nên bare "claude" luôn
+        # FileNotFoundError trên Windows dù CLI cài đúng và có trong PATH.
+        binary = shutil.which(self.binary) or self.binary
+        # Prompt qua STDIN, KHÔNG qua argv (2026-07-23, xác nhận thật): claude.cmd
+        # là shim .cmd -> Windows spawn qua cmd.exe, giới hạn command-line ~8KB
+        # ("The command line is too long.") -- prompt bài viết thật (evidence +
+        # background) vượt xa mức này. `claude -p` (không kèm query) tự đọc
+        # stdin làm prompt -- CÙNG cách đã dùng khi test rules v2.1 qua CLI.
+        cmd = [binary, "-p", "--output-format", "json"]
         if model:
             cmd += ["--model", model]
         try:
-            proc = self._run_fn(cmd, capture_output=True, text=True, encoding="utf-8",
-                                timeout=self.timeout_s, stdin=subprocess.DEVNULL)
+            proc = self._run_fn(cmd, input=full_prompt, capture_output=True, text=True,
+                                encoding="utf-8", timeout=self.timeout_s)
         except FileNotFoundError:
             return self._fail(f"không thấy CLI '{self.binary}' (cài Claude Code / thêm vào PATH)",
                               fail_loud=fail_loud)

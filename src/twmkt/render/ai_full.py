@@ -45,7 +45,7 @@ _DEFAULT_MODEL = "gpt-image-2"
 _DEFAULT_QUALITY = "medium"
 _API_URL = "https://api.openai.com/v1/images/generations"
 _TIMEOUT_S = 120
-_PROMPT_VERSION = "v3"  # v3 (2026-07-22): cấm khoảng trống lớn giữa dải đỉnh và tiêu đề, bắt buộc lấp đều bố cục -- lỗi THẬT: AI để trống ~15-20% chiều cao giữa logo/dải đỉnh và headline, dồn nội dung xuống đáy, gây chồng lấn dải đáy. v2 (2026-07-21): cấm AI vẽ "Nguồn:"/source text -- v1 để lọt AI tự vẽ trùng dòng nguồn với brand_stamp.py, xem báo cáo
+_PROMPT_VERSION = "v4"  # v4 (2026-07-23): rào cứng 2 dải an toàn -- lỗi THẬT: ảnh cố nhét hết mọi mục "market"/"related" khiến dòng cuối bị cắt dở sát dải đáy (2/4 ảnh test thật). Thêm quy tắc 4b: ưu tiên priority.primary/secondary, được LƯỢC BỚT minor nếu thiếu chỗ, cấm thu nhỏ chữ/dồn sát viền để cố nhét đủ. v3 (2026-07-22): cấm khoảng trống lớn giữa dải đỉnh và tiêu đề, bắt buộc lấp đều bố cục -- lỗi THẬT: AI để trống ~15-20% chiều cao giữa logo/dải đỉnh và headline, dồn nội dung xuống đáy, gây chồng lấn dải đáy. v2 (2026-07-21): cấm AI vẽ "Nguồn:"/source text -- v1 để lọt AI tự vẽ trùng dòng nguồn với brand_stamp.py, xem báo cáo
 
 # Bước 4.3 — sinh ĐÚNG size cho từng tỷ lệ (KHÔNG crop sau). API gpt-image-2
 # chấp nhận size TUỲ Ý miễn chia hết cho 16 (xác nhận thật 2026-07-21, xem lỗi
@@ -159,14 +159,27 @@ YÊU CẦU BẮT BUỘC (không thoả hiệp):
 3. Mọi hình minh hoạ (tàu, cảng, máy bay, nhà máy...) PHẢI là photorealistic
    professional photography -- ảnh chụp thật hoặc quang thực chuyên nghiệp.
    TUYỆT ĐỐI KHÔNG phong cách illustration, cartoon, vector art, hay 3D-render.
-4. CHỪA DẢI TRỐNG hoàn toàn, không đặt bất kỳ nội dung/chữ/hình nào vào đó:
+4. BẮT BUỘC CHỪA 2 DẢI TRỐNG HOÀN TOÀN -- đây là RÀO CỨNG, không phải gợi ý
+   bố cục -- lớp code sẽ đóng dấu logo/disclaimer/nguồn ĐÈ LÊN 2 dải này SAU
+   khi ảnh sinh ra, bất kể ảnh có gì ở đó:
    - Đỉnh ảnh: {int(_TOP_SAFE_PCT * 100)}% chiều cao tính từ mép trên.
    - Đáy ảnh: {int(_BOTTOM_SAFE_PCT * 100)}% chiều cao tính từ mép dưới.
+   TUYỆT ĐỐI không để BẤT KỲ phần nào của chữ (kể cả 1 dòng cuối bị cắt dở),
+   khung thẻ số liệu, hay chi tiết hình minh hoạ chạm/lấn vào 2 dải này --
+   kể cả khi điều đó có nghĩa PHẢI bớt số mục hiển thị (xem quy tắc 4b).
    NGAY SAU dải trống đỉnh ({int(_TOP_SAFE_PCT * 100)}%), tiêu đề (title)
    PHẢI bắt đầu GẦN NHƯ NGAY LẬP TỨC -- TUYỆT ĐỐI KHÔNG chừa thêm khoảng
    trống trang trí nào giữa dải đỉnh và tiêu đề. Đây là lỗi THẬT đã xảy ra:
    AI để trống thêm ~15-20% chiều cao ảnh giữa logo/dải đỉnh và tiêu đề, đẩy
    dồn toàn bộ nội dung còn lại xuống sát đáy, gây chồng lấn với dải đáy.
+4b. NẾU nội dung JSON (đặc biệt "market"/"related") QUÁ NHIỀU mục để xếp vừa
+   hết trong khoảng trống giữa 2 dải an toàn ở cỡ chữ đọc được bình thường --
+   ƯU TIÊN hiển thị ĐỦ mọi mục trong `priority.primary` + `priority.secondary`
+   trước, rồi CHỈ thêm mục trong `priority.minor` NẾU CÒN CHỖ. Được phép LƯỢC
+   BỚT (không vẽ) một số mục `priority.minor` cuối danh sách nếu cần -- ĐỪNG
+   cố nhét đủ mọi mục bằng cách thu nhỏ chữ tới mức khó đọc hoặc dồn sát dải
+   an toàn đáy. Đây là lỗi THẬT đã xảy ra (2026-07-23): ảnh cố hiển thị hết
+   toàn bộ danh sách, dòng cuối cùng bị cắt dở ngay sát dải đáy.
 5. BỐ CỤC PHẢI LẤP ĐẦY ĐỀU khoảng không gian giữa 2 dải trống (đỉnh/đáy) --
    phân bổ tiêu đề, thẻ số liệu, điểm nổi bật, hình minh hoạ trải ĐỀU từ
    ngay dưới dải đỉnh tới ngay trên dải đáy, KHÔNG dồn cụm nội dung về một
@@ -174,7 +187,9 @@ YÊU CẦU BẮT BUỘC (không thoả hiệp):
    tối trang trí nào rộng hơn khoảng cách bình thường giữa 2 khối nội dung
    liền kề.
 6. Giữ NGUYÊN VĂN, chính xác tuyệt đối mọi số liệu và dấu tiếng Việt trong
-   JSON dưới đây -- không dịch, không làm tròn, không bịa thêm số.
+   JSON dưới đây -- không dịch, không làm tròn, không bịa thêm số. Mục bị
+   LƯỢC BỚT theo quy tắc 4b (nếu có) KHÔNG tính là bịa/thiếu số -- chỉ là
+   không đủ chỗ hiển thị, KHÔNG được đổi/làm tròn số của các mục còn lại.
 
 Theme: FVA Capital VN -- {"Dark Editorial" if theme == "dark" else "Light Research"}.
 Nền {colors["background"]}, chữ chính {colors["text_primary"]}, chữ phụ

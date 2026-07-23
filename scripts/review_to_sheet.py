@@ -259,6 +259,7 @@ def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False
     new_rows = board.upsert_context_rows([row for _, row in scored_rows])
     written = len(new_rows)
     board.sort_context_by_hot()
+    board.band_context_by_day()   # 2026-07-23: tô nền xen kẽ theo khối ngày (yêu cầu Lead)
 
     # PHASE 4.6: mỗi dòng CONTEXT thật sự MỚI (không phải TopicKey trùng bị bỏ
     # qua, Fix (a)) -> báo Telegram kèm link bài viết (Source = url gốc, có thể
