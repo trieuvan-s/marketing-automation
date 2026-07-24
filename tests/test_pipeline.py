@@ -4688,6 +4688,33 @@ def test_default_disclaimer_reads_from_brand_yaml_footer():
     assert _default_disclaimer({}) == "Nội dung mang tính thông tin, không phải khuyến nghị đầu tư."
 
 
+def test_analysis_fields_overwrites_llm_disclaimer_that_differs_from_canonical():
+    """E' (2026-07-24, theo chỉ đạo Lead) -- disclaimer là dòng miễn trừ trách
+    nhiệm PHÁP LÝ: LLM viết khác chữ (không rỗng) so với bản chuẩn
+    (config/brand.yaml: footer.disclaimer) -> analysis_fields_from_data() PHẢI
+    ghi đè bằng bản chuẩn TẠI CHỖ, và render_analysis() (nối disclaimer vào
+    body) chỉ được thấy ĐÚNG MỘT disclaimer trong output cuối -- KHÔNG đôi."""
+    from twmkt.agents.production import (
+        ProductionBrief, _default_disclaimer, analysis_fields_from_data, render_analysis,
+    )
+
+    canonical = _default_disclaimer()
+    llm_data = {
+        "title": "Tiêu đề", "sapo": "Tóm tắt.",
+        "sections": [{"heading": "Bối cảnh", "content": "Nội dung."}],
+        "disclaimer": "Đây là câu LLM tự viết lại, khác bản chuẩn.",
+        "sources": [],
+    }
+    brief = ProductionBrief(title="T", hook="H", url="https://cafef.vn/x.chn", evidence="E")
+
+    title, sapo, sections, disclaimer, sources = analysis_fields_from_data(llm_data, brief)
+    assert disclaimer == canonical   # ghi đè, KHÔNG giữ bản LLM viết
+
+    body = render_analysis(title, sapo, sections, disclaimer, sources, brief)
+    assert body.count(canonical) == 1   # ĐÚNG MỘT bản, không nối thêm
+    assert "Đây là câu LLM tự viết lại" not in body   # bản LLM KHÔNG còn sót trong output
+
+
 def test_render_analysis_and_video_use_dynamic_cta_not_hardcoded_brand():
     """Regression trực tiếp cho sự cố THẬT: render_analysis (article) VÀ
     video_fields_from_data (video, cả đường LLM-thiếu-cta LẪN đường lùi mượt
