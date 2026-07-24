@@ -122,6 +122,34 @@ infographic:
     # tên) vì cache 2 mode không tương thích nhau (ảnh nền vs ảnh đầy đủ).
     cache_dir: "assets_ai_full"
 
+    # 2026-07-23 (Phần A, khung cứng đáy — quyết định Lead, THAY hướng scrim đáy
+    # cũ) — kích thước khung CUỐI sau brand_stamp (KHÁC size gọi API ở
+    # ai_full.RATIO_SIZES — API cần chia hết 16, khung cuối là mục tiêu xuất
+    # bản THẬT). brand_stamp.matting() resize ảnh AI vừa khít phần trong
+    # (final_h - bottom_band_h), band đáy vẽ ở phần còn lại — cấu trúc, không
+    # đè lên ảnh AI.
+    final_size:
+      "4:5": [1080, 1350]
+      "9:16": [1080, 1920]
+      "1:1": [1080, 1080]
+    # BOTTOM_BAND_H = max(round(final_h * 0.075), bottom_band_min_px).
+    bottom_band_min_px: 72
+    # Fallback màu band đáy khi màu trung vị 20 hàng cuối ảnh AI SÁNG (luminance
+    # > 140) — navy FVA cố định, khớp _THEME_COLORS["dark"]["background"]
+    # (ai_full.py) / brand_stamp._THEME_COLORS["dark"]["bg"].
+    navy_fallback: "#061521"
+
+    # 2026-07-23 (Phần C, giới hạn TRÊN mật độ) — rules v2.1 §7.3 chỉ chống
+    # THIẾU, không chống THỪA -- nguồn giàu khiến Composer nhồi hết, đúng luật
+    # nhưng vượt sức chứa layout theo tỷ lệ. Số khởi điểm, agent-B hiệu chỉnh
+    # sau khi render thử thật. Vượt cap -> cắt có chủ đích (priority.primary/
+    # secondary giữ trước, minor cắt trước), CẢNH BÁO rõ, không cắt/tràn im
+    # lặng (xem ai_full.apply_density_cap()).
+    density_caps:
+      "4:5":  {market: 12, highlights: 3, related: 12}
+      "9:16": {market: 8,  highlights: 3, related: 8}
+      "1:1":  {market: 8,  highlights: 3, related: 8}
+
 # --- Prompt agent sản xuất (version-controlled, đổi văn phong không sửa code) --
 # Tab PROMPTS (Name|Version|Enable) trên Sheet chọn version đang dùng; nội dung
 # nằm ở prompts/<name>.<version>.md (repo). Thiếu tab/dòng/file -> default nội bộ.

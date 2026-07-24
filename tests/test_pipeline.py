@@ -7442,8 +7442,10 @@ def test_render_one_clean_spec_returns_png_bytes(monkeypatch, tmp_path):
     output = {"title": "GDP tăng mạnh", "hero": [{"label": "GDP", "value": "8,18%"}]}
     item = {"output": _json.dumps(output), "topic_key": "tk-1", "context": "GDP tăng mạnh"}
     settings = Settings({"storage": {"data_root": str(tmp_path)}})
-    png_bytes, warning = rpa.render_one(item, settings=settings)
-    assert png_bytes is not None and warning == ""
+    # 2026-07-23 (Phần A-C): render_one() giờ trả (png_map, warn_map, logs)
+    # theo TỪNG TỶ LỆ (_RATIOS = 4:5/9:16/1:1), không còn 1 cặp duy nhất.
+    png_map, warn_map, logs = rpa.render_one(item, settings=settings)
+    assert png_map[rpa._PRIMARY_RATIO] is not None and warn_map[rpa._PRIMARY_RATIO] == ""
 
 
 def test_render_one_gate2_typo_flows_through_unchecked_known_risk(monkeypatch, tmp_path):
@@ -7472,8 +7474,8 @@ def test_render_one_gate2_typo_flows_through_unchecked_known_risk(monkeypatch, t
     output = {"title": "GDP", "hero": [{"label": "GDP", "value": "99%"}]}   # gõ nhầm ở Gate 2, KHÔNG khớp facts[]
     item = {"output": _json.dumps(output), "topic_key": "tk-1", "context": "GDP"}
     settings = Settings({"storage": {"data_root": str(tmp_path)}})
-    png_bytes, warning = rpa.render_one(item, settings=settings)
-    assert png_bytes is not None and warning == ""   # KHÔNG bị chặn -- đúng đánh đổi đã ghi trong docstring
+    png_map, warn_map, logs = rpa.render_one(item, settings=settings)
+    assert png_map[rpa._PRIMARY_RATIO] is not None and warn_map[rpa._PRIMARY_RATIO] == ""   # KHÔNG bị chặn -- đúng đánh đổi đã ghi trong docstring
 
 
 def test_render_one_bad_output_json_returns_error_reason():
@@ -7482,8 +7484,8 @@ def test_render_one_bad_output_json_returns_error_reason():
     rpa = _render_prod_assets_module()
 
     item = {"output": "khong phai JSON", "topic_key": "tk-1", "context": "X"}
-    png_bytes, warning = rpa.render_one(item, settings=Settings({}))
-    assert png_bytes is None and "JSON hợp lệ" in warning
+    png_map, warn_map, logs = rpa.render_one(item, settings=Settings({}))
+    assert png_map[rpa._PRIMARY_RATIO] is None and "JSON hợp lệ" in warn_map[rpa._PRIMARY_RATIO]
 
 
 def test_asset_hyperlink_formula_wraps_url_string():

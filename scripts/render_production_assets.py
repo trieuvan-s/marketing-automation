@@ -87,18 +87,30 @@ def _open_board(settings) -> SheetsBoard:
     return SheetsBoard(spreadsheet_id=sheet_id, creds_path=creds)
 
 
-def render_one(item: dict, *, settings) -> tuple[bytes | None, str]:
+# 2026-07-23 (nghiệm thu Phần A-B-C, yêu cầu Lead): render ĐỦ 3 tỷ lệ/bài,
+# KHÔNG còn chỉ "4:5" như bản cũ -- AssetPath (1 cột duy nhất trên Sheet,
+# KHÔNG đổi schema -- ranh giới file, sheets_board.py là vùng agent-A) vẫn
+# trỏ tỷ lệ CHÍNH (_PRIMARY_RATIO); 2 tỷ lệ còn lại ghi đường dẫn vào Notes
+# (cột đã có sẵn, KHÔNG phải thêm cột mới).
+_RATIOS: tuple[str, ...] = ("4:5", "9:16", "1:1")
+_PRIMARY_RATIO = "4:5"
+
+
+def render_one(item: dict, *, settings) -> tuple[dict[str, bytes | None], dict[str, str], dict[str, dict]]:
     """Xử 1 dòng CONTENT (từ SheetsBoard.read_content_for_render) -> (png
-    bytes hoặc None, cảnh báo/lý do bỏ qua nếu có). Hàm THUẦN về mặt Sheet
-    (không tự ghi Sheet) nhưng CÓ gọi mạng thật (OpenAI Images API qua
-    ai_full, cache-first) — khác quy ước "Hàm THUẦN" cũ của renderer SVG $0."""
+    bytes theo tỷ lệ, cảnh báo theo tỷ lệ, log JSON theo tỷ lệ -- xem
+    ai_full.render_ai_full()). Hàm THUẦN về mặt Sheet (không tự ghi Sheet)
+    nhưng CÓ gọi mạng thật (OpenAI Images API qua ai_full, cache-first) --
+    khác quy ước "Hàm THUẦN" cũ của renderer SVG $0."""
     try:
         output_data = json.loads(item["output"])
     except json.JSONDecodeError:
-        return None, "Output không phải JSON hợp lệ (đã bị sửa hỏng ở Gate 2?)"
-    results = render_ai_full(output_data, ratios=("4:5",), settings=settings)
-    png_bytes, warning = results["4:5"]
-    return png_bytes, warning
+        err = "Output không phải JSON hợp lệ (đã bị sửa hỏng ở Gate 2?)"
+        return {r: None for r in _RATIOS}, {r: err for r in _RATIOS}, {}
+    results, logs = render_ai_full(output_data, ratios=_RATIOS, settings=settings)
+    png_map = {r: results[r][0] for r in _RATIOS}
+    warn_map = {r: results[r][1] for r in _RATIOS}
+    return png_map, warn_map, logs
 
 
 def run(*, limit: int = 20) -> dict:
@@ -120,18 +132,37 @@ def run(*, limit: int = 20) -> dict:
             skipped_not_approved += 1
             continue   # chưa qua Gate 2 -> chưa tới lượt render
 
-        png_bytes, warning = render_one(item, settings=settings)
-        if png_bytes is None:
-            board.set_content_cell(item["row"], "Notes", f"NEEDS_HUMAN (render ai_full): {warning}")
+        png_map, warn_map, logs = render_one(item, settings=settings)
+        if png_map.get(_PRIMARY_RATIO) is None:
+            warning = warn_map.get(_PRIMARY_RATIO, "lỗi không rõ")
+            board.set_content_cell(item["row"], "Notes", f"NEEDS_HUMAN (render ai_full {_PRIMARY_RATIO}): {warning}")
             print(f"[NEEDS_HUMAN] '{item['context'][:60]}': {warning}")
             needs_human += 1
             continue
 
-        fn = out_dir / f"{_slug(item['context'])}.png"
-        fn.write_bytes(png_bytes)
-        url = asset_url(fn, root=output_root, port=asset_port)
+        slug = _slug(item["context"])
+        written: dict[str, Path] = {}
+        for ratio in _RATIOS:
+            png_bytes = png_map.get(ratio)
+            if png_bytes is None:
+                print(f"[CẢNH BÁO] '{item['context'][:60]}' tỷ lệ {ratio} thất bại: {warn_map.get(ratio)}")
+                continue
+            suffix = ratio.replace(":", "x")
+            fn = out_dir / f"{slug}_{suffix}.png"
+            fn.write_bytes(png_bytes)
+            # A2 Bước 6 -- log JSON CẠNH ảnh (Lead kiểm không cần mở ảnh).
+            log_fn = out_dir / f"{slug}_{suffix}.log.json"
+            log_fn.write_text(json.dumps(logs.get(ratio, {}), ensure_ascii=False, indent=2), encoding="utf-8")
+            written[ratio] = fn
+
+        primary_fn = written[_PRIMARY_RATIO]
+        url = asset_url(primary_fn, root=output_root, port=asset_port)
         board.set_content_cell(item["row"], "AssetPath", asset_hyperlink_formula(url))
-        print(f"[render] '{item['context'][:60]}' -> {fn} ({url})")
+        other = "; ".join(f"{r}: {p}" for r, p in written.items() if r != _PRIMARY_RATIO)
+        if other:
+            board.set_content_cell(item["row"], "Notes", f"Tỷ lệ khác (chưa có cột riêng): {other}")
+        print(f"[render] '{item['context'][:60]}' -> {len(written)}/{len(_RATIOS)} tỷ lệ, "
+             f"primary={primary_fn} ({url})")
         rendered += 1
         if rendered >= limit:
             break

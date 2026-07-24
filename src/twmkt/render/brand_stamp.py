@@ -3,49 +3,72 @@ Pillow, KHÔNG bao giờ để AI tự vẽ logo/nguồn/disclaimer (AI không v
 đúng được -- xem ai_full.py docstring). Vị trí/font/màu CỐ ĐỊNH theo Theme-
 rules (prompts/themes/), không phụ thuộc nội dung AI sinh ra.
 
-Vẽ trong đúng 2 dải trống mà prompt (ai_full.build_ai_full_prompt) đã yêu cầu
-AI chừa lại (top/bottom safe %, xem ai_full._TOP_SAFE_PCT/_BOTTOM_SAFE_PCT) --
-nếu AI không tuân thủ hoàn toàn, vẫn vẽ đè lên (opaque, không phụ thuộc AI).
+ĐẢO HƯỚNG P0 (2026-07-23, QUYẾT ĐỊNH LEAD -- xem STOP-REPORT phiên
+feature/infographic-frame): CHẨN ĐOÁN GỐC khác giả định cũ -- disclaimer đè
+chữ KHÔNG phải lỗi vị trí, mà là hệ quả CẤU TRÚC: nội dung do AI sinh lấp kín
+tới sát mép, không còn chỗ trống nào để đóng dấu. Scrim đáy (bản 2026-07-22)
+chỉ làm chữ đè TRÔNG đẹp hơn trong khi vẫn CHE MẤT một dòng dữ liệu thật --
+lỗi trở nên VÔ HÌNH thay vì được sửa. THAY bằng KHUNG CỨNG ĐÁY: brand_stamp
+KHÔNG BAO GIỜ ghi đè lên pixel nội dung -- nó THU ảnh AI vào vùng trong rồi vẽ
+band đáy RIÊNG trên phần diện tích còn lại (matting, không phải scrim). Va
+chạm chữ/nội dung khi đó là BẤT KHẢ THI VỀ CẤU TRÚC, không phải "đã canh cho
+khỏi đụng" (khác biệt cốt lõi, xem docstring `stamp_brand`).
 
-SỬA LỖI P0 (2026-07-22, phát hiện qua ảnh thật CẢ 4 tỷ lệ -- bản "v2fix"
-trước đó VẪN hỏng vì chỉ test bằng chuỗi ngắn, không bắt được lỗi ở chuỗi dài/
-tỷ lệ hẹp): bản cũ dùng `line_h` ƯỚC LƯỢNG cố định (`bottom_h * 0.38`) không
-khớp chiều cao chữ THẬT ở font size đã chọn -- khi disclaimer/nguồn wrap
-nhiều dòng (chuỗi dài, tỷ lệ hẹp như 9:16), khối "Nguồn" bắt đầu vẽ ĐÈ LÊN
-khối "disclaimer" chưa vẽ xong. Sửa tận gốc: đo chiều cao THẬT bằng
-`draw.textbbox()` với ĐÚNG font/size sẽ render (không ước lượng), XẾP KHỐI
-TỪ DƯỚI LÊN (khối "Nguồn" neo đáy trước, khối disclaimer xếp NGAY TRÊN nó),
-và CO FONT (không bao giờ cắt cụt chữ) khi khối không vừa dải an toàn.
+QUY TRÌNH MỚI (đúng thứ tự, xem `stamp_brand`):
+  1. EDGE SANITIZER (`_edge_sanitize_top`) -- lưới an toàn cắt dải màu phẳng
+     bất thường ở mép trên (vd dải kem do model sinh ảnh coi "safe zone" là
+     vật thể cần vẽ, xem ai_full.py Phần B) -- KHÔNG thay cho việc sửa prompt
+     (Phần B), chỉ là lưới an toàn tầng dưới.
+  2. MATTING (`_matte`) -- resize ảnh AI (sau bước 1) vừa khít vùng trong
+     FINAL_W x (FINAL_H - BAND_H), giữ tỷ lệ (cover-fit + cắt cân giữa nếu
+     lệch), không kéo giãn méo.
+  3. MÀU BAND (`_band_color`) -- màu TRUNG VỊ 20 hàng pixel cuối ảnh đã resize;
+     tối (luminance <=140) -> dùng thẳng (mối nối vô hình); sáng -> fallback
+     navy FVA cố định (config infographic.ai_full.navy_fallback).
+  4. NỘI DUNG BAND (`_layout_band_text`) -- Trái "Nguồn: ...", Phải disclaimer,
+     font = 0.30*BAND_H, KHÔNG BAO GIỜ cắt chữ/thu font dưới 18px -- band TỰ
+     NỚI cao (matting lại với inner_h nhỏ hơn) nếu 1 dòng không đủ chỗ dù đã
+     xuống 2 dòng.
+  5. LOGO (`_paste_logo` + scrim CÓ ĐIỀU KIỆN) -- ảnh AI vẫn tràn viền mép
+     trên (KHÔNG matting ở đỉnh, chỉ đáy) -- CHỖ DUY NHẤT còn dùng scrim: chỉ
+     vẽ khi luminance vùng bbox logo nở 20% > 110 (tương phản thật sự thấp).
+  6. LOG JSON (`build_stamp_log`) -- trả kèm bytes để ai_full.py ghi cạnh ảnh,
+     Lead kiểm không cần mở ảnh (xem A2 Bước 6, STOP-REPORT).
 
-LOGO THẬT THAY WORDMARK CHỮ (2026-07-22, theo yêu cầu Lead): trước đây vẽ
-chữ "FVA CAPITAL" bằng font -- giờ dán ẢNH logo thật (`assets/icon_transparent
-.png`, xử lý từ `assets/icon.png` do Lead cung cấp -- bản gốc KHÔNG có kênh
-alpha thật, nền "ca-rô" chỉ là pixel xám nhạt vẽ cứng, đã tách nền bằng
-connected-component analysis + 1 vùng xác nhận bằng mắt là lỗ chữ "F", xem
-lịch sử hội thoại 2026-07-22 -- KHÔNG dùng heuristic màu/kích thước/texture
-đơn thuần vì mặt phẳng trắng thật của logo trùng dải màu với nền ca-rô, đã
-thử và làm hỏng logo 2 lần trước khi tìm ra cách đúng). File gốc `icon.png`/
-`logo.png` GIỮ NGUYÊN không sửa -- chỉ thêm bản `*_transparent.png` cạnh.
+LOGO THẬT THAY WORDMARK CHỮ (2026-07-22, theo yêu cầu Lead): dán ẢNH logo thật
+(`assets/icon_transparent.png`) thay vì vẽ chữ "FVA CAPITAL" bằng font -- xem
+lịch sử hội thoại 2026-07-22. File gốc `icon.png`/`logo.png` GIỮ NGUYÊN không
+sửa -- chỉ thêm bản `*_transparent.png` cạnh.
 """
 from __future__ import annotations
 
 import io
 import logging
+import statistics
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageStat
 
 logger = logging.getLogger("twmkt.render.brand_stamp")
 
-_TOP_SAFE_PCT = 0.10
-_BOTTOM_SAFE_PCT = 0.08
+# 2026-07-23 (Phần A1) -- kích thước khung CUỐI mặc định (dùng khi không có
+# `settings`, vd test/gọi trực tiếp) -- ĐỌC ĐƯỢC qua config infographic.
+# ai_full.final_size, đây CHỈ là fallback nội bộ, KHÔNG hardcode ở call site.
+_DEFAULT_FINAL_SIZES: dict[str, tuple[int, int]] = {
+    "4:5": (1080, 1350),
+    "9:16": (1080, 1920),
+    "1:1": (1080, 1080),
+}
+_DEFAULT_BOTTOM_BAND_MIN_PX = 72
+_DEFAULT_NAVY_FALLBACK = (6, 21, 33)   # #061521 -- khớp _THEME_COLORS["dark"]["bg"] dưới đây
 
 # Font size tối thiểu tuyệt đối -- DƯỚI mức này dấu tiếng Việt (dấu mũ/móc/
 # thanh điệu chồng) bắt đầu vỡ nét ở ảnh raster thường (DỪNG KHI #2, xem
 # NHIỆM VỤ 2026-07-22) -- co font KHÔNG được vượt qua ngưỡng này; nếu khối
-# chữ vẫn không vừa dải an toàn ở size này, PHẢI báo lỗi rõ ràng thay vì âm
-# thầm vẽ đè/tràn.
-_MIN_READABLE_FONT_SIZE = 16
+# chữ vẫn không vừa dải an toàn ở size này, band TỰ NỚI CAO (2026-07-23,
+# THAY "báo lỗi rõ ràng" cũ -- kiến trúc mới không còn khái niệm "dải cố định
+# không đủ chỗ", band co giãn theo nhu cầu chữ).
+_MIN_READABLE_FONT_SIZE = 18
 
 _THEME_COLORS = {
     "dark": {"bg": (6, 21, 33), "text": (243, 235, 221), "muted": (200, 208, 212), "gold": (201, 161, 74)},
@@ -74,9 +97,12 @@ _BOLD_HINT_CANDIDATES = [
 _DEFAULT_LOGO_PATH = Path(__file__).resolve().parents[3] / "assets" / "icon_transparent.png"
 
 # Font disclaimer/nguồn = 75% cỡ chữ CŨ (yêu cầu Lead 2026-07-22: "thông tin
-# phụ, giảm size 70-80% để tránh lấn chiếm/đè nội dung chính") -- áp dụng lên
-# base_size TRƯỚC khi vào vòng co-font của _fit_block (min size sàn
-# _MIN_READABLE_FONT_SIZE vẫn giữ nguyên, không hạ thêm).
+# phụ, giảm size 70-80% để tránh lấn chiếm/đè nội dung chính") -- GIỮ áp dụng
+# lên base_size TRƯỚC khi vào vòng co-font (min size sàn _MIN_READABLE_FONT_
+# SIZE vẫn giữ nguyên, không hạ thêm) -- 2026-07-23: base_size giờ tính từ
+# BAND_H (0.30*BAND_H, xem A2 Bước 4) chứ không còn từ top_h/bottom_h cũ,
+# nhưng hệ số giảm 75% này vẫn giữ để không đổi CẢM GIÁC kích thước tương đối
+# so với bản trước khi Lead so sánh ảnh cũ/mới.
 _SECONDARY_TEXT_SCALE = 0.75
 
 
@@ -92,26 +118,162 @@ def _shorten_source(source: str) -> str:
     return source.split(" - ", 1)[0].strip()
 
 
-def _paste_logo(overlay: Image.Image, *, logo_path: Path, pad: int, top_h: int) -> None:
-    """Dán ẢNH logo thật (RGBA, đã có kênh alpha) vào góc trên-trái, chiều
-    cao = 55% dải an toàn đỉnh, giữ nguyên tỉ lệ khung hình -- THAY hoàn toàn
-    việc vẽ chữ "FVA CAPITAL" bằng font (AI/font không bao giờ vẽ ĐÚNG logo
-    được, xem module docstring). Thiếu file logo -> ghi cảnh báo, KHÔNG crash
-    (đóng dấu brand vẫn phải ra ảnh hợp lệ dù thiếu asset)."""
-    if not logo_path.exists():
-        logger.warning("brand_stamp: không tìm thấy file logo '%s' -- bỏ qua, KHÔNG đóng dấu logo.", logo_path)
-        return
-    try:
-        logo = Image.open(logo_path).convert("RGBA")
-    except Exception as e:
-        logger.warning("brand_stamp: lỗi mở file logo '%s' (%s) -- bỏ qua, KHÔNG đóng dấu logo.", logo_path, e)
-        return
-    target_h = max(int(top_h * 0.55), 24)
-    target_w = max(int(logo.width * (target_h / logo.height)), 1)
-    logo = logo.resize((target_w, target_h), Image.LANCZOS)
-    logo_y = int(top_h * 0.22)
-    overlay.alpha_composite(logo, (pad, logo_y))
+def _resolve_final_size(ratio: str, settings=None) -> tuple[int, int]:
+    if settings is not None:
+        cfg = settings.get("infographic.ai_full.final_size")
+        if isinstance(cfg, dict) and ratio in cfg:
+            w, h = cfg[ratio]
+            return int(w), int(h)
+    if ratio in _DEFAULT_FINAL_SIZES:
+        return _DEFAULT_FINAL_SIZES[ratio]
+    raise ValueError(f"brand_stamp: không có final_size cho tỷ lệ '{ratio}' (config infographic.ai_full.final_size)")
 
+
+def _resolve_band_min_px(settings=None) -> int:
+    if settings is not None:
+        v = settings.get("infographic.ai_full.bottom_band_min_px")
+        if v is not None:
+            return int(v)
+    return _DEFAULT_BOTTOM_BAND_MIN_PX
+
+
+def _resolve_navy_fallback(settings=None) -> tuple[int, int, int]:
+    if settings is not None:
+        hex_v = settings.get("infographic.ai_full.navy_fallback")
+        if isinstance(hex_v, str) and hex_v.strip():
+            h = hex_v.strip().lstrip("#")
+            if len(h) == 6:
+                try:
+                    return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+                except ValueError:
+                    pass
+    return _DEFAULT_NAVY_FALLBACK
+
+
+def _luminance(rgb: tuple[float, float, float]) -> float:
+    r, g, b = rgb[:3]
+    return 0.299 * r + 0.587 * g + 0.114 * b
+
+
+# =====================================================================
+# Bước 1 -- EDGE SANITIZER (lưới an toàn, KHÔNG thay cho việc sửa prompt)
+# =====================================================================
+
+def _edge_sanitize_top(im: Image.Image, *, scan_pct: float = 0.12, min_run: int = 8,
+                       std_threshold: float = 12.0, lum_delta_threshold: float = 60.0,
+                       below_rows: int = 30) -> tuple[Image.Image, int]:
+    """Quét `scan_pct` số hàng pixel trên cùng của ảnh AI. Tìm dải LIÊN TỤC TỪ
+    MÉP TRÊN (row 0) dài >= `min_run` hàng thoả CẢ HAI: (a) độ lệch chuẩn màu
+    trong mỗi hàng < `std_threshold` (dải PHẲNG màu, không phải ảnh chụp có
+    chi tiết thật); (b) luminance trung bình của dải LỆCH (|delta| lớn hơn)
+    `lum_delta_threshold` so với luminance TRUNG VỊ của `below_rows` hàng NGAY
+    BÊN DƯỚI dải (dải này khác hẳn nền thật bên dưới -- dấu hiệu dải giả do
+    model sinh ảnh, KHÔNG phải nền/bầu trời thật trong ảnh chụp). Có cả 2 ->
+    CẮT bỏ dải đó, log CROPPED_TOP_BAND=<n>px. Không có -> không làm gì
+    (TUYỆT ĐỐI không cắt "phòng xa"). Trả (ảnh có thể đã cắt, số px đã cắt)."""
+    w, h = im.size
+    scan_h = max(int(h * scan_pct), 1)
+    rgb = im.convert("RGB")
+
+    row_std: list[float] = []
+    row_lum: list[float] = []
+    for r in range(scan_h):
+        row = rgb.crop((0, r, w, r + 1))
+        stat = ImageStat.Stat(row)
+        row_std.append(sum(stat.stddev) / len(stat.stddev))
+        row_lum.append(_luminance(tuple(stat.mean)))
+
+    run_len = 0
+    for r in range(scan_h):
+        if row_std[r] < std_threshold:
+            run_len += 1
+        else:
+            break
+
+    if run_len < min_run:
+        return im, 0
+
+    band_mean_lum = sum(row_lum[:run_len]) / run_len
+
+    below_end = min(run_len + below_rows, h)
+    below_lums: list[float] = list(row_lum[run_len:min(scan_h, below_end)])
+    extra_start = max(scan_h, run_len)
+    for r in range(extra_start, below_end):
+        row = rgb.crop((0, r, w, r + 1))
+        stat = ImageStat.Stat(row)
+        below_lums.append(_luminance(tuple(stat.mean)))
+
+    if not below_lums:
+        return im, 0
+    below_median = statistics.median(below_lums)
+
+    if abs(band_mean_lum - below_median) <= lum_delta_threshold:
+        return im, 0
+
+    logger.warning("brand_stamp: EDGE SANITIZER cắt dải mép trên bất thường CROPPED_TOP_BAND=%dpx "
+                   "(band_lum=%.1f, below_median=%.1f, delta=%.1f)",
+                   run_len, band_mean_lum, below_median, abs(band_mean_lum - below_median))
+    cropped = im.crop((0, run_len, w, h))
+    return cropped, run_len
+
+
+# =====================================================================
+# Bước 2 -- MATTING (thu ảnh AI vào vùng trong, không đè band đáy)
+# =====================================================================
+
+def _matte(im: Image.Image, *, target_w: int, target_h: int) -> Image.Image:
+    """Resize `im` vừa khít (target_w, target_h) theo kiểu "cover" (giữ tỷ lệ,
+    KHÔNG kéo giãn méo) rồi CẮT CÂN GIỮA phần dư nếu tỷ lệ khung lệch. Đây là
+    kỹ thuật object-fit:cover chuẩn -- ảnh LUÔN lấp đầy khung đích, không có
+    viền/khoảng trống nào lộ ra."""
+    target_w, target_h = max(int(target_w), 1), max(int(target_h), 1)
+    src_w, src_h = im.size
+    scale = max(target_w / src_w, target_h / src_h)
+    new_w, new_h = max(round(src_w * scale), 1), max(round(src_h * scale), 1)
+    resized = im.resize((new_w, new_h), Image.LANCZOS)
+    left = max((new_w - target_w) // 2, 0)
+    top = max((new_h - target_h) // 2, 0)
+    return resized.crop((left, top, left + target_w, top + target_h))
+
+
+# =====================================================================
+# Bước 3 -- MÀU BAND (tự khớp bảng màu ảnh AI, fallback navy khi nền sáng)
+# =====================================================================
+
+def _median_color(region: Image.Image) -> tuple[int, int, int]:
+    """Màu TRUNG VỊ từng kênh (KHÔNG dùng mean -- median bền hơn trước 1-2
+    điểm ảnh cực trị, vd 1 highlight sáng lọt vào dải quét). Không có numpy
+    trong môi trường này -- tính tay bằng statistics.median (đủ nhanh, vùng
+    quét chỉ 20 hàng pixel)."""
+    pixels = list(region.convert("RGB").getdata())
+    if not pixels:
+        return (0, 0, 0)
+    return (
+        int(statistics.median(p[0] for p in pixels)),
+        int(statistics.median(p[1] for p in pixels)),
+        int(statistics.median(p[2] for p in pixels)),
+    )
+
+
+def _band_color(matted: Image.Image, *, navy_fallback: tuple[int, int, int],
+                lum_threshold: float = 140.0, sample_rows: int = 20) -> tuple[tuple[int, int, int], str]:
+    """Màu band = màu TRUNG VỊ của `sample_rows` hàng pixel CUỐI CÙNG của ảnh
+    AI ĐÃ RESIZE (matted) -- mối nối band/ảnh AI trở nên VÔ HÌNH vì cùng màu.
+    Tối (luminance <= `lum_threshold`) -> dùng thẳng ("matched"). Sáng (band
+    sẽ tương phản kém với chữ sáng cố định) -> fallback navy FVA
+    ("fallback_navy")."""
+    w, h = matted.size
+    n = min(sample_rows, h)
+    region = matted.crop((0, h - n, w, h))
+    color = _median_color(region)
+    if _luminance(color) <= lum_threshold:
+        return color, "matched"
+    return navy_fallback, "fallback_navy"
+
+
+# =====================================================================
+# Chữ -- helper dùng chung (đo THẬT bằng textbbox/textlength, không ước lượng)
+# =====================================================================
 
 def _wrap_to_width(text: str, font: ImageFont.FreeTypeFont, max_width: int, draw: ImageDraw.ImageDraw) -> list[str]:
     """Bọc `text` thành nhiều dòng sao cho MỖI dòng vừa `max_width` px theo
@@ -133,29 +295,6 @@ def _wrap_to_width(text: str, font: ImageFont.FreeTypeFont, max_width: int, draw
             current = word
     lines.append(current)
     return lines
-
-
-def _draw_bottom_scrim(overlay: Image.Image, *, w: int, h: int, top_y: int, bg_color: tuple[int, int, int],
-                       max_alpha: int = 235, fade_frac: float = 0.35) -> None:
-    """Vẽ dải nền mờ dần (scrim) từ `top_y` xuống ĐÁY ẢNH THẬT, TRƯỚC khi vẽ
-    chữ disclaimer/nguồn lên trên -- kỹ thuật CHUẨN cho phụ đề/caption (đảm
-    bảo đọc được BẤT KỂ AI vẽ gì bên dưới, không cần đoán/phân tích pixel ảnh
-    nền). SỬA LỖI P0 #4 (2026-07-22): trước đây khối chữ khi "nhô lên" khỏi
-    dải AI chừa có thể đè trực tiếp lên nội dung AI (vd khối "Điểm nổi bật")
-    KHÔNG có gì che phía sau -- chữ và nội dung AI trộn lẫn, không đọc được.
-    Fade dần ở top_y (KHÔNG cắt cụt đột ngột) để không tạo viền cứng phản
-    thẩm mỹ giữa vùng ảnh AI và vùng chữ."""
-    scrim_h = h - top_y
-    if scrim_h <= 0:
-        return
-    grad = Image.new("L", (1, scrim_h), max_alpha)
-    fade_px = max(int(scrim_h * fade_frac), 1)
-    for i in range(min(fade_px, scrim_h)):
-        grad.putpixel((0, i), int(max_alpha * (i / fade_px)))
-    grad = grad.resize((w, scrim_h))
-    scrim_rgba = Image.new("RGBA", (w, scrim_h), (*bg_color, 0))
-    scrim_rgba.putalpha(grad)
-    overlay.alpha_composite(scrim_rgba, (0, top_y))
 
 
 def _find_font(size: int, *, bold: bool = False, extra_path: str | None = None) -> ImageFont.FreeTypeFont:
@@ -207,106 +346,242 @@ def _fit_block(
     return lines, font, _line_height(lines[0], font, draw)
 
 
+def _block_height(lines: list[str], line_h: int, *, line_gap_ratio: float = 0.28) -> int:
+    if not lines:
+        return 0
+    spacing = int(line_h * line_gap_ratio)
+    return len(lines) * line_h + (len(lines) - 1) * spacing
+
+
+# =====================================================================
+# Bước 4 -- NỘI DUNG BAND (Trái "Nguồn:", Phải disclaimer -- band TỰ NỚI CAO)
+# =====================================================================
+
+def _layout_band_text(
+    draw: ImageDraw.ImageDraw, *, source_text: str, disclaimer_text: str,
+    band_w: int, nominal_band_h: int, margin_x: int, font_path: str | None,
+) -> dict:
+    """Đo (KHÔNG vẽ) khối "Nguồn:" (trái) + disclaimer (phải) -- font =
+    0.30*nominal_band_h (Yêu cầu Lead, A2 Bước 4), tối đa 2 dòng/khối, KHÔNG
+    BAO GIỜ dưới `_MIN_READABLE_FONT_SIZE`. Trả dict đủ để vẽ + `band_h` THẬT
+    (>= nominal_band_h -- band TỰ NỚI nếu chữ cần nhiều chỗ hơn dải danh
+    nghĩa, KHÔNG BAO GIỜ cắt chữ)."""
+    base_size = max(int(nominal_band_h * 0.30), _MIN_READABLE_FONT_SIZE)
+    half_w = band_w // 2
+    gap = max(int(band_w * 0.02), 8)
+    side_max_w = max(half_w - margin_x - gap // 2, 10)
+
+    src_lines, src_font, src_line_h = _fit_block(
+        source_text, base_size=base_size, max_width=side_max_w, draw=draw,
+        bold=True, font_path=font_path, max_lines=2,
+    )
+    dis_lines, dis_font, dis_line_h = _fit_block(
+        disclaimer_text, base_size=base_size, max_width=side_max_w, draw=draw,
+        bold=False, font_path=font_path, max_lines=2,
+    )
+    src_h = _block_height(src_lines, src_line_h)
+    dis_h = _block_height(dis_lines, dis_line_h)
+    v_pad = max(int(nominal_band_h * 0.18), 8)
+    needed_h = max(src_h, dis_h) + 2 * v_pad
+    band_h = max(nominal_band_h, needed_h)
+
+    return {
+        "band_h": band_h, "margin_x": margin_x, "side_max_w": side_max_w,
+        "src_lines": src_lines, "src_font": src_font, "src_line_h": src_line_h, "src_h": src_h,
+        "dis_lines": dis_lines, "dis_font": dis_font, "dis_line_h": dis_line_h, "dis_h": dis_h,
+    }
+
+
+def _draw_left_block(draw: ImageDraw.ImageDraw, lines: list[str], font: ImageFont.FreeTypeFont,
+                     line_h: int, *, x: int, y_center: int, color: tuple[int, int, int, int]) -> None:
+    total_h = _block_height(lines, line_h)
+    y = y_center - total_h // 2
+    spacing = int(line_h * 0.28)
+    for line in lines:
+        draw.text((x, y), line, font=font, fill=color)
+        y += line_h + spacing
+
+
+def _draw_right_block(draw: ImageDraw.ImageDraw, lines: list[str], font: ImageFont.FreeTypeFont,
+                      line_h: int, *, right_x: int, y_center: int, color: tuple[int, int, int, int]) -> None:
+    total_h = _block_height(lines, line_h)
+    y = y_center - total_h // 2
+    spacing = int(line_h * 0.28)
+    for line in lines:
+        tw = draw.textlength(line, font=font)
+        draw.text((right_x - tw, y), line, font=font, fill=color)
+        y += line_h + spacing
+
+
+# =====================================================================
+# Bước 5 -- LOGO (ảnh tràn viền mép trên -- scrim CÓ ĐIỀU KIỆN, CHỖ DUY NHẤT)
+# =====================================================================
+
+def _region_luminance(im: Image.Image, bbox: tuple[int, int, int, int]) -> float | None:
+    x0, y0, x1, y1 = bbox
+    w, h = im.size
+    x0, y0 = max(x0, 0), max(y0, 0)
+    x1, y1 = min(x1, w), min(y1, h)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    region = im.convert("RGB").crop((x0, y0, x1, y1))
+    stat = ImageStat.Stat(region)
+    return _luminance(tuple(stat.mean))
+
+
+def _draw_top_scrim(overlay: Image.Image, *, w: int, h: int, scrim_h: int, max_alpha: int = 140) -> None:
+    """Scrim gradient ĐEN, alpha 0 (y=0, mép trên) -> `max_alpha` (y=scrim_h)
+    -- CHỖ DUY NHẤT còn dùng scrim (A2 Bước 5) -- chỉ gọi khi vùng bbox logo
+    nở 20% có luminance > 110 (tương phản thật sự thấp), KHÔNG vẽ mặc định.
+    max_alpha=140/255 ~= 0.55 (đúng yêu cầu Lead "alpha 0->0.55")."""
+    if scrim_h <= 0:
+        return
+    grad = Image.new("L", (1, scrim_h))
+    for i in range(scrim_h):
+        grad.putpixel((0, i), int(max_alpha * (i / max(scrim_h - 1, 1))))
+    grad = grad.resize((w, scrim_h))
+    scrim_rgba = Image.new("RGBA", (w, scrim_h), (0, 0, 0, 0))
+    scrim_rgba.putalpha(grad)
+    overlay.alpha_composite(scrim_rgba, (0, 0))
+
+
+def _paste_logo_with_scrim(canvas: Image.Image, overlay: Image.Image, *, logo_path: Path,
+                           pad: int, final_w: int, final_h: int) -> bool:
+    """Dán ẢNH logo thật góc trên-trái, lề `pad` (4% chiều rộng, xem
+    `stamp_brand`). Đo luminance vùng bbox logo NỞ RA 20% (đo trên `canvas`
+    TRƯỚC khi dán logo -- vùng nền thật AI vẽ) -- >110 (tương phản thấp) ->
+    vẽ scrim đen (A2 Bước 5) LÊN `overlay` trước khi dán logo. Trả True nếu
+    đã vẽ scrim (ghi vào log JSON `scrim_applied`)."""
+    scrim_applied = False
+    if not logo_path.exists():
+        logger.warning("brand_stamp: không tìm thấy file logo '%s' -- bỏ qua, KHÔNG đóng dấu logo.", logo_path)
+        return scrim_applied
+    try:
+        logo = Image.open(logo_path).convert("RGBA")
+    except Exception as e:
+        logger.warning("brand_stamp: lỗi mở file logo '%s' (%s) -- bỏ qua, KHÔNG đóng dấu logo.", logo_path, e)
+        return scrim_applied
+
+    logo_h = max(round(final_h * 0.06), 24)
+    logo_w = max(round(logo.width * (logo_h / logo.height)), 1)
+    logo_x, logo_y = pad, pad
+
+    expand_x = int(logo_w * 0.20)
+    expand_y = int(logo_h * 0.20)
+    bbox = (logo_x - expand_x, logo_y - expand_y, logo_x + logo_w + expand_x, logo_y + logo_h + expand_y)
+    lum = _region_luminance(canvas, bbox)
+    if lum is not None and lum > 110:
+        scrim_h = max(round(final_h * 0.14), logo_y + logo_h)
+        _draw_top_scrim(overlay, w=final_w, h=final_h, scrim_h=scrim_h)
+        scrim_applied = True
+
+    logo_resized = logo.resize((logo_w, logo_h), Image.LANCZOS)
+    overlay.alpha_composite(logo_resized, (logo_x, logo_y))
+    return scrim_applied
+
+
+# =====================================================================
+# ĐIỂM VÀO CHÍNH
+# =====================================================================
+
 def stamp_brand(
     png_bytes: bytes,
     *,
+    ratio: str,
     theme: str = "dark",
     wordmark: str = "FVA CAPITAL",
     source: str = "",
     disclaimer: str = "",
     font_path: str | None = None,
     logo_path: str | Path | None = None,
-) -> bytes:
-    """Đóng dấu logo THẬT (ảnh, góc trên-trái, trong dải an toàn đỉnh -- xem
-    `_paste_logo()`, `wordmark` giữ lại CHỈ để tương thích/log, KHÔNG còn vẽ
-    chữ) + nguồn/disclaimer (đáy, trong dải an toàn đáy, cỡ chữ giảm còn 75%
-    -- thông tin phụ, xem `_SECONDARY_TEXT_SCALE`) lên `png_bytes`. `source`
-    tự động rút gọn CHỈ còn tên trang (xem `_shorten_source()`) trước khi vẽ.
-    Trả PNG bytes mới. HÀM THUẦN theo nghĩa không I/O ngoài decode/encode ảnh
-    + đọc file logo cục bộ -- không gọi mạng, chạy lại bất kỳ lúc nào ($0,
-    không cần sinh ảnh AI lại nếu chỉ đổi brand/font/logo).
+    settings=None,
+) -> tuple[bytes, dict]:
+    """Đóng dấu brand THEO KIẾN TRÚC KHUNG CỨNG ĐÁY (2026-07-23, THAY hoàn
+    toàn hướng scrim đáy 2026-07-22 -- xem module docstring, đây là ĐẢO
+    HƯỚNG P0 quyết định bởi Lead sau khi xem ảnh thật cho thấy scrim che mất
+    dữ liệu thật thay vì sửa lỗi).
 
-    XẾP KHỐI TỪ DƯỚI LÊN (sửa lỗi chồng đè P0): khối "Nguồn" neo NGAY TRÊN
-    mép đáy trước, sau đó khối disclaimer xếp NGAY TRÊN khối "Nguồn" -- dòng
-    trên = dòng dưới - chiều_cao_thật - khoảng_cách_tối_thiểu, không hardcode
-    toạ độ Y cho bất kỳ dòng nào. Nếu tổng chiều cao 2 khối VƯỢT dải an toàn
-    đáy đã đo, khối được phép vẽ NHÔ lên trên dải đó (vẫn LUÔN nằm trong biên
-    ảnh -- không bao giờ tràn mép ảnh thật, chỉ có thể vượt dải ~8% AI chừa)."""
+    KHÁC BIỆT CỐT LÕI với bản cũ: brand_stamp KHÔNG BAO GIỜ vẽ ĐÈ lên pixel
+    ảnh AI. Nó THU ảnh AI (matting, Bước 2) vào 1 vùng NHỎ HƠN khung cuối rồi
+    vẽ band đáy TRÊN PHẦN DIỆN TÍCH RIÊNG còn lại (Bước 3-4) -- va chạm chữ
+    với nội dung là BẤT KHẢ THI VỀ CẤU TRÚC (không có pixel chung giữa vùng
+    ảnh AI và vùng band), khác "canh toạ độ cho khỏi đụng" (có thể sai khi dữ
+    liệu đổi) của kiến trúc cũ.
+
+    Trả (PNG bytes ĐÃ đóng dấu, log dict) -- log PHẢI được ai_full.py ghi
+    cạnh ảnh (JSON) để Lead kiểm không cần mở ảnh (A2 Bước 6): {cropped_top_
+    px, band_h, band_color, band_color_source, scrim_applied, source_text,
+    disclaimer_lines, final_wh}."""
     theme = theme if theme in _THEME_COLORS else "dark"
     colors = _THEME_COLORS[theme]
 
-    im = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
-    w, h = im.size
-    top_h = int(h * _TOP_SAFE_PCT)
-    bottom_h = int(h * _BOTTOM_SAFE_PCT)
-    pad = max(int(w * 0.04), 16)
-    max_text_width = w - 2 * pad
+    im = Image.open(io.BytesIO(png_bytes)).convert("RGB")
 
-    overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
+    # --- Bước 1: edge sanitizer (lưới an toàn, KHÔNG thay cho sửa prompt) ---
+    im, cropped_top_px = _edge_sanitize_top(im)
 
-    # --- logo THẬT (đỉnh, thay chữ "FVA CAPITAL" vẽ bằng font) ---------------
-    resolved_logo_path = Path(logo_path) if logo_path else _DEFAULT_LOGO_PATH
-    _paste_logo(overlay, logo_path=resolved_logo_path, pad=pad, top_h=top_h)
+    # --- Bước 2: matting vào vùng trong (final_h - band_h danh nghĩa) -------
+    final_w, final_h = _resolve_final_size(ratio, settings)
+    band_min_px = _resolve_band_min_px(settings)
+    nominal_band_h = max(round(final_h * 0.075), band_min_px)
+    matted = _matte(im, target_w=final_w, target_h=final_h - nominal_band_h)
 
-    # --- đo THẬT trước khi vẽ (đáy) -- cỡ chữ = 75% cũ, thông tin phụ --------
-    disclaimer_base = max(int(bottom_h * 0.30 * _SECONDARY_TEXT_SCALE), _MIN_READABLE_FONT_SIZE)
-    disclaimer_lines, disclaimer_font, disclaimer_line_h = _fit_block(
-        disclaimer, base_size=disclaimer_base,
-        max_width=max_text_width, draw=draw, bold=False, font_path=font_path, max_lines=2,
-    )
+    # --- Bước 3: màu band tự khớp -------------------------------------------
+    navy_fallback = _resolve_navy_fallback(settings)
+    band_color, band_color_source = _band_color(matted, navy_fallback=navy_fallback)
+
+    # --- Bước 4: đo nội dung band (CÓ THỂ khiến band nới cao hơn danh nghĩa) -
+    margin_x = max(int(final_w * 0.04), 12)
     source_short = _shorten_source(source)
     source_text = f"Nguồn: {source_short}" if source_short else ""
-    source_base = max(int(bottom_h * 0.34 * _SECONDARY_TEXT_SCALE), _MIN_READABLE_FONT_SIZE)
-    source_lines, source_font, source_line_h = _fit_block(
-        source_text, base_size=source_base,
-        max_width=max_text_width, draw=draw, bold=True, font_path=font_path, max_lines=2,
+    probe_canvas = Image.new("RGB", (final_w, final_h))
+    probe_draw = ImageDraw.Draw(probe_canvas)
+    layout = _layout_band_text(
+        probe_draw, source_text=source_text, disclaimer_text=disclaimer,
+        band_w=final_w, nominal_band_h=nominal_band_h, margin_x=margin_x, font_path=font_path,
     )
+    band_h = layout["band_h"]
+    if band_h != nominal_band_h:
+        # NỚI band -- re-matte với inner_h nhỏ hơn (final_h GIỮ NGUYÊN, xem A1
+        # -- khung xuất bản cố định, phần hy sinh là diện tích ảnh AI, KHÔNG
+        # BAO GIỜ là chữ bị cắt).
+        matted = _matte(im, target_w=final_w, target_h=final_h - band_h)
+        band_color, band_color_source = _band_color(matted, navy_fallback=navy_fallback)
 
-    line_gap_ratio = 0.28   # khoảng cách GIỮA các dòng CÙNG khối, theo tỷ lệ chiều cao dòng
-    block_gap_ratio = 0.55  # khoảng cách GIỮA 2 khối (disclaimer / nguồn), rộng hơn line_gap để phân biệt rõ 2 khối
+    # --- Dựng canvas cuối: ảnh AI (đã matte) TRÊN + band màu ĐÁY, KHÔNG chồng
+    canvas = Image.new("RGB", (final_w, final_h), band_color)
+    canvas.paste(matted, (0, 0))
+    overlay = Image.new("RGBA", (final_w, final_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
 
-    def _block_height(lines: list[str], line_h: int) -> int:
-        if not lines:
-            return 0
-        spacing = int(line_h * line_gap_ratio)
-        return len(lines) * line_h + (len(lines) - 1) * spacing
+    band_top_y = final_h - band_h
+    band_center_y = band_top_y + band_h // 2
+    draw.rectangle((0, band_top_y, final_w, final_h), fill=(*band_color, 255))
+    if source_text:
+        _draw_left_block(draw, layout["src_lines"], layout["src_font"], layout["src_line_h"],
+                         x=margin_x, y_center=band_center_y, color=(*colors["gold"], 255))
+    if disclaimer:
+        _draw_right_block(draw, layout["dis_lines"], layout["dis_font"], layout["dis_line_h"],
+                          right_x=final_w - margin_x, y_center=band_center_y, color=(*colors["muted"], 255))
 
-    disclaimer_h = _block_height(disclaimer_lines, disclaimer_line_h)
-    source_h = _block_height(source_lines, source_line_h)
-    block_gap = int(max(disclaimer_line_h, source_line_h, 1) * block_gap_ratio) if (disclaimer_lines and source_lines) else 0
-    total_h = disclaimer_h + block_gap + source_h
+    # --- Bước 5: logo (tràn viền mép trên) + scrim CÓ ĐIỀU KIỆN ------------
+    resolved_logo_path = Path(logo_path) if logo_path else _DEFAULT_LOGO_PATH
+    pad = max(int(final_w * 0.04), 16)
+    scrim_applied = _paste_logo_with_scrim(canvas, overlay, logo_path=resolved_logo_path,
+                                          pad=pad, final_w=final_w, final_h=final_h)
 
-    bottom_edge_margin = max(int(h * 0.015), 6)   # đệm nhỏ tới MÉP ẢNH THẬT -- ranh giới CỨNG, không bao giờ vượt
-    if total_h > bottom_h - bottom_edge_margin:
-        logger.warning(
-            "brand_stamp: khối disclaimer+nguồn (%dpx) vượt dải an toàn đáy AI chừa (%dpx) dù đã co font "
-            "xuống %dpx -- vẽ NHÔ lên trên dải đó (vẫn trong biên ảnh), dùng scrim nền để đảm bảo đọc được.",
-            total_h, bottom_h, _MIN_READABLE_FONT_SIZE,
-        )
-
-    # --- scrim nền (LUÔN vẽ, không chỉ khi vượt dải -- đảm bảo đọc được nhất
-    # quán trên MỌI ảnh, không phụ thuộc AI vẽ gì bên dưới) --------------------
-    scrim_padding = max(int(h * 0.015), 8)
-    scrim_top_y = max(0, h - bottom_edge_margin - total_h - scrim_padding)
-    _draw_bottom_scrim(overlay, w=w, h=h, top_y=scrim_top_y, bg_color=colors["bg"])
-
-    # --- xếp khối TỪ DƯỚI LÊN: "Nguồn" trước (đáy), disclaimer NGAY TRÊN nó --
-    cursor_y = h - bottom_edge_margin - source_h   # đỉnh của khối "Nguồn"
-    spacing_source = int(source_line_h * line_gap_ratio)
-    y = cursor_y
-    for line in source_lines:
-        draw.text((pad, y), line, font=source_font, fill=(*colors["gold"], 255))
-        y += source_line_h + spacing_source
-
-    cursor_y -= block_gap + disclaimer_h   # đỉnh của khối disclaimer
-    spacing_disclaimer = int(disclaimer_line_h * line_gap_ratio)
-    y = cursor_y
-    for line in disclaimer_lines:
-        draw.text((pad, y), line, font=disclaimer_font, fill=(*colors["muted"], 255))
-        y += disclaimer_line_h + spacing_disclaimer
-
-    stamped = Image.alpha_composite(im, overlay).convert("RGB")
+    stamped = Image.alpha_composite(canvas.convert("RGBA"), overlay).convert("RGB")
     out = io.BytesIO()
     stamped.save(out, format="PNG")
-    return out.getvalue()
+
+    log = {
+        "cropped_top_px": cropped_top_px,
+        "band_h": band_h,
+        "band_color": "#%02x%02x%02x" % band_color,
+        "band_color_source": band_color_source,
+        "scrim_applied": scrim_applied,
+        "source_text": source_text,
+        "disclaimer_lines": layout["dis_lines"],
+        "final_wh": [final_w, final_h],
+    }
+    return out.getvalue(), log
