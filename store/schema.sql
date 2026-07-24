@@ -56,7 +56,17 @@
 -- dài) chỉ để đổi 1 cờ duyệt.
 CREATE TABLE IF NOT EXISTS documents (
     id            INTEGER PRIMARY KEY,
-    topic_key     TEXT NOT NULL,
+    -- CHECK length(topic_key) > 0 (2026-07-24, theo chỉ đạo Lead) -- NOT NULL
+    -- một mình CHỈ chặn SQL NULL, KHÔNG chặn chuỗi rỗng "" (xác nhận thực
+    -- nghiệm: write_document("", ...) từng ghi thành công trước khi có CHECK
+    -- này VÀ trước guard Python ở document_store.py::write_document()).
+    -- Guard Python vẫn giữ nguyên (raise ValueError SỚM, thông báo rõ hơn
+    -- IntegrityError chung chung) -- CHECK này là LƯỚI AN TOÀN CUỐI ở tầng
+    -- DB, phòng đường ghi nào đó (vd sync service Bước 3, tương lai) bỏ sót
+    -- guard Python. KHÔNG migrate dữ liệu hiện có -- store trống ở nấc này
+    -- (P2 chưa có dữ liệu thật, xem Bước 5.2 "clear sạch, khởi tạo lại từ
+    -- schema"), constraint tự có hiệu lực từ lần init_db() kế tiếp.
+    topic_key     TEXT NOT NULL CHECK (length(topic_key) > 0),
     layer         TEXT NOT NULL CHECK (layer IN (
                       'raw', 'brief', 'content_output', 'infographic', 'video',
                       'gate_status', 'content_status', 'log'

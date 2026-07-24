@@ -261,3 +261,24 @@ def test_write_document_rejects_empty_topic_key(db_path):
 def test_write_document_rejects_none_topic_key(db_path):
     with pytest.raises(ValueError, match="topic_key rỗng"):
         ds.write_document(None, "raw", {"a": 1}, "ma", db_path=db_path)
+
+
+def test_check_constraint_blocks_empty_topic_key_at_db_layer(db_path):
+    """3.3 (2026-07-24, theo chỉ đạo Lead) -- đo LƯỚI AN TOÀN Ở TẦNG DB
+    (CHECK length(topic_key) > 0, schema.sql), KHÔNG phải guard Python ở
+    write_document() (đã đo riêng ở test_write_document_rejects_empty_
+    topic_key). INSERT THẲNG bằng SQL thô, bỏ qua write_document() hoàn
+    toàn -- nếu chỉ Python guard tồn tại (không có CHECK ở schema) thì INSERT
+    thô này sẽ THÀNH CÔNG, làm test sai (false negative); CHECK constraint
+    khiến SQLite tự raise IntegrityError bất kể đường ghi nào (kể cả đường
+    KHÔNG qua write_document(), vd sync service Bước 3 tương lai lỡ ghi trực
+    tiếp)."""
+    import sqlite3 as _sqlite3
+
+    with _sqlite3.connect(str(db_path)) as conn:
+        with pytest.raises(_sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO documents (topic_key, layer, content_type, version, payload_json, "
+                "created_at, written_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("", "raw", "", 1, "{}", "2026-07-24T00:00:00", "ma"),
+            )
