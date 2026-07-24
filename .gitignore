@@ -44,3 +44,21 @@ reports/*
 # duyệt, PHẢI ở trong git (không phải report tạm dùng-rồi-bỏ)
 !reports/regression_video_prompt/
 !reports/regression_video_prompt/**
+
+# 2026-07-24 (hạ tầng dùng chung, PHẢI lên develop TRƯỚC khi nhánh feature nào
+# merge -- xem trao đổi Lead/agent-A/agent-B phiên feature/infographic-frame)
+# -- rủi ro THẬT đã xác nhận: agent-A tìm thấy store/document_store.db chưa
+# track trên máy nó (SQLite runtime, sinh ra khi chạy store/document_store.py
+# hoặc test của nó); agent-B tự tay sinh ảnh PNG + cache manifest.json trong
+# output/ và assets_ai_full/ khi render ai_full thật. Cả storage.output_dir
+# lẫn infographic.ai_full.cache_dir đều CHẠY THẬT nằm NGOÀI repo (dưới
+# storage.data_root, xem config/settings.yaml + src/twmkt/config.data_path())
+# -- rule dưới đây là LƯỚI AN TOÀN phòng trường hợp chúng lỡ nằm TRONG repo
+# (lịch sử: storage/ cũ TỪNG ở trong repo trước Phase DATA-ROOT, xem comment
+# phía trên) -- KHÔNG dùng "*.png"/"*.jpg" toàn cục vì assets/ (logo thương
+# hiệu thật, đã track: icon.png/logo.png/*_transparent.png) cũng là .png.
+*.db
+*.sqlite
+*.sqlite3
+/output/
+/assets_ai_full/
