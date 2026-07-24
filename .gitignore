@@ -3,6 +3,13 @@ __pycache__/
 .venv/
 venv/
 env/
+
+# P2 store-as-truth: DB SQLite cục bộ (dev/test) — KHÔNG commit, xem
+# store/document_store.py::_default_db_path() (ENV DOCUMENT_STORE_PATH,
+# mặc định "store/document_store.db" tương đối CWD nếu chưa set).
+*.db
+*.sqlite
+*.sqlite3
 .env
 *.egg-info/
 build/

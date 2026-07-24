@@ -13,9 +13,13 @@ Quyền ghi tách bạch ENFORCE Ở SCHEMA (CHECK constraint trong schema.sql),
 KHÔNG dựa kỷ luật code Python -- ghi sai layer cho written_by sẽ luôn raise
 `sqlite3.IntegrityError` dù code gọi có kiểm tra trước hay không.
 
-CHƯA NỐI vào pipeline/Sheet ở nấc này (docs/VPS_MIGRATION_BACKLOG.md A6 ghi
-rõ: "LÀM SAU khi luồng thông" -- Sheet HIỆN vẫn đang là database, TUYỆT ĐỐI
-không dùng module này để thay Sheet cho tới khi có bước backfill riêng).
+P2 STORE-AS-TRUTH (2026-07-23, nhánh `feature/store-as-truth`) -- ĐÃ NỐI vào
+pipeline thật: `scripts/produce_from_sheet.py` giờ đọc/ghi module này làm
+NGUỒN SỰ THẬT DUY NHẤT, KHÔNG còn đọc/ghi Sheet trực tiếp. Sheet là VIEW
+thuần, cập nhật qua `store/sync_service.py` (2 chiều store<->Sheet) -- xem
+docs/VPS_MIGRATION_BACKLOG.md mục P2. Quyết định A6 cũ ("LÀM SAU khi luồng
+thông") coi như ĐÃ THOẢ -- dữ liệu cũ trên Sheet trước mốc này KHÔNG có ý
+nghĩa (đang test), được Lead xác nhận CLEAR SẠCH thay vì backfill/dual-write.
 """
 from __future__ import annotations
 
@@ -28,8 +32,14 @@ from pathlib import Path
 
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
-_VALID_LAYERS = frozenset({"raw", "brief", "content_output", "infographic", "video"})
+_VALID_LAYERS = frozenset({
+    "raw", "brief", "content_output", "infographic", "video",
+    "gate_status", "content_status", "log",
+})
 _VALID_WRITERS = frozenset({"ma", "aigen"})
+# content_type BẮT BUỘC cho layer nào (P2 store-as-truth -- content_status
+# CÙNG NẾP content_output, xem schema.sql).
+_LAYERS_REQUIRE_CONTENT_TYPE = frozenset({"content_output", "content_status"})
 
 
 def _default_db_path() -> Path:
@@ -104,13 +114,21 @@ def write_document(
     `sqlite3.IntegrityError` thay vì âm thầm ghi đè, đúng tinh thần
     append-only. Ở nấc này (VPS 1 nguồn ghi/layer theo thiết kế A6) race
     này không nên xảy ra trong vận hành bình thường."""
+    if not topic_key:
+        raise ValueError(
+            "topic_key rỗng/None -- KHÔNG được phép (P2 store-as-truth: schema chỉ có "
+            "NOT NULL, KHÔNG chặn chuỗi rỗng '' -- xác nhận thực nghiệm 2026-07-23, "
+            "write_document('', ...) từng ghi thành công trước sửa này). Đây là guard "
+            "DUY NHẤT chặn 'document mồ côi' (INVARIANT Lớp 5 Phase 2 cũ trên Sheet, nay "
+            "chuyển xuống tầng store thay vì tầng pipeline)."
+        )
     if layer not in _VALID_LAYERS:
         raise ValueError(f"layer không hợp lệ: {layer!r} (phải trong {sorted(_VALID_LAYERS)})")
     if written_by not in _VALID_WRITERS:
         raise ValueError(f"written_by không hợp lệ: {written_by!r} (phải trong {sorted(_VALID_WRITERS)})")
-    if layer == "content_output" and not content_type:
+    if layer in _LAYERS_REQUIRE_CONTENT_TYPE and not content_type:
         raise ValueError(
-            "layer='content_output' BẮT BUỘC content_type (vd 'article'/'infographic'/'video') "
+            f"layer={layer!r} BẮT BUỘC content_type (vd 'article'/'infographic'/'video') "
             "-- 1 topic_key có thể có nhiều content_type, thiếu tham số này sẽ tái diễn BUG 1 "
             "(content_type khác nhau bị coi là version của cùng 1 tài liệu, chôn mất nhau)."
         )
