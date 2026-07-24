@@ -118,6 +118,26 @@ def _default_disclaimer(brand: dict | None = None) -> str:
     return str(footer.get("disclaimer") or "").strip() or _FALLBACK_DISCLAIMER
 
 
+def _verbatim_disclaimer(candidate: str) -> str:
+    """E' (2026-07-24, theo chỉ đạo Lead) — đối chiếu NGUYÊN VĂN `candidate`
+    (LLM viết, hoặc đã là default) với bản chuẩn `_default_disclaimer()`
+    (config/brand.yaml: footer.disclaimer). Lệch dù 1 ký tự -> GHI ĐÈ bằng bản
+    chuẩn TẠI CHỖ (KHÔNG nối thêm bản thứ 2) + CẢNH BÁO rõ (in cả 2 chuỗi, để
+    truy vết bản LLM viết là gì). Lý do bắt buộc: disclaimer là dòng miễn trừ
+    trách nhiệm PHÁP LÝ (nội dung chứng khoán công bố công khai) — prompt yêu
+    cầu LLM viết "đúng nguyên văn" nhưng KHÔNG có gì ép được LLM tuân thủ;
+    guardrail cũ (guardrails/compliance.py) chỉ kiểm CÓ MẶT disclaimer, KHÔNG
+    kiểm ĐÚNG CHỮ -> bản LLM tự diễn giải (không rỗng) từng lọt xuống production
+    mà không ai biết. Khớp NGUYÊN VĂN (kể cả rỗng -> default) là NO-OP, không
+    cảnh báo."""
+    canonical = _default_disclaimer()
+    if candidate.strip() == canonical.strip():
+        return canonical
+    print(f"[CẢNH BÁO] Disclaimer LLM viết khác bản chuẩn -> GHI ĐÈ (không nối thêm). "
+         f"LLM viết: {candidate!r} | Bản chuẩn: {canonical!r}")
+    return canonical
+
+
 # ACTIVE_TASK — Tích hợp CONTENT_WRITER_RULES: đọc prompts/content_writer_
 # rules.md TẠI THỜI ĐIỂM GỌI (không cache import-time, CÙNG NẾP với agents/
 # voice.assemble_voice đọc docs/voice_examples.md mỗi lần gọi) — sửa rule
@@ -487,7 +507,7 @@ def analysis_fields_from_data(data: dict | None, brief: ProductionBrief):
             {"heading": str(s.get("heading", "")).strip(), "content": str(s.get("content", "")).strip()}
             for s in (data.get("sections") or []) if isinstance(s, dict)
         ]
-        disclaimer = str(data.get("disclaimer") or _default_disclaimer()).strip()
+        disclaimer = _verbatim_disclaimer(str(data.get("disclaimer") or _default_disclaimer()).strip())
         sources = [str(u).strip() for u in (data.get("sources") or []) if str(u).strip()]
         if sections:
             return title, sapo, sections, disclaimer, sources

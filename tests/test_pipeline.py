@@ -3506,50 +3506,21 @@ def test_run_execute_filter_phase49_includes_failed_excludes_needs_human():
 # của MODULE produce_from_sheet -> chạy run() THẬT (không phải mô phỏng rời rạc),
 # $0 tuyệt đối (không gọi mạng/CLI thật), khôi phục nguyên trạng sau mỗi test.
 class _FakeProduceBoard:
-    def __init__(self, approved_rows):
-        self._approved = approved_rows
-        self.execute_updates: dict[int, str] = {}
-        self.topic_key_updates: dict[int, str] = {}   # Phase 1R.2
-        self.appended_content: list[list[str]] = []
-        self.banded_called = False
+    """P2 store-as-truth: produce_from_sheet.run() giờ đọc/ghi STORE cho dữ
+    liệu nội dung (approved/execute/CONTENT) — `board` giả CHỈ còn cần fake 3
+    method Sheet-native còn lại theo quyết định Bước 1 (log/PROMPTS/SOURCES —
+    người quản lý trực tiếp trên Sheet). Seed dữ liệu "approved" và đọc lại
+    kết quả sản xuất giờ qua store thật (tmp SQLite) — xem _run_produce_scenario/
+    _seed_approved/_read_back_produce_result bên dưới."""
 
     def log(self, *a, **kw):
         pass
-
-    def sync_approve_execute_flags(self):
-        return 0
-
-    def read_approved_context(self):
-        return self._approved
 
     def read_prompt_versions(self):
         return {}
 
     def read_sources(self):
         return []
-
-    def existing_content_keys(self):
-        return set()
-
-    def existing_content_missing_keys(self):
-        return []
-
-    def append_content_rows(self, rows):
-        self.appended_content.extend(rows)
-        return len(rows)
-
-    def set_execute_values(self, status_by_row):
-        self.execute_updates.update(status_by_row)
-
-    def set_topic_key_values(self, key_by_row):
-        self.topic_key_updates.update(key_by_row)
-
-    def mark_execute_done(self, rows):
-        self.set_execute_values({r: "DONE" for r in rows})
-
-    def regroup_and_band_content(self):
-        self.banded_called = True
-        return 0
 
 
 class _FakeProduceNotifier:
@@ -3570,25 +3541,96 @@ class _EmptyRouteLLM:
         return ""
 
 
+def _approved_row(context: str, row: int, *, source: str = "", topic_key: str = "") -> dict:
+    """`row` giữ lại CHỈ để test đặt tên/tra cứu tiện tay — KHÔNG còn ý nghĩa
+    Sheet-row-index (store không có khái niệm dòng). `topic_key` rỗng -> tính
+    TẤT ĐỊNH từ `source` (compute_topic_key() thật — khớp hành vi assign_topic_key
+    cũ khi có URL, cho test idempotent-theo-URL tiếp tục đúng) hoặc surrogate
+    ổn định theo `row` nếu không có source (thay uuid4 ngẫu nhiên cũ — test cần
+    tái lập được)."""
+    from twmkt.curation.keys import compute_topic_key
+    tk = topic_key or (compute_topic_key(source) if source else f"row-{row}-key")
+    return {"context": context, "hook": "hook gợi ý", "source": source, "tickers": [],
+           "group": "", "topic": "", "execute": "RUN", "row": row, "topic_key": tk}
+
+
+def _seed_approved(row: dict, *, db_path) -> None:
+    """Ghi 1 approved_row (dict _approved_row) vào store thật: raw (crawl output)
+    + gate_status (gate1=APPROVE, execute=row['execute'] hoặc 'RUN' mặc định) —
+    tương đương "dòng CONTEXT Status=APPROVE" cũ trên Sheet."""
+    from store import pipeline_store as ps
+    tk = row["topic_key"]
+    ps.write_raw(tk, {
+        "context": row["context"], "hook": row["hook"], "source": row["source"],
+        "tickers": row["tickers"], "group": row["group"], "topic": row["topic"],
+    }, db_path=db_path)
+    ps.write_gate_status(tk, gate1="APPROVE", execute=row.get("execute") or "RUN", db_path=db_path)
+
+
+def _read_back_produce_result(rows: list[dict], *, db_path):
+    """Đọc lại kết quả run() vừa ghi vào store cho các topic trong `rows` —
+    dựng lại 2 thuộc tính SHAPE-TƯƠNG-THÍCH với _FakeProduceBoard Sheet-era cũ
+    (`.appended_content`: list[list[str]] theo CONTENT_HEADER, DÙNG LẠI
+    content_row() thật; `.execute_updates`: dict[row_int, status]) để mọi
+    assertion đã viết trước đó (r[2]/r[3].../board.execute_updates.get(row))
+    tiếp tục đúng KHÔNG cần sửa — business behavior không đổi, chỉ đường ghi/
+    đọc đổi từ Sheet sang store."""
+    from store import document_store as ds
+    from store import pipeline_store as ps
+    from twmkt.sheets_board import content_row
+    appended: list[list[str]] = []
+    execute_updates: dict[int, str] = {}
+    for r in rows:
+        tk = r["topic_key"]
+        # _seed_approved() đã ghi gate_status version 1 (Execute=RUN seed) —
+        # CHỈ coi là "run() thật sự ghi Execute" nếu có version MỚI HƠN (khớp
+        # ngữ nghĩa board.execute_updates cũ: chỉ chứa dòng set_execute_values()
+        # thật sự đụng tới, KHÔNG chứa dòng bị lọc bỏ bởi topic_keys).
+        history = ds.read_history(tk, "gate_status", "", db_path=db_path)
+        if len(history) > 1:
+            execute_updates[r["row"]] = history[-1][1].get("execute", "")
+        for type_ in ("article", "infographic", "video"):
+            out = ps.read_content_output(tk, type_, db_path=db_path)
+            if out is None:
+                continue
+            appended.append(content_row(
+                context=r["context"], type_=type_, status=out.get("status", ""),
+                output=out.get("output", ""), notes=out.get("notes", ""),
+                topic_key=tk, facts=out.get("facts", "")))
+    return appended, execute_updates
+
+
 def _run_produce_scenario(writer_llm, approved_row: dict | None = None, route_llm=None, decisions_path=None,
                           *, approved_rows: list[dict] | None = None, run_kwargs: dict | None = None,
-                          content_llm=None):
+                          content_llm=None, pre_seed_content: list[tuple[str, str, dict]] | None = None,
+                          run_times: int = 1):
     """Chạy produce_from_sheet.run() THẬT với board/notifier/route_llm/writer_llm
-    giả lập qua monkeypatch — trả (result, board, notifier). Khôi phục mọi
-    monkeypatch trong finally (không rò rỉ sang test khác). `route_llm` mặc
-    định _EmptyRouteLLM() (Phase 4.9); Phase 4.12 truyền route_llm riêng để mô
-    phỏng Brief trả no_numeric_content=True. `decisions_path` (Phase (a)-SEAL):
-    truyền CÙNG path ở 2 lần gọi để mô phỏng route-once BỀN qua 2 lần chạy
-    produce() thật (mặc định mỗi lần gọi 1 thư mục tạm RIÊNG — không persist).
-    `approved_rows`/`run_kwargs` (VIỆC 5.1): nhiều dòng + kwargs cho run() (vd
-    topic_keys); mặc định 1 dòng `approved_row` + run(limit=5) như cũ.
-    `content_llm` (BƯỚC 3, rules v2.1): LLM cho VideoScriptAgent/InfographicSpecAgent
-    (khác route_llm/writer_llm) — mặc định None = KHÔNG patch, giữ hành vi cũ
-    (factory.build_content_llm() thật, offline->Mock)."""
+    giả lập qua monkeypatch + STORE thật (tmp SQLite, P2 store-as-truth) — trả
+    (result, board, notifier), `board` có thêm `.appended_content`/
+    `.execute_updates` ĐỌC LẠI từ store sau khi run() xong (xem
+    _read_back_produce_result). Khôi phục mọi monkeypatch + ENV
+    DOCUMENT_STORE_PATH trong finally (không rò rỉ sang test khác). `route_llm`
+    mặc định _EmptyRouteLLM() (Phase 4.9); Phase 4.12 truyền route_llm riêng để
+    mô phỏng Brief trả no_numeric_content=True. `decisions_path` (Phase
+    (a)-SEAL): truyền CÙNG path ở 2 lần gọi để mô phỏng route-once BỀN qua 2
+    lần chạy produce() thật (mặc định mỗi lần gọi 1 thư mục tạm RIÊNG — không
+    persist). `approved_rows`/`run_kwargs` (VIỆC 5.1): nhiều dòng + kwargs cho
+    run() (vd topic_keys); mặc định 1 dòng `approved_row` + run(limit=5) như
+    cũ. `content_llm` (BƯỚC 3, rules v2.1): LLM cho VideoScriptAgent/
+    InfographicSpecAgent (khác route_llm/writer_llm) — mặc định None = KHÔNG
+    patch, giữ hành vi cũ (factory.build_content_llm() thật, offline->Mock).
+    `pre_seed_content` (P2 store-as-truth, thay _BoardWithExistingArticle cũ):
+    list[(topic_key, content_type, payload)] ghi SẴN vào content_output +
+    content_status TRƯỚC khi gọi run() — mô phỏng "CONTENT đã có dòng này từ
+    trước" để kiểm existing_content_keys()/dedup. `run_times` (thay 2 lệnh gọi
+    run() thủ công cũ) — gọi run() liên tiếp NHIỀU LẦN trên CÙNG 1 store để
+    kiểm idempotent qua nhiều lượt chạy thật."""
     import tempfile
     from pathlib import Path
     sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
     import produce_from_sheet as pfs
+    from store import document_store as ds
+    from store import pipeline_store as ps
     from twmkt.config import Settings, load_settings as real_load_settings
 
     base = real_load_settings()
@@ -3598,16 +3640,26 @@ def _run_produce_scenario(writer_llm, approved_row: dict | None = None, route_ll
     test_settings = Settings(data)
 
     rows = approved_rows if approved_rows is not None else [approved_row]
-    board = _FakeProduceBoard(rows)
+    db_path = Path(tempfile.mkdtemp()) / "test_store.db"
+    ds.init_db(db_path)
+    for r in rows:
+        _seed_approved(r, db_path=db_path)
+    for tk, content_type, payload in (pre_seed_content or []):
+        ps.write_content_output(tk, content_type, payload, db_path=db_path)
+        ps.write_content_status(tk, content_type, gate2="PENDING", db_path=db_path)
+
+    board = _FakeProduceBoard()
     notifier = _FakeProduceNotifier()
     route_llm = route_llm if route_llm is not None else _EmptyRouteLLM()
 
+    orig_env = os.environ.get("DOCUMENT_STORE_PATH")
     orig = {
         "load_settings": pfs.load_settings, "_open_board": pfs._open_board,
         "make_notifier": pfs.make_notifier, "make_llm": pfs.factory.make_llm,
         "build_writer_llm": pfs.factory.build_writer_llm,
         "build_content_llm": pfs.factory.build_content_llm,
     }
+    os.environ["DOCUMENT_STORE_PATH"] = str(db_path)
     pfs.load_settings = lambda *a, **kw: test_settings
     pfs._open_board = lambda settings, **kw: board
     pfs.make_notifier = lambda settings: notifier
@@ -3616,6 +3668,8 @@ def _run_produce_scenario(writer_llm, approved_row: dict | None = None, route_ll
     if content_llm is not None:
         pfs.factory.build_content_llm = lambda settings, **kw: content_llm
     try:
+        for _ in range(run_times - 1):
+            pfs.run(**(run_kwargs if run_kwargs is not None else {"limit": 5}))
         result = pfs.run(**(run_kwargs if run_kwargs is not None else {"limit": 5}))
     finally:
         pfs.load_settings = orig["load_settings"]
@@ -3624,12 +3678,14 @@ def _run_produce_scenario(writer_llm, approved_row: dict | None = None, route_ll
         pfs.factory.make_llm = orig["make_llm"]
         pfs.factory.build_writer_llm = orig["build_writer_llm"]
         pfs.factory.build_content_llm = orig["build_content_llm"]
+        if orig_env is None:
+            os.environ.pop("DOCUMENT_STORE_PATH", None)
+        else:
+            os.environ["DOCUMENT_STORE_PATH"] = orig_env
+
+    board.appended_content, board.execute_updates = _read_back_produce_result(rows, db_path=db_path)
+    board.db_path = db_path   # cho test cần kiểm version count trực tiếp (vd idempotent qua nhiều run_times)
     return result, board, notifier
-
-
-def _approved_row(context: str, row: int, *, source: str = "", topic_key: str = "") -> dict:
-    return {"context": context, "hook": "hook gợi ý", "source": source, "tickers": [],
-           "group": "", "topic": "", "execute": "RUN", "row": row, "topic_key": topic_key}
 
 
 def test_run_article_done_writes_content_marks_execute_done_and_notifies():
@@ -3888,8 +3944,6 @@ def test_run_article_idempotent_skips_writer_when_already_in_content():
     """Idempotent (Lớp 5 Phase 2): (TopicKey,'article') ĐÃ có trong CONTENT
     (existing_content_keys, tra THEO KHÓA — không theo Context) -> KHÔNG gọi
     writer_llm lần nào (PoisonLLM raise nếu bị gọi), skip hoàn toàn."""
-    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
-    import produce_from_sheet as pfs
     from twmkt.curation.keys import compute_topic_key
 
     class _PoisonWriterLLM:
@@ -3899,43 +3953,15 @@ def test_run_article_idempotent_skips_writer_when_already_in_content():
     _URL = "https://example.com/bai-da-co-article"
     _KEY = compute_topic_key(_URL)
 
-    class _BoardWithExistingArticle(_FakeProduceBoard):
-        def existing_content_keys(self):
-            return {(_KEY, "article")}
+    _r, board, _n = _run_produce_scenario(
+        _PoisonWriterLLM(), _approved_row("Bài đã có article", row=2, source=_URL),
+        pre_seed_content=[(_KEY, "article", {"status": "DONE", "output": "x", "notes": "", "facts": "[]"})])
 
-    import tempfile
-    from pathlib import Path
-    from twmkt.config import Settings, load_settings as real_load_settings
-
-    base = real_load_settings()
-    data = dict(base.raw)
-    data["router"] = {"decisions_path": str(Path(tempfile.mkdtemp()) / "router_decisions.json")}
-    test_settings = Settings(data)
-    board = _BoardWithExistingArticle([_approved_row("Bài đã có article", row=2, source=_URL)])
-    notifier = _FakeProduceNotifier()
-
-    orig = {
-        "load_settings": pfs.load_settings, "_open_board": pfs._open_board,
-        "make_notifier": pfs.make_notifier, "make_llm": pfs.factory.make_llm,
-        "build_writer_llm": pfs.factory.build_writer_llm,
-    }
-    pfs.load_settings = lambda *a, **kw: test_settings
-    pfs._open_board = lambda settings, **kw: board
-    pfs.make_notifier = lambda settings: notifier
-    pfs.factory.make_llm = lambda settings: _EmptyRouteLLM()
-    pfs.factory.build_writer_llm = lambda settings: _PoisonWriterLLM()
-    try:
-        pfs.run(limit=5)   # KHÔNG raise -> PoisonLLM không hề bị gọi
-    finally:
-        pfs.load_settings = orig["load_settings"]
-        pfs._open_board = orig["_open_board"]
-        pfs.make_notifier = orig["make_notifier"]
-        pfs.factory.make_llm = orig["make_llm"]
-        pfs.factory.build_writer_llm = orig["build_writer_llm"]
-
-    # article KHÔNG được ghi lại (đã có sẵn, PoisonLLM chứng minh KHÔNG bị gọi).
-    assert not any(r[2] == "article" for r in board.appended_content)
-    # video/infographic vẫn được xử lý bình thường (existing_content_keys chỉ có
+    # run() KHÔNG raise (PoisonLLM chứng minh writer KHÔNG bị gọi) + article vẫn
+    # giữ NGUYÊN output đã pre-seed ("x") -- KHÔNG bị ghi đè/sinh lại.
+    article_rows = [r for r in board.appended_content if r[2] == "article"]
+    assert len(article_rows) == 1 and article_rows[0][4] == "x"
+    # video/infographic vẫn được xử lý bình thường (pre_seed_content chỉ có
     # article) -> lượt này sinh đủ CẢ 3 loại (article đã có từ trước + video/
     # infographic mới) -> Execute=DONE ĐÚNG theo logic cũ (_is_fully_produced),
     # KHÔNG phải vì writer chạy lại.
@@ -3944,189 +3970,41 @@ def test_run_article_idempotent_skips_writer_when_already_in_content():
 
 def test_run_twice_same_topic_key_no_duplicate_content_rows():
     """Lớp 5 Phase 2: produce CÙNG 1 chủ đề 2 lần (source URL cố định -> khoá
-    tất định) -> lần 2 KHÔNG sinh thêm dòng nào (existing_content_keys đọc lại
-    từ appended_content THẬT — mô phỏng đọc lại Sheet — tra THEO KHÓA, không
-    theo Context/row-index) — 0 trùng."""
-    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
-    import produce_from_sheet as pfs
-    from twmkt.sheets_board import CONTENT_HEADER, content_topic_keys
-
-    class _StatefulContentBoard(_FakeProduceBoard):
-        def existing_content_keys(self):
-            keys, _missing = content_topic_keys(CONTENT_HEADER, self.appended_content)
-            return keys
-
-        def existing_content_missing_keys(self):
-            _keys, missing = content_topic_keys(CONTENT_HEADER, self.appended_content)
-            return missing
+    tất định) -> lần 2 KHÔNG ghi version MỚI cho bất kỳ content_type nào
+    (existing_content_keys() đọc THẲNG store thật, tra THEO KHÓA — không theo
+    Context/row-index) — kiểm bằng SỐ VERSION (read_history), KHÔNG phải bằng
+    độ dài appended_content (chỉ đọc bản MỚI NHẤT nên không phân biệt được
+    "ghi 1 lần" với "ghi đè version 2" — version count mới là bằng chứng thật
+    KHÔNG trùng)."""
+    from store import document_store as ds
 
     class _CleanWriterLLM:
         def complete(self, system, prompt, *, model=None, fail_loud=False):
             return _clean_writer_json()
 
     _URL = "https://example.com/chu-de-lap-lai-2-lan"
-    board = _StatefulContentBoard([_approved_row("Chủ đề lặp lại 2 lần", row=2, source=_URL)])
-    notifier = _FakeProduceNotifier()
-
-    import tempfile
-    from pathlib import Path
-    from twmkt.config import Settings, load_settings as real_load_settings
-
-    base = real_load_settings()
-    data = dict(base.raw)
-    data["router"] = {"decisions_path": str(Path(tempfile.mkdtemp()) / "router_decisions.json")}
-    test_settings = Settings(data)
-
-    orig = {
-        "load_settings": pfs.load_settings, "_open_board": pfs._open_board,
-        "make_notifier": pfs.make_notifier, "make_llm": pfs.factory.make_llm,
-        "build_writer_llm": pfs.factory.build_writer_llm,
-    }
-    pfs.load_settings = lambda *a, **kw: test_settings
-    pfs._open_board = lambda settings, **kw: board
-    pfs.make_notifier = lambda settings: notifier
-    pfs.factory.make_llm = lambda settings: _EmptyRouteLLM()
-    pfs.factory.build_writer_llm = lambda settings: _CleanWriterLLM()
-    try:
-        pfs.run(limit=5)   # lần 1: sinh đủ 3 loại
-        pfs.run(limit=5)   # lần 2: CÙNG chủ đề, CÙNG khoá -> phải skip hết
-    finally:
-        pfs.load_settings = orig["load_settings"]
-        pfs._open_board = orig["_open_board"]
-        pfs.make_notifier = orig["make_notifier"]
-        pfs.factory.make_llm = orig["make_llm"]
-        pfs.factory.build_writer_llm = orig["build_writer_llm"]
+    row = _approved_row("Chủ đề lặp lại 2 lần", row=2, source=_URL)
+    _, board, _n = _run_produce_scenario(_CleanWriterLLM(), row, run_times=2)
 
     for t in ("article", "video", "infographic"):
         matching = [r for r in board.appended_content if r[2] == t]
         assert len(matching) == 1, f"{t}: kỳ vọng đúng 1 dòng sau 2 lượt chạy, thực tế {len(matching)}"
+        history = ds.read_history(row["topic_key"], "content_output", t, db_path=board.db_path)
+        assert len(history) == 1, f"{t}: kỳ vọng ĐÚNG 1 version sau 2 lượt chạy (không ghi đè), thực tế {len(history)}"
     assert board.execute_updates.get(2) == "DONE"
 
 
-def test_run_against_already_merged_content_no_duplicate_no_orphan():
-    """Lớp 5 Phase 2 — nghiệm thu bắt buộc: seed CONTENT với 3 dòng dạng dữ liệu
-    CŨ (TRƯỚC Sheet UI cleanup Phase 1) ĐÃ QUA mergeCells cũ (Context/Timestamp
-    dòng 2+ RỖNG, TopicKey nguyên — sống sót vì KHÔNG BAO GIỜ bị mergeCells đụng
-    tới) rồi produce lại CÙNG chủ đề (source URL cố định -> khoá tất định TRÙNG
-    khoá đã seed) -> KHÔNG sinh thêm gì (0 trùng), Execute=DONE NGAY (0 mồ côi —
-    hệ thống NHẬN RA đã đủ cả 3 loại dù 2/3 dòng có Context rỗng). Ghi MỚI từ
-    Phase 1 không còn tạo dữ liệu dạng này — test này giữ để đảm bảo tương thích
-    ngược khi đọc dữ liệu CŨ còn sót trên Sheet."""
-    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
-    import produce_from_sheet as pfs
-    from twmkt.sheets_board import CONTENT_HEADER, content_row, content_topic_keys
-    from twmkt.curation.keys import compute_topic_key
-
-    _URL = "https://example.com/chu-de-da-merge-roi-upsert-lai"
-    KEY = compute_topic_key(_URL)
-    seeded_rows = [
-        content_row(context="Chủ đề đã merge", type_="article", status="DONE", output="x", topic_key=KEY),
-        # mergeCells đã xoá Context+Timestamp của 2 dòng này -- TopicKey vẫn còn nguyên.
-        content_row(context="", type_="video", status="DONE", output="x", topic_key=KEY, ts=""),
-        content_row(context="", type_="infographic", status="DONE", output="x", topic_key=KEY, ts=""),
-    ]
-
-    class _MergedContentBoard(_FakeProduceBoard):
-        def existing_content_keys(self):
-            keys, _m = content_topic_keys(CONTENT_HEADER, seeded_rows + self.appended_content)
-            return keys
-
-        def existing_content_missing_keys(self):
-            _k, missing = content_topic_keys(CONTENT_HEADER, seeded_rows + self.appended_content)
-            return missing
-
-    class _PoisonWriterLLM:
-        def complete(self, *a, **kw):
-            raise AssertionError("KHÔNG được gọi writer -- chủ đề đã đủ cả 3 loại (đã merge)")
-
-    board = _MergedContentBoard([_approved_row("Chủ đề đã merge", row=2, source=_URL)])
-    notifier = _FakeProduceNotifier()
-
-    import tempfile
-    from pathlib import Path
-    from twmkt.config import Settings, load_settings as real_load_settings
-
-    base = real_load_settings()
-    data = dict(base.raw)
-    data["router"] = {"decisions_path": str(Path(tempfile.mkdtemp()) / "router_decisions.json")}
-    test_settings = Settings(data)
-
-    orig = {
-        "load_settings": pfs.load_settings, "_open_board": pfs._open_board,
-        "make_notifier": pfs.make_notifier, "make_llm": pfs.factory.make_llm,
-        "build_writer_llm": pfs.factory.build_writer_llm,
-    }
-    pfs.load_settings = lambda *a, **kw: test_settings
-    pfs._open_board = lambda settings, **kw: board
-    pfs.make_notifier = lambda settings: notifier
-    pfs.factory.make_llm = lambda settings: _EmptyRouteLLM()
-    pfs.factory.build_writer_llm = lambda settings: _PoisonWriterLLM()
-    try:
-        pfs.run(limit=5)
-    finally:
-        pfs.load_settings = orig["load_settings"]
-        pfs._open_board = orig["_open_board"]
-        pfs.make_notifier = orig["make_notifier"]
-        pfs.factory.make_llm = orig["make_llm"]
-        pfs.factory.build_writer_llm = orig["build_writer_llm"]
-
-    assert board.appended_content == []
-    assert board.execute_updates.get(2) == "DONE"
-
-
-def test_run_content_row_missing_topic_key_marks_needs_human_no_production():
-    """Lớp 5 Phase 2 INVARIANT: CONTENT đã có dòng CÙNG Context nhưng TopicKey
-    RỖNG (dữ liệu cũ chưa backfill/rekey) -> KHÔNG auto-map theo Context,
-    Execute=NEEDS_HUMAN, KHÔNG gọi writer (PoisonLLM raise nếu bị gọi), KHÔNG
-    ghi CONTENT thêm cho dòng này."""
-    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
-    import produce_from_sheet as pfs
-
-    class _PoisonWriterLLM:
-        def complete(self, *a, **kw):
-            raise AssertionError("KHÔNG được gọi writer khi CONTENT thiếu TopicKey (NEEDS_HUMAN)")
-
-    class _MissingKeyBoard(_FakeProduceBoard):
-        def existing_content_keys(self):
-            return set()   # TopicKey rỗng -> content_topic_keys() loại khỏi set khoá
-
-        def existing_content_missing_keys(self):
-            return ["Chủ đề thiếu khoá cũ"]
-
-    board = _MissingKeyBoard([_approved_row("Chủ đề thiếu khoá cũ", row=2)])
-    notifier = _FakeProduceNotifier()
-
-    import tempfile
-    from pathlib import Path
-    from twmkt.config import Settings, load_settings as real_load_settings
-
-    base = real_load_settings()
-    data = dict(base.raw)
-    data["router"] = {"decisions_path": str(Path(tempfile.mkdtemp()) / "router_decisions.json")}
-    test_settings = Settings(data)
-
-    orig = {
-        "load_settings": pfs.load_settings, "_open_board": pfs._open_board,
-        "make_notifier": pfs.make_notifier, "make_llm": pfs.factory.make_llm,
-        "build_writer_llm": pfs.factory.build_writer_llm,
-    }
-    pfs.load_settings = lambda *a, **kw: test_settings
-    pfs._open_board = lambda settings, **kw: board
-    pfs.make_notifier = lambda settings: notifier
-    pfs.factory.make_llm = lambda settings: _EmptyRouteLLM()
-    pfs.factory.build_writer_llm = lambda settings: _PoisonWriterLLM()
-    try:
-        pfs.run(limit=5)
-    finally:
-        pfs.load_settings = orig["load_settings"]
-        pfs._open_board = orig["_open_board"]
-        pfs.make_notifier = orig["make_notifier"]
-        pfs.factory.make_llm = orig["make_llm"]
-        pfs.factory.build_writer_llm = orig["build_writer_llm"]
-
-    assert board.appended_content == []
-    assert board.execute_updates.get(2) == "NEEDS_HUMAN"
-    assert any(e == "needs_human" for e, _ in notifier.events)
+# test_run_against_already_merged_content_no_duplicate_no_orphan (mergeCells
+# Sheet UI cleanup Phase 1 legacy) và test_run_content_row_missing_topic_key_
+# marks_needs_human_no_production (INVARIANT "CONTENT có Type nhưng TopicKey
+# rỗng") ĐÃ XOÁ ở P2 store-as-truth (nhánh feature/store-as-truth,
+# 2026-07-23): cả 2 test SHEET-ĐỜI-CŨ này — dữ liệu Sheet bị mergeCells xoá ô/
+# dữ liệu CONTENT chưa backfill TopicKey — không còn khả năng tồn tại trong
+# store (document_store.write_document() BẮT BUỘC topic_key ở MỌI write, xem
+# store/document_store.py). Nhánh missing_key_contexts/existing_content_
+# missing_keys() tương ứng trong produce_from_sheet.py::run() cũng đã bị xoá
+# (MOOT) trong refactor này -- xem comment "P2 store-as-truth: topic_key ĐÃ có
+# sẵn" đầu vòng lặp for item in approved.
 
 
 def test_phase3_adversarial_reorder_insert_delete_sort_topic_key_invariant_and_reproduce():
@@ -4226,60 +4104,30 @@ def test_phase3_adversarial_reorder_insert_delete_sort_topic_key_invariant_and_r
     assert approved_by_key[KEY_C]["context"] == "Chủ đề C probe"
 
     # ---- 7) PRODUCE LẠI sau reorder — upsert phải hạ ĐÚNG dòng theo khóa ----
-    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
-    import produce_from_sheet as pfs
-
-    class _ProbeBoard(_FakeProduceBoard):
-        def __init__(self, approved_rows, seed_content_rows):
-            super().__init__(approved_rows)
-            self._seed = list(seed_content_rows)
-
-        def existing_content_keys(self):
-            keys, _m = content_topic_keys(CONTENT_HEADER, self._seed + self.appended_content)
-            return keys
-
-        def existing_content_missing_keys(self):
-            _k, missing = content_topic_keys(CONTENT_HEADER, self._seed + self.appended_content)
-            return missing
-
-    approved_list = [approved_by_key[KEY_A], approved_by_key[KEY_B], approved_by_key[KEY_C]]
-    board = _ProbeBoard(approved_list, content_rows)
-    notifier = _FakeProduceNotifier()
-
-    import tempfile
-    from pathlib import Path
-    from twmkt.config import Settings, load_settings as real_load_settings
-
-    base = real_load_settings()
-    data = dict(base.raw)
-    data["router"] = {"decisions_path": str(Path(tempfile.mkdtemp()) / "router_decisions.json")}
-    test_settings = Settings(data)
-
+    # P2 store-as-truth: "reorder/insert/delete/sort dòng" (bước 4-6 trên) chỉ
+    # còn ý nghĩa cho sheets_board.py (đã nghiệm thu ở bước 6, KHÔNG đụng ở
+    # đây) -- store tra theo topic_key (SQL key), không có khái niệm "thứ tự
+    # dòng" nên seed lại qua pre_seed_content (dict, không phụ thuộc thứ tự).
     class _CleanWriterLLM:
         def complete(self, system, prompt, *, model=None, fail_loud=False):
             return _clean_writer_json()
 
-    orig = {
-        "load_settings": pfs.load_settings, "_open_board": pfs._open_board,
-        "make_notifier": pfs.make_notifier, "make_llm": pfs.factory.make_llm,
-        "build_writer_llm": pfs.factory.build_writer_llm,
-    }
-    pfs.load_settings = lambda *a, **kw: test_settings
-    pfs._open_board = lambda settings, **kw: board
-    pfs.make_notifier = lambda settings: notifier
-    pfs.factory.make_llm = lambda settings: _EmptyRouteLLM()
-    pfs.factory.build_writer_llm = lambda settings: _CleanWriterLLM()
-    try:
-        pfs.run(limit=10)
-    finally:
-        pfs.load_settings = orig["load_settings"]
-        pfs._open_board = orig["_open_board"]
-        pfs.make_notifier = orig["make_notifier"]
-        pfs.factory.make_llm = orig["make_llm"]
-        pfs.factory.build_writer_llm = orig["build_writer_llm"]
+    approved_list = [approved_by_key[KEY_A], approved_by_key[KEY_B], approved_by_key[KEY_C]]
+    seed = [(r[ik], r[it], {"status": "DONE", "output": r[io], "notes": "", "facts": "[]"})
+           for r in content_rows if r[ik]]
+    _r, board, notifier = _run_produce_scenario(
+        _CleanWriterLLM(), approved_rows=approved_list, run_kwargs={"limit": 10},
+        pre_seed_content=seed)
 
     # ---- 8) Nghiệm thu produce-lại: 0 trùng, 0 dòng mới sai chỗ ----
-    all_rows_after = content_rows + board.appended_content
+    # board.appended_content (đọc lại từ store) đã là TOÀN BỘ trạng thái HIỆN
+    # TẠI của A/B/C (pre_seed_content + mới sinh gộp lại, store không phân
+    # biệt "cũ"/"mới" — đọc bản MỚI NHẤT) -- CHỈ cộng thêm dòng "không liên
+    # quan" (topic NGOÀI approved_rows, store không đụng tới) để khớp nghiệm
+    # thu gốc, KHÔNG cộng lại content_rows cả khối (sẽ đếm TRÙNG giả với
+    # phần A/B đã pre-seed).
+    unrelated_rows = [r for r in content_rows if r[ik] == "unrelated-probe-key"]
+    all_rows_after = unrelated_rows + board.appended_content
     final_keys, final_missing = content_topic_keys(CONTENT_HEADER, all_rows_after)
     assert final_missing == []
     for key in (KEY_A, KEY_B, KEY_C):
@@ -4432,7 +4280,8 @@ def _slice_row(row: int = 2) -> dict:
     # hook = evidence (source="" -> fetch_full_evidence() lùi mượt về hook NGAY,
     # $0, không mạng — brief.evidence = evidence fixture, khớp facts.raw phía trên).
     return {"context": "Doanh thu quý 2 bứt phá", "hook": _SLICE_EVIDENCE, "source": "",
-           "tickers": [], "group": "", "topic": "", "execute": "RUN", "row": row}
+           "tickers": [], "group": "", "topic": "", "execute": "RUN", "row": row,
+           "topic_key": f"row-{row}-key"}
 
 
 def test_vertical_slice_a_full_quantitative_topic_three_channels_clean():
@@ -4517,7 +4366,6 @@ def test_vertical_slice_a_full_quantitative_topic_three_channels_clean():
     assert not inside_repo
 
     # --- Mắt xích: route-once BỀN qua 2 lần produce() THẬT (không chỉ 1 process) ---
-    board2, notifier2 = _FakeProduceBoard([_slice_row(row=2)]), _FakeProduceNotifier()
     poison_writer = _SliceCleanWriterLLM()
     result2, board2, notifier2 = _run_produce_scenario(
         poison_writer, _slice_row(), route_llm=_SliceRouterPoisonLLM(), decisions_path=decisions_path)
@@ -4840,6 +4688,33 @@ def test_default_disclaimer_reads_from_brand_yaml_footer():
     assert _default_disclaimer({}) == "Nội dung mang tính thông tin, không phải khuyến nghị đầu tư."
 
 
+def test_analysis_fields_overwrites_llm_disclaimer_that_differs_from_canonical():
+    """E' (2026-07-24, theo chỉ đạo Lead) -- disclaimer là dòng miễn trừ trách
+    nhiệm PHÁP LÝ: LLM viết khác chữ (không rỗng) so với bản chuẩn
+    (config/brand.yaml: footer.disclaimer) -> analysis_fields_from_data() PHẢI
+    ghi đè bằng bản chuẩn TẠI CHỖ, và render_analysis() (nối disclaimer vào
+    body) chỉ được thấy ĐÚNG MỘT disclaimer trong output cuối -- KHÔNG đôi."""
+    from twmkt.agents.production import (
+        ProductionBrief, _default_disclaimer, analysis_fields_from_data, render_analysis,
+    )
+
+    canonical = _default_disclaimer()
+    llm_data = {
+        "title": "Tiêu đề", "sapo": "Tóm tắt.",
+        "sections": [{"heading": "Bối cảnh", "content": "Nội dung."}],
+        "disclaimer": "Đây là câu LLM tự viết lại, khác bản chuẩn.",
+        "sources": [],
+    }
+    brief = ProductionBrief(title="T", hook="H", url="https://cafef.vn/x.chn", evidence="E")
+
+    title, sapo, sections, disclaimer, sources = analysis_fields_from_data(llm_data, brief)
+    assert disclaimer == canonical   # ghi đè, KHÔNG giữ bản LLM viết
+
+    body = render_analysis(title, sapo, sections, disclaimer, sources, brief)
+    assert body.count(canonical) == 1   # ĐÚNG MỘT bản, không nối thêm
+    assert "Đây là câu LLM tự viết lại" not in body   # bản LLM KHÔNG còn sót trong output
+
+
 def test_render_analysis_and_video_use_dynamic_cta_not_hardcoded_brand():
     """Regression trực tiếp cho sự cố THẬT: render_analysis (article) VÀ
     video_fields_from_data (video, cả đường LLM-thiếu-cta LẪN đường lùi mượt
@@ -5023,6 +4898,170 @@ def test_produce_from_sheet_insufficient_scenes_marks_needs_human_no_crash():
     assert len(video_rows) == 1
     assert video_rows[0][3] == "NEEDS_HUMAN"
     assert "chuyển loại" in video_rows[0][5]   # Notes
+
+
+def test_run_and_run_draft_die_only_at_sheet_native_config_reads_when_credential_off():
+    """P2 store-as-truth -- NGHIỆM THU Nguyên tắc 3 ("Pipeline và Sheet KHÔNG
+    BIẾT NHAU"): TẮT HẲN credential Sheet (spreadsheet_id/creds_path rỗng, ENV
+    TWMKT_SHEET_ID/TWMKT_SHEETS_CREDS xoá) rồi chạy run()/run_draft() THẬT với
+    1 topic đã APPROVE/RUN trong store. Nếu code còn đụng Sheet SỚM hơn 2 điểm
+    đọc config được phép (read_sources/read_prompt_versions, xem docstring
+    run()) thì lỗi sẽ nổ SỚM hơn/khác thông điệp mong đợi -- test này bắt
+    ĐÚNG CHỖ CHẾT, không chỉ "có lỗi là được". Trước lazy-load (2026-07-24)
+    test này chết ngay ở board = _open_board() đầu hàm, TRƯỚC khi chạm
+    ps.list_approved_topics() -- xem git history/báo cáo Bước 2 cho bằng
+    chứng cũ. run_ingest() chạy đối chứng: KHÔNG cần board (đọc lại từ
+    *.brief.json có sẵn, xem test_run_draft_then_run_ingest_round_trip...)."""
+    import pytest
+    import tempfile
+    from pathlib import Path
+
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+    import produce_from_sheet as pfs
+    from store import document_store as ds
+    from twmkt.config import Settings, load_settings as real_load_settings
+
+    base = real_load_settings()
+    data = dict(base.raw)
+    data["sheets"] = {"spreadsheet_id": "", "creds_path": ""}   # TẮT HẲN credential
+    test_settings = Settings(data)
+
+    row = _approved_row("Bài kiểm credential tắt", row=2)
+    db_path = Path(tempfile.mkdtemp()) / "test_store.db"
+    ds.init_db(db_path)
+    _seed_approved(row, db_path=db_path)
+
+    orig_env_db = os.environ.get("DOCUMENT_STORE_PATH")
+    orig_env_sheet_id = os.environ.pop("TWMKT_SHEET_ID", None)
+    orig_env_creds = os.environ.pop("TWMKT_SHEETS_CREDS", None)
+    orig_load_settings = pfs.load_settings
+    os.environ["DOCUMENT_STORE_PATH"] = str(db_path)
+    pfs.load_settings = lambda *a, **kw: test_settings
+    try:
+        # run(): phải chạy TRỌN store logic (đọc approved, brief/router/writer,
+        # guardrail, ghi content_output) rồi CHẾT ĐÚNG ở get_board() bên trong
+        # -- verify bằng thông điệp SystemExit của _open_board(), KHÔNG chỉ
+        # "raise gì đó" (tránh false-positive nếu 1 lỗi KHÁC xảy ra sớm hơn).
+        with pytest.raises(SystemExit, match="Thiếu sheets.spreadsheet_id/creds_path"):
+            pfs.run(limit=5, offline=True)
+
+        # run_draft(): cùng điểm chết, cùng lý do.
+        with pytest.raises(SystemExit, match="Thiếu sheets.spreadsheet_id/creds_path"):
+            pfs.run_draft(limit=5)
+
+        # run_ingest(): KHÔNG cần Sheet -- chạy sạch, KHÔNG raise (đối chứng âm).
+        result = pfs.run_ingest()
+        assert result == {"ingested": 0, "skipped": 0, "pending": 0}
+    finally:
+        pfs.load_settings = orig_load_settings
+        if orig_env_db is None:
+            os.environ.pop("DOCUMENT_STORE_PATH", None)
+        else:
+            os.environ["DOCUMENT_STORE_PATH"] = orig_env_db
+        if orig_env_sheet_id is not None:
+            os.environ["TWMKT_SHEET_ID"] = orig_env_sheet_id
+        if orig_env_creds is not None:
+            os.environ["TWMKT_SHEETS_CREDS"] = orig_env_creds
+
+
+def test_run_draft_then_run_ingest_round_trip_writes_store_and_marks_done():
+    """P2 store-as-truth: run_draft() ghi infographic vào store NGAY + chuẩn bị
+    *.brief.json (field "topic_key" -- THAY "execute_row" cũ, xem docstring
+    run_draft()) + *.<type>.prompt.md; giả lập Claude Code viết *.article.json/
+    *.video.json cạnh đó; run_ingest() đọc ĐÚNG topic_key từ brief.json (KHÔNG
+    đoán lại) -> ghi article+video vào store, Execute=DONE khi đủ cả 3 loại,
+    dọn sạch file tạm. Test NGUYÊN 1 vòng draft->ingest thật, KHÔNG mock 2 hàm
+    này -- đây là bằng chứng "brief.json topic_key" nối đúng giữa 2 hàm."""
+    import json
+    import tempfile
+    from pathlib import Path
+
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+    import produce_from_sheet as pfs
+    from store import document_store as ds
+    from store import pipeline_store as ps
+    from twmkt.config import Settings, load_settings as real_load_settings
+
+    base = real_load_settings()
+    test_settings = Settings(dict(base.raw))
+
+    _URL = "https://example.com/bai-draft-ingest-round-trip"
+    row = _approved_row("Bài draft ingest round trip", row=2, source=_URL)
+    db_path = Path(tempfile.mkdtemp()) / "test_store.db"
+    ds.init_db(db_path)
+    _seed_approved(row, db_path=db_path)
+
+    board = _FakeProduceBoard()
+    orig_env = os.environ.get("DOCUMENT_STORE_PATH")
+    orig = {"load_settings": pfs.load_settings, "_open_board": pfs._open_board}
+    os.environ["DOCUMENT_STORE_PATH"] = str(db_path)
+    pfs.load_settings = lambda *a, **kw: test_settings
+    pfs._open_board = lambda settings, **kw: board
+    # Đăng ký TOÀN BỘ đường dẫn file tạm CÓ THỂ được ghi NGAY (trước khi gọi
+    # run_draft(), không đợi assert nào chạy xong) -- tránh rò file thật vào
+    # data_root() ngoài repo nếu test fail giữa chừng (đã xảy ra 1 lần khi viết
+    # test này: NameError giữa chừng để lại 3 file *.prompt.md/*.brief.json
+    # thật, khiến lượt chạy lại SAU đó tưởng "đã chuẩn bị" và bỏ qua -- dọn thủ
+    # công + sửa lại thứ tự này).
+    slug = pfs._slug(row["context"])
+    drafts_dir = pfs.data_path(test_settings.get("storage.drafts_dir", "state/production_drafts"),
+                               pfs._today(), settings=test_settings)
+    brief_path = drafts_dir / f"{slug}.brief.json"
+    article_answer = drafts_dir / f"{slug}.article.json"
+    video_answer = drafts_dir / f"{slug}.video.json"
+    created_files: list[Path] = [
+        brief_path, article_answer, video_answer,
+        drafts_dir / f"{slug}.article.prompt.md", drafts_dir / f"{slug}.video.prompt.md",
+    ]
+    try:
+        draft_result = pfs.run_draft(limit=5)
+        assert draft_result["infographic_done"] == 1
+        assert draft_result["prepared"] == 2   # article + video prompt chuẩn bị
+        assert brief_path.exists()
+        brief_raw = json.loads(brief_path.read_text(encoding="utf-8"))
+        assert brief_raw["topic_key"] == row["topic_key"]
+        assert "execute_row" not in brief_raw   # field Sheet-era cũ ĐÃ bỏ
+
+        article_answer.write_text(json.dumps({
+            "title": "Tiêu đề test", "sapo": "Tóm tắt.",
+            "sections": [{"heading": "Bối cảnh", "content": "Nội dung thân bài."}],
+            "disclaimer": "Nội dung chỉ mang tính thông tin, không phải khuyến nghị đầu tư. "
+                          "Nhà đầu tư tự chịu trách nhiệm với quyết định của mình.",
+            "sources": [],
+        }, ensure_ascii=False), encoding="utf-8")
+        video_answer.write_text(json.dumps({
+            "title": "Tiêu đề video test",
+            "scenes": [
+                {"role": "hook", "visual_kind": "statement", "payload": {"hero": "a"}, "narration": "Mở đầu."},
+                {"role": "body", "visual_kind": "statement", "payload": {"hero": "b"}, "narration": "Thân bài."},
+                {"role": "outro", "visual_kind": "outro", "payload": {"brand_name": "FVA"}, "narration": "Cảm ơn."},
+            ],
+            "disclaimer": "Nội dung chỉ mang tính thông tin, không phải khuyến nghị đầu tư.",
+        }, ensure_ascii=False), encoding="utf-8")
+
+        ingest_result = pfs.run_ingest()
+    finally:
+        pfs.load_settings = orig["load_settings"]
+        pfs._open_board = orig["_open_board"]
+        if orig_env is None:
+            os.environ.pop("DOCUMENT_STORE_PATH", None)
+        else:
+            os.environ["DOCUMENT_STORE_PATH"] = orig_env
+        for f in created_files:
+            f.unlink(missing_ok=True)
+
+    assert ingest_result["ingested"] == 2   # article + video
+    assert ingest_result["flagged"] == 0
+    article_out = ps.read_content_output(row["topic_key"], "article", db_path=db_path)
+    video_out = ps.read_content_output(row["topic_key"], "video", db_path=db_path)
+    infographic_out = ps.read_content_output(row["topic_key"], "infographic", db_path=db_path)
+    assert article_out["status"] == "DONE"
+    assert video_out["status"] == "DONE"
+    assert infographic_out is not None   # ghi bởi run_draft(), vẫn còn nguyên
+    gate = ps.read_gate_status(row["topic_key"], db_path=db_path)
+    assert gate["execute"] == "DONE"   # đủ cả 3 loại (infographic+article+video)
+    # file tạm đã dọn sạch (brief/prompt xoá sau khi đủ, answer xoá ngay sau ingest).
+    assert not brief_path.exists()
 
 
 def test_infographic_composer_falls_back_to_deterministic_spec_when_llm_fails():

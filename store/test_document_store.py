@@ -182,3 +182,82 @@ def test_unique_constraint_now_includes_content_type(db_path):
             ("t1", "content_output", "video", 1, "{}", "2026-01-01T00:00:00+00:00", "ma"),
         )
         conn.commit()
+
+
+# --- P2 store-as-truth (2026-07-23) -- layer gate_status/content_status ----
+
+def test_gate_status_write_and_read_round_trip(db_path):
+    """gate_status: content_type='' (TOPIC-level, giống raw/brief) -- không
+    BẮT BUỘC content_type như content_output/content_status."""
+    v = ds.write_document(
+        "t1", "gate_status", {"gate1": "APPROVE", "execute": "RUN", "output_type": ["infographic"]},
+        "ma", db_path=db_path,
+    )
+    assert v == 1
+    assert ds.read_latest("t1", "gate_status", "", db_path=db_path) == {
+        "gate1": "APPROVE", "execute": "RUN", "output_type": ["infographic"],
+    }
+
+
+def test_content_status_requires_content_type(db_path):
+    """content_status CÙNG NẾP content_output -- thiếu content_type -> lỗi
+    SỚM (ValueError), không âm thầm nhận '' rồi tái diễn BUG 1."""
+    with pytest.raises(ValueError, match="content_status.*BẮT BUỘC content_type"):
+        ds.write_document("t1", "content_status", {"gate2": "APPROVE"}, "ma", db_path=db_path)
+
+
+def test_content_status_write_and_read_round_trip(db_path):
+    v = ds.write_document(
+        "t1", "content_status",
+        {"gate2": "APPROVE", "gate3": "PENDING", "asset_url": "https://drive.google.com/x"},
+        "ma", content_type="infographic", db_path=db_path,
+    )
+    assert v == 1
+    payload = ds.read_latest("t1", "content_status", "infographic", db_path=db_path)
+    assert payload["gate2"] == "APPROVE"
+    assert payload["asset_url"] == "https://drive.google.com/x"
+
+
+def test_gate_status_version_increments_on_repeated_writes(db_path):
+    """gate_status đổi liên tục (mỗi lần user bấm duyệt) -- version phải tự
+    tăng bình thường như mọi layer khác, không đặc cách."""
+    v1 = ds.write_document("t1", "gate_status", {"gate1": "PENDING"}, "ma", db_path=db_path)
+    v2 = ds.write_document("t1", "gate_status", {"gate1": "APPROVE"}, "ma", db_path=db_path)
+    assert (v1, v2) == (1, 2)
+    assert ds.read_latest("t1", "gate_status", "", db_path=db_path) == {"gate1": "APPROVE"}
+
+
+def test_content_status_version_counter_independent_per_content_type(db_path):
+    v1 = ds.write_document("t1", "content_status", {"gate2": "PENDING"}, "ma",
+                           content_type="infographic", db_path=db_path)
+    v2 = ds.write_document("t1", "content_status", {"gate2": "APPROVE"}, "ma",
+                           content_type="infographic", db_path=db_path)
+    v_video = ds.write_document("t1", "content_status", {"gate2": "PENDING"}, "ma",
+                                content_type="video", db_path=db_path)
+    assert (v1, v2, v_video) == (1, 2, 1)
+
+
+def test_check_constraint_blocks_aigen_writing_gate_status(db_path):
+    with pytest.raises(sqlite3.IntegrityError):
+        ds.write_document("t1", "gate_status", {}, "aigen", db_path=db_path)
+
+
+def test_check_constraint_blocks_aigen_writing_content_status(db_path):
+    with pytest.raises(sqlite3.IntegrityError):
+        ds.write_document("t1", "content_status", {}, "aigen", content_type="video", db_path=db_path)
+
+
+def test_write_document_rejects_empty_topic_key(db_path):
+    """P2 store-as-truth (2026-07-23) -- schema CHỈ có NOT NULL (chặn None),
+    KHÔNG chặn chuỗi rỗng '' (xác nhận thực nghiệm: write_document('', ...)
+    từng ghi thành công TRƯỚC guard này). Đây là test THAY cho
+    test_run_content_row_missing_topic_key_marks_needs_human_no_production đã
+    xoá ở produce_from_sheet -- INVARIANT "không document mồ côi" giờ enforce ở
+    ĐÂY (tầng store, chặn TẠI NGUỒN) thay vì phòng thủ ở tầng pipeline."""
+    with pytest.raises(ValueError, match="topic_key rỗng"):
+        ds.write_document("", "raw", {"a": 1}, "ma", db_path=db_path)
+
+
+def test_write_document_rejects_none_topic_key(db_path):
+    with pytest.raises(ValueError, match="topic_key rỗng"):
+        ds.write_document(None, "raw", {"a": 1}, "ma", db_path=db_path)

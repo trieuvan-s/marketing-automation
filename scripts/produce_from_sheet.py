@@ -73,6 +73,7 @@ from urllib.parse import urlparse
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
+sys.path.insert(0, str(REPO_ROOT))
 
 from twmkt._encoding import ensure_utf8_stdio  # noqa: E402
 
@@ -92,10 +93,11 @@ from twmkt.agents.route_once import RouterDecisionStore, get_or_route  # noqa: E
 from twmkt.agents.voice import assemble_voice  # noqa: E402
 from twmkt.agents.writer import WriterOutcome, run_writer_with_retry  # noqa: E402
 from twmkt.config import data_path, load_settings  # noqa: E402
-from twmkt.curation.keys import assign_topic_key  # noqa: E402
 from twmkt.models import ContentDraft, ContentFormat, Source  # noqa: E402
 from twmkt.sheets_board import SheetsBoard, content_row, facts_to_json  # noqa: E402
 from twmkt.utils.telegram_notifier import make_notifier  # noqa: E402
+
+from store import pipeline_store as ps  # noqa: E402
 
 _OUTPUT_PREVIEW = 1500   # số ký tự Output đưa lên Sheet (đủ xem; full lưu ra file)
 _ALL_TYPES = ("infographic", "article", "video")   # 3 loại all_production_agents() sinh (C7: "video" khớp Sheet)
@@ -132,6 +134,18 @@ def _is_fully_produced_channels(topic_key: str, seen: set[tuple[str, str]], chan
     channels[c]=False KHÔNG chặn DONE (chủ động không sinh, KHÔNG phải thiếu).
     Dùng cho run() (Phase 4.9+, có RouterDecision thật)."""
     return all((topic_key, _CHANNEL_TO_TYPE[c]) in seen for c, enabled in channels.items() if enabled)
+
+
+def _write_content(topic_key: str, type_: str, *, status: str, output: str, notes: str, facts_json: str) -> None:
+    """P2 store-as-truth: ghi 1 sản phẩm MỚI (chưa từng có trong `seen` — caller
+    đảm bảo) vào store -- 2 layer riêng: `content_output` (nội dung sinh ra,
+    coi như bất biến) + `content_status` khởi tạo gate2=PENDING/gate3 để trống
+    (INVARIANT gate3 không do máy ghi -- xem docstring content_row() cũ,
+    write_content_status() merge-on-write nên không truyền gate3 = giữ trống)."""
+    ps.write_content_output(topic_key, type_, {
+        "status": status, "output": output, "notes": notes, "facts": facts_json,
+    })
+    ps.write_content_status(topic_key, type_, gate2="PENDING")
 
 
 def _slug(text: str, n: int = 40) -> str:
@@ -202,19 +216,42 @@ def run_sync_only() -> dict:
 
 def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
         setup: bool = False, topic_keys: list[str] | None = None) -> dict:
-    """Sản xuất cho các dòng CONTEXT Status=APPROVE + Execute∈{RUN,FAILED}.
+    """Sản xuất cho các topic Gate1=APPROVE + Execute∈{RUN,FAILED} — P2
+    store-as-truth (nhánh feature/store-as-truth): đọc/ghi STORE
+    (store/pipeline_store.py), KHÔNG còn đọc/ghi tab CONTEXT/CONTENT trên
+    Sheet trực tiếp. `board` ở đây CHỈ còn dùng cho 3 việc Sheet-native theo
+    quyết định Bước 1 (log/PROMPTS/SOURCES — do người quản lý trực tiếp trên
+    Sheet, không phải trạng thái nội dung cần store làm nguồn sự thật). Sheet
+    thấy được kết quả của run() qua store/sync_service.py (Bước 3, chưa xây ở
+    phase này) — KHÔNG qua đường này.
 
     `topic_keys` (VIỆC 5.1 — điểm ráp webhook per-topic):
-      - None (mặc định) -> HÀNH VI CŨ: quét TẤT CẢ dòng đủ điều kiện, cắt theo
+      - None (mặc định) -> HÀNH VI CŨ: quét TẤT CẢ topic đủ điều kiện, cắt theo
         `limit`. Scheduler 30' (system_power_on) KHÔNG phải sửa — tương thích ngược.
-      - list -> CHỈ xử lý các dòng có TopicKey nằm trong danh sách (dòng user bấm
+      - list -> CHỈ xử lý các topic có TopicKey nằm trong danh sách (user bấm
         Execute qua webhook). `limit` BỊ BỎ QUA để không âm thầm cắt cụt danh sách.
     Trả dict tổng hợp {approved, produced, skipped}. `run()` là NƠI DUY NHẤT ghi
-    cờ Execute (DONE/FAILED/NEEDS_HUMAN) lên Sheet — webhook chỉ đọc lại để trả
+    cờ Execute (DONE/FAILED/NEEDS_HUMAN) vào STORE — webhook chỉ đọc lại để trả
     trạng thái (xem api/, VIỆC 5.2-5.5), KHÔNG tự ghi Execute (tránh 2 nguồn
     trạng thái, VIỆC 5.2/5.3)."""
     settings = load_settings()
-    board = _open_board(settings, setup=setup)
+    # LAZY-LOAD (2026-07-24, theo chỉ đạo Lead): board CHỈ còn cần cho
+    # read_sources()/read_prompt_versions() (2 việc Sheet-native còn lại) —
+    # KHÔNG khởi tạo NGAY ở đây nữa. Trước đây _open_board() gọi sớm hơn
+    # NHIỀU so với chỗ nó thật sự dùng -> pipeline đòi Sheet credential cho 1
+    # việc mãi về sau mới cần, dù toàn bộ dữ liệu (approved/content/execute)
+    # đã đọc/ghi qua store rồi. Lazy-load đưa phụ thuộc về ĐÚNG vị trí nó tồn
+    # tại — SAI kiến trúc trước đây, độc lập chuyện có test hay không.
+    # get_board() KHÔNG bắt exception của _open_board() (SystemExit khi thiếu
+    # sheets.spreadsheet_id/creds_path) — để lỗi NỔ RÕ đúng chỗ, KHÔNG nuốt,
+    # KHÔNG fallback rỗng im lặng (nuốt lỗi ở đây sẽ khiến pipeline sinh 0 sản
+    # phẩm mà không ai biết vì sao — tệ hơn crash).
+    _board_holder: list[SheetsBoard] = []
+    def get_board() -> SheetsBoard:
+        if not _board_holder:
+            _board_holder.append(_open_board(settings, setup=setup))
+        return _board_holder[0]
+
     notifier = make_notifier(settings)   # PHASE TELE — no-op êm nếu chưa cấu hình; KHỞI TẠO Ở TẦNG CAO NHẤT
 
     # --- LLM ĐẮT cho Producers video/infographic (đường 3-agent cũ, Sonnet mặc
@@ -228,7 +265,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
     print(banner)
     content_llm = factory.build_content_llm(settings, offline=not use_llm, model=model)
     engine = factory.model_engine_label(llm.content_model, use_llm=use_llm)
-    board.log("INFO", banner, engine=engine)
+    ps.write_log("INFO", banner, engine=engine)
 
     # --- LLM RIÊNG cho ARTICLE (Phase 4.9: Brief -> route-once -> Writer-with-
     # retry) — adapter make_llm/step_model, SONG SONG với content_llm/LLMRouter
@@ -239,93 +276,67 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
     router_store = RouterDecisionStore(
         data_path(settings.get("router.decisions_path", "state/router_decisions.json"), settings=settings))
 
-    # Execute: dòng vừa APPROVE (Execute rỗng) -> tự đặt RUN; rồi xử lý dòng
-    # Status=APPROVE VÀ Execute ĐANG "RUN" (mới/đã reset tay) HOẶC "FAILED"
-    # (Phase 4.9: lỗi TẠM THỜI của bài article — TỰ ĐỘNG tái chạy, không cần
-    # người reset). Execute=DONE (xong hẳn) / NEEDS_HUMAN (chờ người) -> bỏ qua,
-    # idempotent — produce chạy lại KHÔNG sinh Content trùng, KHÔNG đụng dòng
+    # P2 store-as-truth: gate1/execute đọc TRỰC TIẾP từ store (gate_status
+    # layer) — KHÔNG còn gọi board.sync_approve_execute_flags() (bridge
+    # Gate1->Execute="RUN" lần đầu giờ là việc của sync service, chiều
+    # Sheet->store, Bước 3 — chưa xây ở phase này). Execute=DONE (xong hẳn) /
+    # NEEDS_HUMAN (chờ người) -> ps.list_approved_topics() đã tự lọc bỏ,
+    # idempotent — produce chạy lại KHÔNG sinh Content trùng, KHÔNG đụng topic
     # đang chờ người can thiệp.
-    board.sync_approve_execute_flags()
-    approved = [a for a in board.read_approved_context() if a["execute"] in ("RUN", "FAILED")]
-    # VIỆC 5.1: webhook per-topic -> lọc ĐÚNG các dòng user bấm (khớp TopicKey
-    # đã lưu ở cột CONTEXT). None = quét cả lô như cũ. Dòng chưa có TopicKey
-    # (rỗng) KHÔNG khớp bất kỳ key nào -> tự loại, đúng ý (không target được).
+    approved = ps.list_approved_topics()
+    # VIỆC 5.1: webhook per-topic -> lọc ĐÚNG các topic user bấm (khớp TopicKey
+    # đã lưu ở store). None = quét cả lô như cũ.
     if topic_keys is not None:
         wanted = set(topic_keys)
         approved = [a for a in approved if a["topic_key"] in wanted]
     if not approved:
-        print("Không có dòng CONTEXT nào Status=APPROVE và Execute=RUN/FAILED (chưa sản xuất "
-              "hoặc đang chờ NEEDS_HUMAN). Duyệt ở tab CONTEXT trước.")
+        print("Không có topic nào Gate1=APPROVE và Execute=RUN/FAILED (chưa sản xuất "
+              "hoặc đang chờ NEEDS_HUMAN). Duyệt Gate1 trước (qua Sheet, sync service nạp vào store).")
         return {"approved": 0, "produced": 0, "skipped": 0}
     # `limit` CHỈ áp đường quét-cả-lô. Khi lọc theo topic_keys, xử ĐỦ danh sách
     # (BỎ QUA limit — không để limit=5 cắt cụt danh sách user bấm, VIỆC 5.1).
     if topic_keys is None:
         approved = approved[:limit]
 
-    # PROMPTS: đọc LIVE tab (Name|Version|Enable) -> resolve prompts/<name>.<v>.md;
-    # thiếu tab/dòng/file -> giữ default nội bộ trong code (KHÔNG crash). LƯU Ý
-    # (Phase 4.9): override "analysis" (article) KHÔNG còn áp dụng — đường
-    # article mới dùng voice-lock động (agents/voice.assemble_voice theo
-    # RouterDecision), KHÔNG qua prompt_overrides; override "video"/
-    # "infographic" vẫn áp dụng như cũ.
+    # PROMPTS: Sheet-native theo quyết định Bước 1 (người quản lý trực tiếp
+    # trên Sheet, không phải trạng thái nội dung) — đọc LIVE tab (Name|
+    # Version|Enable) -> resolve prompts/<name>.<v>.md; thiếu tab/dòng/file ->
+    # giữ default nội bộ trong code (KHÔNG crash). LƯU Ý (Phase 4.9): override
+    # "analysis" (article) KHÔNG còn áp dụng — đường article mới dùng
+    # voice-lock động (agents/voice.assemble_voice theo RouterDecision), KHÔNG
+    # qua prompt_overrides; override "video"/"infographic" vẫn áp dụng như cũ.
     default_prompts = {a.prompt_name: a.system for a in all_production_agents()}
     prompt_overrides = resolve_prompts(
-        board.read_prompt_versions(), default_prompts,
+        get_board().read_prompt_versions(), default_prompts,
         prompts_dir=settings.get("prompts.dir", "prompts"))
 
-    # Full-fetch thân bài thật (tất định, $0) cho từng dòng APPROVE -> evidence
-    # thật để LLM bám + chống bịa số (khớp nguồn đăng ký theo TÊN MIỀN).
-    sources = board.read_sources() or factory.build_sources(settings)
+    # Full-fetch thân bài thật (tất định, $0) cho từng topic APPROVE -> evidence
+    # thật để LLM bám + chống bịa số (khớp nguồn đăng ký theo TÊN MIỀN). SOURCES
+    # Sheet-native theo quyết định Bước 1 (danh sách nguồn do người quản lý).
+    sources = get_board().read_sources() or factory.build_sources(settings)
     html_collector = factory.build_collector_for_source(Source("_", "_", fetch_type="html"), settings)
 
-    seen = board.existing_content_keys()   # Lớp 5 Phase 2: (TopicKey, Type) đã sinh -> bỏ qua
-    # Context của các dòng CONTENT cũ có Type nhưng TopicKey RỖNG (chưa backfill/
-    # rekey) — INVARIANT cấm auto-map các dòng này theo Context, xem nhánh
-    # needs_human_rows bên dưới (Lead đã chốt: NEEDS_HUMAN + bỏ qua, không liều
-    # sinh tiếp có thể đụng dữ liệu không định danh được).
-    missing_key_contexts = set(board.existing_content_missing_keys())
+    seen = ps.existing_content_keys()   # Lớp 5 Phase 2: (TopicKey, Type) đã sinh -> bỏ qua
     out_dir = data_path(settings.get("storage.output_dir", "output"), _today(), settings=settings)
     out_dir.mkdir(parents=True, exist_ok=True)
     approx_tol = float(settings.get("guardrail.approx_tolerance_pct", 5)) / 100
 
-    rows: list[list[str]] = []
-    done_rows: list[int] = []          # đủ CẢ 3 loại -> Execute=DONE
-    failed_rows: list[int] = []        # Phase 4.9: article FAILED (lỗi tạm thời) -> Execute=FAILED
-    needs_human_rows: list[int] = []   # Phase 4.9: article NEEDS_HUMAN (guardrail reject) -> chờ người
-    topic_key_updates: dict[int, str] = {}   # Phase 1R.2: dòng CONTEXT vừa được GÁN khoá mới -> ghi lại NGAY
-    produced = skipped = flagged = 0
+    done_topics: list[str] = []          # đủ CẢ 3 loại -> Execute=DONE
+    failed_topics: list[str] = []        # Phase 4.9: article FAILED (lỗi tạm thời) -> Execute=FAILED
+    needs_human_topics: list[str] = []   # Phase 4.9: article NEEDS_HUMAN (guardrail reject) -> chờ người
+    written = produced = skipped = flagged = 0
     for item in approved:
-        notifier.notify("start", topic=item["context"], row=item["row"], actor=_DEFAULT_ACTOR)
-
-        # Lớp 5 Phase 2 — INVARIANT: match-or-insert TRA THEO TopicKey ĐÃ LƯU,
-        # TUYỆT ĐỐI không tự đoán/auto-map theo Context. Nếu CONTENT đã có dòng
-        # (Type bất kỳ) CÙNG Context này nhưng TopicKey RỖNG (dữ liệu cũ chưa
-        # backfill/rekey — xem existing_content_missing_keys), KHÔNG THỂ biết
-        # chắc dòng đó có trùng chủ đề với item hiện tại hay không theo khoá ->
-        # dừng lại, đặt NEEDS_HUMAN, KHÔNG sản xuất (tránh liều sinh tạo bản
-        # trùng "vô hình" với dòng cũ không định danh được).
-        if item["context"] in missing_key_contexts:
-            needs_human_rows.append(item["row"])
-            reason = ("CONTENT đã có dòng cùng Context nhưng TopicKey rỗng (dữ liệu cũ "
-                     "chưa backfill/rekey) -> không thể match-or-insert theo khoá an toàn. "
-                     "Chạy scripts/backfill_topic_keys.py rồi đổi Execute về RUN.")
-            notifier.notify("needs_human", topic=item["context"], row=item["row"], reason=reason)
-            board.log("WARN", f"Lớp5 Phase2: '{item['context'][:60]}' CONTENT thiếu TopicKey -> NEEDS_HUMAN, bỏ qua.")
-            continue
+        topic_key = item["topic_key"]
+        notifier.notify("start", topic=item["context"], topic_key=topic_key, actor=_DEFAULT_ACTOR)
 
         evidence = fetch_full_evidence(html_collector, sources, item["source"], item["hook"])
-        # Lớp 5 Phase 1R.2 — WRITE-ONCE: assign_topic_key() trả NGUYÊN khoá đã
-        # có ở CONTEXT (item["topic_key"], có thể rỗng nếu dòng CHƯA từng gán)
-        # — KHÔNG bao giờ tính lại 1 dòng ĐÃ có khoá, kể cả khi Source url đổi.
-        # Dòng CHƯA có khoá -> tính từ Source url, hoặc gán SURROGATE uuid4 nếu
-        # không có url hợp lệ (KHÔNG BAO GIỜ còn để lại ""). Khoá MỚI gán phải
-        # ghi NGAY xuống CONTEXT (topic_key_updates, ghi 1 lượt cuối hàm) để
-        # lần chạy SAU đọc lại ĐÚNG khoá này — write-once chỉ có hiệu lực khi
-        # đã persist.
-        existing_key = item.get("topic_key", "")
-        topic_key = assign_topic_key(existing_key, url=item["source"])
-        if topic_key != existing_key:
-            topic_key_updates[item["row"]] = topic_key
+        # P2 store-as-truth: topic_key ĐÃ có sẵn (khoá của raw layer, gán 1 lần
+        # khi raw được ghi — xem store/pipeline_store.py::write_raw). KHÔNG còn
+        # cảnh "topic chưa có khoá" (Sheet-era assign_topic_key()/topic_key_
+        # updates cũ) vì store BẮT BUỘC topic_key ở MỌI write — không tồn tại
+        # bản ghi nào thiếu khoá để phải match-or-insert theo Context (INVARIANT
+        # Lớp 5 Phase 2 cũ, xem existing_content_missing_keys ở sheets_board.py,
+        # nay MOOT trong store).
 
         # --- ARTICLE (Phase 4.9): Brief -> route-once (đóng băng) -> Writer-
         # with-retry. Bỏ qua HOÀN TOÀN nếu đã có trong CONTENT (idempotent,
@@ -373,9 +384,8 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
         elif not channels.get("article", True):
             reason = (f"Router quyết định tuyến article không hợp tin này: "
                      f"{decision.channel_rationale.get('article') or '(router không cho lý do)'}")
-            rows.append(content_row(context=item["context"], type_="article",
-                                    status="SKIPPED", output="", notes=reason,
-                                    topic_key=topic_key, facts=facts_json))
+            _write_content(topic_key, "article", status="SKIPPED", output="", notes=reason, facts_json=facts_json)
+            written += 1
             seen.add((topic_key, "article"))
             skipped += 1
             notifier.notify("skipped", topic=item["context"], type="article", reason=reason)
@@ -390,9 +400,8 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                 fn.write_text(r.draft.body, encoding="utf-8")
                 preview = r.draft.body if len(r.draft.body) <= _OUTPUT_PREVIEW else \
                     r.draft.body[:_OUTPUT_PREVIEW] + f"\n…(xem {fn.name})"
-                rows.append(content_row(context=item["context"], type_="article",
-                                        status="DONE", output=preview, notes="",
-                                        topic_key=topic_key, facts=facts_json))
+                _write_content(topic_key, "article", status="DONE", output=preview, notes="", facts_json=facts_json)
+                written += 1
                 seen.add((topic_key, "article"))
                 produced += 1
                 notifier.notify("draft_changed", topic=item["context"], type="article", status="DONE")
@@ -404,9 +413,8 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                 fn.write_text(r.draft.body, encoding="utf-8")
                 preview = r.draft.body if len(r.draft.body) <= _OUTPUT_PREVIEW else \
                     r.draft.body[:_OUTPUT_PREVIEW] + f"\n…(xem {fn.name})"
-                rows.append(content_row(context=item["context"], type_="article",
-                                        status="ERROR", output=preview, notes=note,
-                                        topic_key=topic_key, facts=facts_json))
+                _write_content(topic_key, "article", status="ERROR", output=preview, notes=note, facts_json=facts_json)
+                written += 1
                 flagged += 1
                 notifier.notify("error", topic=item["context"], type="article", issues=note)
             else:   # FAILED — hết retry (lỗi hạ tầng gọi LLM), KHÔNG có draft -> KHÔNG ghi CONTENT rác
@@ -440,9 +448,8 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                     continue
                 reason = (f"Router quyết định tuyến {ch} không hợp tin này: "
                          f"{decision.channel_rationale.get(ch) or '(router không cho lý do)'}")
-                rows.append(content_row(context=item["context"], type_=type_key,
-                                        status="SKIPPED", output="", notes=reason,
-                                        topic_key=topic_key, facts=facts_json))
+                _write_content(topic_key, type_key, status="SKIPPED", output="", notes=reason, facts_json=facts_json)
+                written += 1
                 seen.add((topic_key, type_key))
                 skipped += 1
                 notifier.notify("skipped", topic=item["context"], type=ch, reason=reason)
@@ -465,9 +472,8 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                      f"'{item['context'][:60]}' -> vẫn SKIP, cần tinh chỉnh prompt router.")
                 reason = ("Router chọn infographic:true nhưng Brief xác nhận không có số "
                          "liệu (no_numeric_content=true) -> bất đồng router/brief, tạm SKIP")
-                rows.append(content_row(context=item["context"], type_="infographic",
-                                        status="SKIPPED", output="", notes=reason,
-                                        topic_key=topic_key, facts=facts_json))
+                _write_content(topic_key, "infographic", status="SKIPPED", output="", notes=reason, facts_json=facts_json)
+                written += 1
                 seen.add((topic_key, "infographic"))
                 skipped += 1
                 notifier.notify("skipped", topic=item["context"], type="infographic", reason=reason)
@@ -486,9 +492,8 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                     if (topic_key, "video") in seen:
                         skipped += 1
                         continue
-                    rows.append(content_row(context=item["context"], type_="video",
-                                            status="NEEDS_HUMAN", output="", notes=str(e),
-                                            topic_key=topic_key, facts=facts_json))
+                    _write_content(topic_key, "video", status="NEEDS_HUMAN", output="", notes=str(e), facts_json=facts_json)
+                    written += 1
                     seen.add((topic_key, "video"))
                     flagged += 1
                     notifier.notify("needs_human", topic=item["context"], type="video", reason=str(e))
@@ -516,14 +521,13 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
             note = "; ".join(draft.compliance_issues)
             if not use_llm and type_ != "infographic":
                 note = (note + " | " if note else "") + "MOCK (chưa bật Sonnet)"
-            # Lưu full ra file, đưa preview lên Sheet.
+            # Lưu full ra file (tham chiếu cục bộ); store giữ preview để đọc lại nhanh.
             fn = out_dir / f"{_slug(item['context'])}-{type_}.{_ext(type_)}"
             fn.write_text(draft.body, encoding="utf-8")
             preview = draft.body if len(draft.body) <= _OUTPUT_PREVIEW else \
                 draft.body[:_OUTPUT_PREVIEW] + f"\n…(xem {fn.name})"
-            rows.append(content_row(context=item["context"], type_=type_,
-                                    status=status, output=preview, notes=note,
-                                    topic_key=topic_key, facts=facts_json))
+            _write_content(topic_key, type_, status=status, output=preview, notes=note, facts_json=facts_json)
+            written += 1
             seen.add((topic_key, type_))
             produced += 1
             if draft.is_clean:
@@ -537,36 +541,39 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
         # DONE từ trước, write_article=False) -> xét đủ MỌI tuyến channels[c]=
         # True (Phase 4.13 — tuyến router chủ động tắt KHÔNG chặn DONE nữa).
         if article_outcome == WriterOutcome.FAILED:
-            failed_rows.append(item["row"])
+            failed_topics.append(topic_key)
         elif article_outcome == WriterOutcome.NEEDS_HUMAN:
-            needs_human_rows.append(item["row"])
+            needs_human_topics.append(topic_key)
         elif _is_fully_produced_channels(topic_key, seen, channels):
-            done_rows.append(item["row"])
+            done_topics.append(topic_key)
 
-    written = board.append_content_rows(rows)
-    # 1 lượt gọi Sheets API duy nhất cho MỌI thay đổi Execute (né 429, cùng
-    # triết lý retry/backoff hiện có) — thay vì gọi mark_execute_done() +
-    # set_execute_values() riêng.
-    execute_updates: dict[int, str] = {r: "DONE" for r in done_rows}
-    execute_updates.update({r: "FAILED" for r in failed_rows})
-    execute_updates.update({r: "NEEDS_HUMAN" for r in needs_human_rows})
-    board.set_execute_values(execute_updates)   # idempotent: chạy lại lọc theo execute ở trên
-    # Phase 1R.2 — persist khoá MỚI gán (write-once chỉ có hiệu lực SAU khi ghi
-    # xuống Sheet; lần chạy sau đọc lại đúng khoá này qua item["topic_key"]).
-    board.set_topic_key_values(topic_key_updates)
+    # P2 store-as-truth: mỗi thay đổi Execute ghi 1 version mới vào gate_status
+    # (merge-on-write — không đụng gate1/output_type đã có, xem
+    # store/pipeline_store.py::write_gate_status). KHÔNG còn board.append_
+    # content_rows()/set_execute_values()/set_topic_key_values() (đã ghi trực
+    # tiếp per-item ở trên qua _write_content(); topic_key write-once MOOT
+    # trong store — xem comment đầu vòng lặp). regroup_and_band_content()
+    # (băng màu/viền Sheet UI) chuyển thành việc của sync service khi render
+    # store->Sheet (Bước 3) — KHÔNG còn ở đây (thuần render, không phải ghi dữ
+    # liệu).
+    for tk in done_topics:
+        ps.mark_execute(tk, "DONE")
+    for tk in failed_topics:
+        ps.mark_execute(tk, "FAILED")
+    for tk in needs_human_topics:
+        ps.mark_execute(tk, "NEEDS_HUMAN")
     if written:
-        board.regroup_and_band_content()   # to nen/vien xen ke theo nhom TopicKey (Sheet UI cleanup Phase 1)
         notifier.notify("gate2_done", written=written, approved=len(approved))
     u = content_llm.usage.as_dict()
-    board.log("INFO", f"TỔNG Production: approved {len(approved)} / sinh mới {produced} / "
-                      f"bỏ qua {skipped} / dính compliance {flagged} / ghi CONTENT {written} / "
-                      f"Execute=DONE {len(done_rows)} / FAILED {len(failed_rows)} / "
-                      f"NEEDS_HUMAN {len(needs_human_rows)} dòng",
-              engine=engine)
+    ps.write_log("INFO", f"TỔNG Production: approved {len(approved)} / sinh mới {produced} / "
+                        f"bỏ qua {skipped} / dính compliance {flagged} / ghi CONTENT {written} / "
+                        f"Execute=DONE {len(done_topics)} / FAILED {len(failed_topics)} / "
+                        f"NEEDS_HUMAN {len(needs_human_topics)} topic",
+                engine=engine)
     _summary(len(approved), produced, skipped, flagged, use_llm, u, out_dir)
     return {"approved": len(approved), "produced": produced, "skipped": skipped,
             "flagged": flagged, "llm": u, "use_llm": use_llm, "written": written,
-            "failed": len(failed_rows), "needs_human": len(needs_human_rows)}
+            "failed": len(failed_topics), "needs_human": len(needs_human_topics)}
 
 
 def _today() -> str:
@@ -642,27 +649,33 @@ def draft_to_content_draft(type_: str, data: dict, brief: ProductionBrief, *,
 def run_draft(*, limit: int = 5, setup: bool = False) -> dict:
     """Full-fetch evidence + sinh infographic NGAY (tất định, $0); với article/
     video -> ghi *.brief.json + *.<type>.prompt.md vào storage.drafts_dir để
-    Claude Code đọc và viết *.<type>.json cạnh đó (không gọi API riêng)."""
+    Claude Code đọc và viết *.<type>.json cạnh đó (không gọi API riêng). P2
+    store-as-truth: đọc/ghi STORE cho dữ liệu nội dung, `board` CHỈ còn dùng
+    cho SOURCES (Sheet-native, xem docstring run()). LAZY-LOAD (xem docstring
+    run()): board KHÔNG khởi tạo ở đây, chỉ lúc get_board().read_sources()
+    thật sự gọi."""
     settings = load_settings()
-    board = _open_board(settings, setup=setup)
+    _board_holder: list[SheetsBoard] = []
+    def get_board() -> SheetsBoard:
+        if not _board_holder:
+            _board_holder.append(_open_board(settings, setup=setup))
+        return _board_holder[0]
 
-    # Execute: dòng vừa APPROVE (Execute rỗng) -> tự đặt RUN; CHỈ xử lý dòng
-    # Status=APPROVE VÀ Execute=RUN (DONE -> đã sinh xong, bỏ qua — idempotent).
-    board.sync_approve_execute_flags()
-    approved = [a for a in board.read_approved_context() if a["execute"] == "RUN"]
+    # P2 store-as-truth: gate1/execute đọc TRỰC TIẾP từ store -- KHÔNG còn
+    # board.sync_approve_execute_flags() (bridge Gate1->Execute="RUN" lần đầu
+    # là việc sync service, Bước 3, xem docstring run()). --draft KHÔNG có
+    # vocab Execute=NEEDS_HUMAN/FAILED (chỉ mark_execute_done/DONE) nên lọc
+    # riêng "RUN" (không gộp "FAILED" như run()).
+    approved = [a for a in ps.list_approved_topics() if a["execute"] == "RUN"]
     if not approved:
-        print("Không có dòng CONTEXT nào Status=APPROVE và Execute=RUN (chưa sản xuất). "
-              "Duyệt ở tab CONTEXT trước.")
+        print("Không có topic nào Gate1=APPROVE và Execute=RUN (chưa sản xuất). "
+              "Duyệt Gate1 trước (qua Sheet, sync service nạp vào store).")
         return {"approved": 0, "prepared": 0, "infographic_done": 0}
     approved = approved[:limit]
 
-    sources = board.read_sources() or factory.build_sources(settings)
+    sources = get_board().read_sources() or factory.build_sources(settings)
     html_collector = factory.build_collector_for_source(Source("_", "_", fetch_type="html"), settings)
-    seen = board.existing_content_keys()   # Lớp 5 Phase 2: (TopicKey, Type)
-    # Xem run() cho giải thích đầy đủ INVARIANT — đường --draft KHÔNG có vocab
-    # Execute=NEEDS_HUMAN (chỉ mark_execute_done/DONE) nên chỉ bỏ qua + cảnh
-    # báo console (KHÔNG tự đoán/auto-map theo Context).
-    missing_key_contexts = set(board.existing_content_missing_keys())
+    seen = ps.existing_content_keys()   # Lớp 5 Phase 2: (TopicKey, Type)
     out_dir = data_path(settings.get("storage.output_dir", "output"), _today(), settings=settings)
     out_dir.mkdir(parents=True, exist_ok=True)
     # Theo NGÀY (như storage/output/<ngày>) — trước đây ghi phẳng vào drafts_dir,
@@ -672,21 +685,11 @@ def run_draft(*, limit: int = 5, setup: bool = False) -> dict:
     drafts_base = data_path(settings.get("storage.drafts_dir", "state/production_drafts"), settings=settings)
     drafts_dir = data_path(settings.get("storage.drafts_dir", "state/production_drafts"), _today(), settings=settings)
 
-    rows: list[list[str]] = []
-    done_rows: list[int] = []   # dòng CONTEXT (1-based) đã đủ CẢ 3 loại -> Execute=DONE
-    topic_key_updates: dict[int, str] = {}   # Phase 1R.2: ghi lại khoá MỚI gán
-    prepared = infographic_done = 0
+    done_topics: list[str] = []   # topic đã đủ CẢ 3 loại -> Execute=DONE
+    written = prepared = infographic_done = 0
     for item in approved:
         context = item["context"]
-        # Lớp 5 Phase 2 — INVARIANT (xem run() cho giải thích đầy đủ): CONTENT
-        # đã có dòng cùng Context nhưng TopicKey rỗng (dữ liệu cũ chưa backfill)
-        # -> KHÔNG THỂ match-or-insert theo khoá an toàn -> bỏ qua HOÀN TOÀN,
-        # cảnh báo console, KHÔNG tự đoán/auto-map theo Context.
-        if context in missing_key_contexts:
-            print(f"[CẢNH BÁO] Lớp5 Phase2: '{context[:60]}' CONTENT thiếu TopicKey "
-                 "(dữ liệu cũ chưa backfill/rekey) -> bỏ qua, chạy "
-                 "scripts/backfill_topic_keys.py trước.")
-            continue
+        topic_key = item["topic_key"]   # store BẮT BUỘC topic_key ở mọi write -> luôn có sẵn (xem run())
 
         evidence = fetch_full_evidence(html_collector, sources, item["source"], item["hook"])
         brief = ProductionBrief(
@@ -694,11 +697,6 @@ def run_draft(*, limit: int = 5, setup: bool = False) -> dict:
             group=item["group"], topic=item["topic"], url=item["source"], evidence=evidence,
         )
         slug = _slug(context)
-        # Phase 1R.2 — WRITE-ONCE (xem run() cho giải thích đầy đủ).
-        existing_key = item.get("topic_key", "")
-        topic_key = assign_topic_key(existing_key, url=item["source"])
-        if topic_key != existing_key:
-            topic_key_updates[item["row"]] = topic_key
 
         # Infographic: sinh NGAY (không cần Claude Code) — NGOÀI PHẠM VI Phase
         # 4.9/4.10/4.11: đường --draft KHÔNG chạy run_brief() nên brief.facts
@@ -711,12 +709,12 @@ def run_draft(*, limit: int = 5, setup: bool = False) -> dict:
                                      brief.background, brief.facts, approx_tolerance=approx_tol)
             fn = out_dir / f"{slug}-infographic.json"
             fn.write_text(draft.body, encoding="utf-8")
-            rows.append(content_row(context=context, type_="infographic",
-                                    status="DONE" if draft.is_clean else "ERROR",
-                                    output=draft.body[:_OUTPUT_PREVIEW],
-                                    notes="; ".join(draft.compliance_issues),
-                                    topic_key=topic_key,
-                                    facts=facts_to_json(brief.facts)))   # rỗng ở đường --draft (chưa wire run_brief())
+            _write_content(topic_key, "infographic",
+                          status="DONE" if draft.is_clean else "ERROR",
+                          output=draft.body[:_OUTPUT_PREVIEW],
+                          notes="; ".join(draft.compliance_issues),
+                          facts_json=facts_to_json(brief.facts))   # rỗng ở đường --draft (chưa wire run_brief())
+            written += 1
             seen.add((topic_key, "infographic"))
             infographic_done += 1
 
@@ -741,10 +739,11 @@ def run_draft(*, limit: int = 5, setup: bool = False) -> dict:
             prepared += 1
         brief_path = drafts_dir / f"{slug}.brief.json"
         if need_brief and not list(drafts_base.glob(f"*/{slug}.brief.json")):
-            # execute_row: số dòng CONTEXT (1-based) — run_ingest() đọc lại để
-            # biết ghi Execute=DONE cho ĐÚNG dòng nào khi article/video xong.
+            # P2 store-as-truth: topic_key (KHÔNG còn "execute_row" -- khái
+            # niệm Sheet row-index -- run_ingest() giờ đọc lại + ghi Execute
+            # THẲNG theo topic_key này qua ps.mark_execute_done()).
             brief_path.write_text(
-                json.dumps({"context": context, "execute_row": item["row"], **asdict(brief)},
+                json.dumps({"context": context, "topic_key": topic_key, **asdict(brief)},
                           ensure_ascii=False, indent=2),
                 encoding="utf-8")
 
@@ -752,16 +751,13 @@ def run_draft(*, limit: int = 5, setup: bool = False) -> dict:
         # sinh, có thể đủ CẢ 3 loại ngay trong lượt --draft này -> đánh dấu DONE
         # luôn (không cần đợi --ingest).
         if _is_fully_produced(topic_key, seen):
-            done_rows.append(item["row"])
+            done_topics.append(topic_key)
 
-    written = board.append_content_rows(rows)
-    board.mark_execute_done(done_rows)
-    board.set_topic_key_values(topic_key_updates)   # Phase 1R.2: persist khoá MỚI gán
-    if written:
-        board.regroup_and_band_content()   # to nen/vien xen ke theo nhom TopicKey (Sheet UI cleanup Phase 1)
+    for tk in done_topics:
+        ps.mark_execute_done(tk)
     print(f"[draft] infographic sinh ngay: {infographic_done} | "
           f"yêu cầu article/video chuẩn bị: {prepared} (xem {drafts_dir}) | "
-          f"Execute=DONE {len(done_rows)} dòng")
+          f"Execute=DONE {len(done_topics)} topic")
     if prepared:
         print("Nhờ Claude Code đọc các file *.prompt.md ở trên, viết JSON đúng schema "
               "vào *.article.json/*.video.json cạnh đó, rồi chạy:\n"
@@ -770,12 +766,15 @@ def run_draft(*, limit: int = 5, setup: bool = False) -> dict:
             "infographic_done": infographic_done, "written": written}
 
 
-def run_ingest(*, setup: bool = False) -> dict:
+def run_ingest() -> dict:
     """Nạp *.article.json/*.video.json (Claude Code đã viết) qua ĐÚNG schema
     fields/render/guardrail như chế độ gọi API -> ghi CONTENT + storage/output.
-    Dọn file đã tiêu thụ; giữ lại *.prompt.md nào còn thiếu câu trả lời."""
+    Dọn file đã tiêu thụ; giữ lại *.prompt.md nào còn thiếu câu trả lời. P2
+    store-as-truth: đọc/ghi STORE, KHÔNG đụng Sheet (KHÔNG còn `board`/
+    `_open_board()` -- hàm này không còn thao tác Sheet nào, xem docstring
+    run(). `setup` (cờ --setup) bỏ mất Ý NGHĨA ở đây vì không còn ensure_tabs()
+    nào để chạy -- xem __main__ bên dưới)."""
     settings = load_settings()
-    board = _open_board(settings, setup=setup)
     # Quét TẤT CẢ thư mục ngày (storage.drafts_dir/<ngày>/) — bản nháp có thể
     # tồn đọng từ ngày TRƯỚC nếu --ingest chưa chạy kịp, KHÔNG chỉ hôm nay.
     drafts_dir = data_path(settings.get("storage.drafts_dir", "state/production_drafts"), settings=settings)
@@ -784,35 +783,26 @@ def run_ingest(*, setup: bool = False) -> dict:
         print(f"Không có bản nháp nào chờ ({drafts_dir}/<ngày>/). Chạy --draft trước.")
         return {"ingested": 0, "skipped": 0, "pending": 0}
 
-    seen = board.existing_content_keys()   # Lớp 5 Phase 2: (TopicKey, Type)
-    missing_key_contexts = set(board.existing_content_missing_keys())   # xem run()
+    seen = ps.existing_content_keys()   # Lớp 5 Phase 2: (TopicKey, Type)
     out_dir = data_path(settings.get("storage.output_dir", "output"), _today(), settings=settings)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     approx_tol = float(settings.get("guardrail.approx_tolerance_pct", 5)) / 100
-    rows: list[list[str]] = []
-    done_rows: list[int] = []   # dòng CONTEXT (1-based) đã đủ CẢ 3 loại -> Execute=DONE
-    ingested = skipped = flagged = pending = 0
+    done_topics: list[str] = []   # topic đã đủ CẢ 3 loại -> Execute=DONE
+    written = ingested = skipped = flagged = pending = 0
     for brief_path in brief_paths:
         day_dir = brief_path.parent   # NGÀY bản nháp được tạo (có thể khác hôm nay)
         slug = brief_path.name[: -len(".brief.json")]
         raw = json.loads(brief_path.read_text(encoding="utf-8"))
         context = raw.pop("context")
-        # execute_row: bản nháp cũ (trước khi có Execute) không có khóa này ->
-        # None -> KHÔNG đánh dấu DONE được (bản ghi cũ), vẫn ingest bình thường.
-        execute_row = raw.pop("execute_row", None)
+        # P2 store-as-truth: topic_key ghi SẴN trong *.brief.json bởi
+        # run_draft() (đọc thẳng từ store, xem run_draft()) -- KHÔNG còn
+        # "execute_row" (Sheet row-index) hay assign_topic_key("", url=...)
+        # đoán lại (không tin cậy bằng đọc thẳng khoá đã có). Bản nháp CŨ
+        # (trước P2, không có field này) -> KeyError sớm, RÕ RÀNG hơn âm thầm
+        # đoán sai khoá -- dữ liệu cũ không còn ý nghĩa (BỐI CẢNH task).
+        topic_key = raw.pop("topic_key")
         brief = ProductionBrief(**raw)
-
-        # Lớp 5 Phase 2 — INVARIANT (xem run() cho giải thích đầy đủ): CONTENT
-        # đã có dòng cùng Context nhưng TopicKey rỗng -> KHÔNG THỂ match-or-
-        # insert an toàn -> bỏ qua HOÀN TOÀN (giữ nguyên *.prompt.md/*.json chờ
-        # người xử lý thủ công), cảnh báo console, KHÔNG tự đoán/auto-map.
-        if context in missing_key_contexts:
-            print(f"[CẢNH BÁO] Lớp5 Phase2: '{context[:60]}' CONTENT thiếu TopicKey "
-                 "(dữ liệu cũ chưa backfill/rekey) -> bỏ qua ingest, chạy "
-                 "scripts/backfill_topic_keys.py trước.")
-            pending += 1
-            continue
 
         # Bối cảnh mở rộng (research) Claude Code viết ở BƯỚC 1 của _prompt_md —
         # KHÔNG bắt buộc; thiếu file -> brief.background giữ rỗng, guardrail vẫn
@@ -820,15 +810,6 @@ def run_ingest(*, setup: bool = False) -> dict:
         background_path = day_dir / f"{slug}.background.txt"
         if background_path.exists():
             brief.background = background_path.read_text(encoding="utf-8").strip()
-        # Phase 1R.2: run_ingest() KHÔNG đọc lại CONTEXT.TopicKey hiện có (đọc
-        # từ file *.brief.json đã lưu, không phải dòng CONTEXT sống) — NGOÀI
-        # PHẠM VI đồng bộ write-once đầy đủ ở đây (đường --draft/--ingest cũ,
-        # đã ghi nhận ở các phase trước). assign_topic_key("", ...) đảm bảo
-        # KHÔNG còn để lại "" (URL hợp lệ -> khoá tất định khớp CONTEXT nếu
-        # CONTEXT cũng chưa có; không URL -> surrogate MỚI, có thể lệch
-        # CONTEXT nếu CONTEXT đã có surrogate khác — chấp nhận được vì đường
-        # này hiếm khi chạy cho chủ đề không-URL).
-        topic_key = assign_topic_key("", url=brief.url)
 
         remaining = False
         for type_, ctype in (("article", "article"), ("video", "video")):
@@ -849,11 +830,10 @@ def run_ingest(*, setup: bool = False) -> dict:
             fn.write_text(draft.body, encoding="utf-8")
             preview = draft.body if len(draft.body) <= _OUTPUT_PREVIEW else \
                 draft.body[:_OUTPUT_PREVIEW] + f"\n…(xem {fn.name})"
-            rows.append(content_row(context=context, type_=ctype,
-                                    status="DONE" if draft.is_clean else "ERROR",
-                                    output=preview, notes="; ".join(draft.compliance_issues),
-                                    topic_key=topic_key,
-                                    facts=facts_to_json(brief.facts)))   # rỗng ở đường --ingest (chưa wire run_brief())
+            _write_content(topic_key, ctype, status="DONE" if draft.is_clean else "ERROR",
+                          output=preview, notes="; ".join(draft.compliance_issues),
+                          facts_json=facts_to_json(brief.facts))   # rỗng ở đường --ingest (chưa wire run_brief())
+            written += 1
             seen.add((topic_key, ctype))
             ingested += 1
             flagged += 0 if draft.is_clean else 1
@@ -865,16 +845,14 @@ def run_ingest(*, setup: bool = False) -> dict:
         else:
             brief_path.unlink(missing_ok=True)
             background_path.unlink(missing_ok=True)
-            if execute_row is not None and _is_fully_produced(topic_key, seen):
-                done_rows.append(execute_row)
+            if _is_fully_produced(topic_key, seen):
+                done_topics.append(topic_key)
 
-    written = board.append_content_rows(rows)
-    board.mark_execute_done(done_rows)
-    if written:
-        board.regroup_and_band_content()   # to nen/vien xen ke theo nhom TopicKey (Sheet UI cleanup Phase 1)
+    for tk in done_topics:
+        ps.mark_execute_done(tk)
     print(f"[ingest] sản phẩm mới: {ingested} | bỏ qua (đã có): {skipped} | "
           f"dính compliance: {flagged} | còn chờ Claude viết: {pending} | ghi CONTENT {written} | "
-          f"Execute=DONE {len(done_rows)} dòng")
+          f"Execute=DONE {len(done_topics)} topic")
     return {"ingested": ingested, "skipped": skipped, "flagged": flagged,
             "pending": pending, "written": written}
 
@@ -923,6 +901,6 @@ if __name__ == "__main__":
     elif args.draft:
         run_draft(limit=args.limit, setup=args.setup)
     elif args.ingest:
-        run_ingest(setup=args.setup)
+        run_ingest()
     else:
         run(limit=args.limit, offline=args.offline, model=args.model, setup=args.setup)
