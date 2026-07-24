@@ -498,7 +498,7 @@ def test_paste_logo_missing_file_does_not_crash(tmp_path):
     stamped, log = bs.stamp_brand(raw, ratio="4:5", theme="dark", logo_path=missing, source="cafef.vn", disclaimer="x")
     im = Image.open(io.BytesIO(stamped))
     assert im.size == bs._DEFAULT_FINAL_SIZES["4:5"]
-    assert log["scrim_applied"] is False
+    assert log["logo_in_pad"] is False
 
 
 def test_paste_logo_uses_real_transparent_logo_file(tmp_path):
@@ -524,21 +524,29 @@ def test_paste_logo_uses_real_transparent_logo_file(tmp_path):
                 break
         if found_red:
             break
-    assert found_red, "logo do khong xuat hien o goc tren-trai -- _paste_logo_with_scrim khong dan anh"
+    assert found_red, "logo do khong xuat hien trong TOP_PAD -- _paste_logo khong dan anh"
+    assert log["logo_in_pad"] is True
 
 
-def test_logo_scrim_applied_when_background_bright():
-    """A2 Bước 5 -- scrim CHỈ vẽ khi vùng bbox logo nở 20% có luminance >
-    110 (nền sáng, tương phản thấp với logo)."""
+# --- SỬA LỖI ĐẶC TẢ 2026-07-24 -- scrim đã XOÁ HẲN (logo giờ luôn trên nền --
+# phẳng 1 màu trong TOP_PAD, không còn ảnh AI bên dưới để đè, xem SỬA 2) ----
+
+def test_stamp_brand_log_has_no_scrim_applied_field():
+    """Regression -- field `scrim_applied` PHẢI biến mất khỏi log (cơ chế đã
+    xoá hẳn), bất kể nền sáng hay tối."""
+    for color in [(230, 230, 230), (10, 10, 15)]:
+        raw = _real_png_bytes(1024, 1280, color=color)
+        _, log = bs.stamp_brand(raw, ratio="4:5", theme="dark", source="", disclaimer="")
+        assert "scrim_applied" not in log
+
+
+def test_logo_always_readable_on_bright_ai_background_without_scrim():
+    """SỬA 2 -- logo giờ dán vào TOP_PAD (dải màu band phẳng), KHÔNG còn phụ
+    thuộc luminance ảnh AI (nền AI sáng hay tối không còn ảnh hưởng gì tới
+    logo vì logo không còn nằm trên ảnh AI nữa)."""
     bright = _real_png_bytes(1024, 1280, color=(230, 230, 230))
-    stamped, log = bs.stamp_brand(bright, ratio="4:5", theme="dark", source="", disclaimer="")
-    assert log["scrim_applied"] is True
-
-
-def test_logo_scrim_not_applied_when_background_dark():
-    dark = _real_png_bytes(1024, 1280, color=(10, 10, 15))
-    stamped, log = bs.stamp_brand(dark, ratio="4:5", theme="dark", source="", disclaimer="")
-    assert log["scrim_applied"] is False
+    _, log = bs.stamp_brand(bright, ratio="4:5", theme="dark", source="", disclaimer="")
+    assert log["logo_in_pad"] is True
 
 
 # --- Bước 1 (edge sanitizer) -------------------------------------------------
@@ -607,14 +615,129 @@ def test_A3_fully_packed_background_gets_logo_source_disclaimer_no_content_overl
         for a, b in zip(got_rgb, expected_rgb):
             assert abs(a - b) <= 20, f"[{ratio}] day band KHONG phai band_color ({got_rgb} != {expected_rgb})"
 
-        # 3) Logo PHẢI xuất hiện góc trên-trái (khớp _DEFAULT_LOGO_PATH thật,
-        #    kiểm gián tiếp qua scrim/luminance thay vì màu cụ thể vì logo
-        #    thật KHÔNG phải khối màu đơn -- xác nhận không crash + kích
-        #    thước đúng đã đủ chứng minh bước 5 chạy trọn vẹn cho A3).
+        # 3) Logo PHẢI xuất hiện, đọc được, TRONG TOP_PAD (2026-07-24 -- giờ
+        #    kiểm TRỰC TIẾP qua log["logo_in_pad"], không còn cần suy luận
+        #    gián tiếp qua scrim/luminance vì scrim đã xoá hẳn).
         assert band_top_y > 0
         assert band_top_y < final_h
+        assert log["logo_in_pad"] is True
+
+        # 4) KHÔNG cắt nội dung (2f, CHẤM BẰNG SỐ -- mắt không bắt được lỗi
+        #    crop nếu band vẫn sạch, xem STOP-REPORT phiên trước).
+        assert log["scale_factor"] <= 1.0 + 1e-9
+        assert log["top_pad_px"] >= 0 and log["side_pad_px"] >= 0
+        assert "scrim_applied" not in log
 
         out_path = tmp_path / f"a3_evidence_{ratio.replace(':', 'x')}.png"
         out_path.write_bytes(stamped)
         log_path = tmp_path / f"a3_evidence_{ratio.replace(':', 'x')}.log.json"
         log_path.write_text(json.dumps(log, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# =====================================================================
+# SỬA LỖI ĐẶC TẢ (2026-07-24) -- fit-inside matting thay "cover-fit + cắt cân
+# giữa" (ăn mất nội dung CẢ HAI ĐẦU khi tỷ lệ lệch, xem HANDOFF phiên trước +
+# module docstring brand_stamp.py). Test dưới đây tái hiện ĐÚNG chữ ký bug
+# thật (tiêu đề cụt đỉnh + chip/dòng cuối cụt đáy CÙNG LÚC) bằng 2 vạch màu
+# đánh dấu ở mép trên/dưới nguồn -- PHẢI còn nguyên sau khi qua stamp_brand.
+# =====================================================================
+
+def _marker_png_bytes(w: int, h: int, *, top_color=(255, 0, 0), bottom_color=(0, 0, 255),
+                     marker_rows: int = 4) -> bytes:
+    """Ảnh nguồn tỷ lệ LỆCH XA vùng trong (rất cao/hẹp) với 1 vạch màu riêng
+    biệt ở TRÊN CÙNG và 1 vạch màu khác ở DƯỚI CÙNG, giữa là hoạ tiết bận rộn
+    (không phẳng -- tránh edge sanitizer bắt nhầm, `marker_rows` < min_run=8
+    của edge sanitizer nên không bị cắt). Cover-fit + cắt cân giữa (kiến trúc
+    CŨ) sẽ cắt cả 2 vạch nếu nguồn đủ cao hơn khung trong -- fit-inside (kiến
+    trúc MỚI) PHẢI giữ nguyên cả 2."""
+    im = Image.new("RGB", (w, h), (20, 20, 20))
+    draw = ImageDraw.Draw(im)
+    cell = max(w, h) // 40 or 1
+    palette = [(90, 90, 90), (60, 60, 100), (100, 70, 60)]
+    i = 0
+    for y in range(marker_rows, h - marker_rows, cell):
+        for x in range(0, w, cell):
+            draw.rectangle([x, y, x + cell, y + cell], fill=palette[i % len(palette)])
+            i += 1
+    draw.rectangle([0, 0, w, marker_rows], fill=top_color)
+    draw.rectangle([0, h - marker_rows, w, h], fill=bottom_color)
+    return _to_png_bytes(im)
+
+
+def _has_color(im: Image.Image, color: tuple[int, int, int], *, tol: int = 10) -> bool:
+    rgb = im.convert("RGB")
+    for x, y in [(x, y) for y in range(0, rgb.height, 3) for x in range(0, rgb.width, 3)]:
+        p = rgb.getpixel((x, y))
+        if all(abs(p[i] - color[i]) <= tol for i in range(3)):
+            return True
+    return False
+
+
+def test_matte_fit_inside_never_crops_top_and_bottom_markers_when_ratio_mismatched():
+    """Regression TRỰC TIẾP cho bug thật (HANDOFF phiên trước): nguồn RẤT cao/
+    hẹp so với vùng trong (ratio lệch xa) -- cover-fit cũ sẽ cắt cân giữa,
+    ăn mất CẢ vạch đỉnh lẫn vạch đáy. fit-inside PHẢI giữ nguyên cả 2, đổi lại
+    bằng padding (band màu), KHÔNG BAO GIỜ bằng cách cắt."""
+    raw = _marker_png_bytes(1024, 2000)  # ratio 0.512, lệch xa ratio_inner 4:5 (~0.865)
+    stamped, log = bs.stamp_brand(raw, ratio="4:5", theme="dark", source="", disclaimer="")
+    im = Image.open(io.BytesIO(stamped))
+    assert _has_color(im, (255, 0, 0)), "vach DO (dinh nguon) bi mat -- fit-inside dang crop nhu cover-fit cu"
+    assert _has_color(im, (0, 0, 255)), "vach XANH (day nguon) bi mat -- fit-inside dang crop nhu cover-fit cu"
+    assert log["scale_factor"] <= 1.0 + 1e-9
+
+
+def test_stamp_brand_never_upscales_tiny_source_image():
+    """2f -- scale_factor KHÔNG BAO GIỜ vượt 1.0, kể cả khi ảnh nguồn NHỎ HƠN
+    NHIỀU vùng trong (không phóng to để "lấp đầy", chỉ padding thêm)."""
+    tiny = _real_png_bytes(64, 64)
+    stamped, log = bs.stamp_brand(tiny, ratio="4:5", theme="dark", source="", disclaimer="")
+    assert log["scale_factor"] <= 1.0 + 1e-9
+    im = Image.open(io.BytesIO(stamped))
+    assert im.size == bs._DEFAULT_FINAL_SIZES["4:5"]
+
+
+def test_stamp_brand_log_reports_new_a_fields_and_no_scrim():
+    raw = _real_png_bytes(1024, 1280)
+    _, log = bs.stamp_brand(raw, ratio="4:5", theme="dark", source="cafef.vn", disclaimer="D")
+    for key in ("ai_size_requested", "ai_size_reason", "ratio_inner", "ratio_ai",
+                "scale_factor", "top_pad_px", "side_pad_px", "logo_in_pad"):
+        assert key in log, f"thieu field log moi: {key}"
+    assert "scrim_applied" not in log
+    assert isinstance(log["ai_size_requested"], list) and len(log["ai_size_requested"]) == 2
+
+
+def test_stamp_brand_logo_bbox_never_overlaps_ai_content_area():
+    """ASSERT 2e/SỬA 2 -- bbox logo (0,0)-(logo_w,logo_h) trong TOP_PAD PHẢI
+    kết thúc TRƯỚC khi vùng ảnh AI bắt đầu (y = top_pad_px)."""
+    raw = _real_png_bytes(1024, 1280)
+    _, log = bs.stamp_brand(raw, ratio="4:5", theme="dark", source="", disclaimer="")
+    final_w, final_h = log["final_wh"]
+    logo_h = max(round(final_h * 0.06), 24)
+    pad = max(int(final_w * 0.04), 16)
+    logo_y = max((log["top_pad_px"] - logo_h) // 2, 0)
+    assert logo_y + logo_h <= log["top_pad_px"], "bbox logo vuot qua TOP_PAD -- giao voi vung anh AI"
+
+
+def test_select_ai_size_closely_matches_ratio_inner_for_all_ratios():
+    """2a -- Δratio phải NHỎ (khớp sát ratio_inner thật), xác nhận qua gọi API
+    thật 2026-07-24 (xem select_ai_size docstring) -- các size chọn ra PHẢI
+    chia hết 16 (yêu cầu cứng của gpt-image-2)."""
+    for ratio in ("4:5", "9:16", "1:1"):
+        (w, h), reason = bs.select_ai_size(ratio)
+        assert w % 16 == 0 and h % 16 == 0, f"{ratio}: size {w}x{h} khong chia het 16"
+        final_w, final_h = bs._DEFAULT_FINAL_SIZES[ratio]
+        nominal_band_h = max(round(final_h * 0.075), bs._DEFAULT_BOTTOM_BAND_MIN_PX)
+        ratio_inner = final_w / (final_h - nominal_band_h)
+        delta = abs((w / h) - ratio_inner)
+        assert delta < 0.01, f"{ratio}: delta={delta:.4f} qua lon so voi ratio_inner={ratio_inner:.4f}"
+        assert reason  # ai_size_reason khong rong
+
+
+def test_matte_raises_when_top_pad_requirement_shrinks_more_than_15_percent():
+    """DỪNG KHI #2 -- cấu hình band/logo ăn quá sâu vào vùng trong (band_min_px
+    ép nominal_band_h lớn bất thường) khiến TOP_PAD bắt buộc > 15% so với fit
+    tự nhiên -- PHẢI raise rõ ràng, KHÔNG tự ý nới ngưỡng."""
+    settings = Settings({"infographic": {"ai_full": {"bottom_band_min_px": 1000}}})
+    raw = _real_png_bytes(1024, 1280)
+    with pytest.raises(ValueError, match="DỪNG"):
+        bs.stamp_brand(raw, ratio="4:5", theme="dark", source="", disclaimer="", settings=settings)

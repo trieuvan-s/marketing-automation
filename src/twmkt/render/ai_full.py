@@ -52,6 +52,8 @@ from pathlib import Path
 
 import httpx
 
+from .brand_stamp import select_ai_size as _select_ai_size
+
 logger = logging.getLogger("twmkt.render.ai_full")
 
 _DEFAULT_MODEL = "gpt-image-2"
@@ -60,18 +62,24 @@ _API_URL = "https://api.openai.com/v1/images/generations"
 _TIMEOUT_S = 120
 _PROMPT_VERSION = "v5"  # v5 (2026-07-23, Phần B — ĐẢO HƯỚNG P0): BỎ HẲN mọi ngôn ngữ "chừa dải trống"/safe-zone (kể cả v3/v4 -- lý do model coi danh từ trong prompt là vật thể cần vẽ, xem module docstring) -- thay bằng bố cục DƯƠNG TÍNH (mô tả cái CÓ) + negative prompt tường minh (border/frame/colored strip/cream-beige band...). Vị trí brand giờ do brand_stamp.py (khung cứng đáy) lo tuyệt đối, KHÔNG còn phụ thuộc AI. Bỏ luôn quy tắc 4b (lược bớt mục thừa) -- Phần C cắt mật độ Ở CODE TRƯỚC khi build prompt, AI không còn thấy nội dung thừa để phải tự quyết định lược. v4 (2026-07-23): rào cứng 2 dải an toàn (ĐÃ THAY). v3 (2026-07-22): cấm khoảng trống lớn giữa dải đỉnh và tiêu đề (ĐÃ THAY). v2 (2026-07-21): cấm AI vẽ "Nguồn:"/source text -- v1 để lọt AI tự vẽ trùng dòng nguồn với brand_stamp.py, xem báo cáo
 
-# Bước 4.3 — sinh ĐÚNG size cho từng tỷ lệ (KHÔNG crop sau bởi API — vẫn CÓ
-# crop nhẹ ở brand_stamp.matting() do lệch tỷ lệ khung trong/khung cuối, xem
-# brand_stamp.py). API gpt-image-2 chấp nhận size TUỲ Ý miễn chia hết cho 16
-# (xác nhận thật 2026-07-21, xem lỗi "Width and height must both be divisible
-# by 16" khi thử size không hợp lệ) -- KHÔNG phải enum cố định như gpt-image-1.
-# 3 size dưới đây là tỷ lệ CHÍNH XÁC (864/1536 = 9/16 = 0.5625 y hệt), không
-# xấp xỉ -- KHÁC final_size (config infographic.ai_full.final_size, Phần A1)
-# vì final_size trừ đi band đáy nên tỷ lệ khung TRONG khác tỷ lệ khung CUỐI.
-RATIO_SIZES = {
-    "1:1": (1024, 1024),
-    "4:5": (1024, 1280),
-    "9:16": (864, 1536),
+# Bước 4.3 — sinh ĐÚNG size cho từng tỷ lệ (KHÔNG crop sau bởi API — nhờ
+# brand_stamp.matting() fit-inside/contain, xem SỬA LỖI ĐẶC TẢ 2026-07-24 --
+# brand_stamp.py module docstring). API gpt-image-2 chấp nhận size TUỲ Ý miễn
+# chia hết cho 16 (xác nhận thật 2026-07-21 VÀ tái xác nhận 2026-07-24, xem
+# `brand_stamp.select_ai_size` docstring) -- KHÔNG phải enum cố định như
+# gpt-image-1.
+#
+# 2026-07-24 (SỬA LỖI ĐẶC TẢ) -- bảng cũ ở đây (1024x1280 cho 4:5, 864x1536
+# cho 9:16...) đúng tỷ lệ HIỂN THỊ cuối (4:5, 9:16) nhưng SAI mục tiêu thật:
+# ảnh AI cần khớp ratio_inner = FINAL_W/(FINAL_H-BAND_H) (tỷ lệ vùng TRONG
+# sau khi trừ band đáy), KHÔNG phải tỷ lệ khung CUỐI -- lệch này (vd 4:5:
+# 0.8 cũ vs ~0.865 thật) là 1 phần nguyên nhân matting phải cắt nhiều, góp
+# phần vào bug tiêu đề cụt đỉnh + chip cụt đáy (xem HANDOFF phiên trước).
+# Bảng dưới đây CHỈ là THAM KHẢO mặc định (settings=None, dùng cho test/hiển
+# thị nhanh) -- get_or_generate_raw_image() gọi select_ai_size() TƯƠI mỗi lần
+# generate thật, tôn trọng settings override (final_size/bottom_band_min_px).
+RATIO_SIZES: dict[str, tuple[int, int]] = {
+    ratio: _select_ai_size(ratio)[0] for ratio in ("1:1", "4:5", "9:16")
 }
 
 # 2026-07-23 (Phần B1, yêu cầu Lead) -- CẤM CỨNG mọi từ/cụm liên quan "chừa
@@ -425,7 +433,10 @@ def get_or_generate_raw_image(
 
     prompt = build_ai_full_prompt(spec, theme=theme, ratio=ratio)
     _check_prompt_banned_words(prompt)   # Phần B1 -- raise NGAY nếu lọt từ cấm, KHÔNG gọi API
-    w, h = RATIO_SIZES[ratio]
+    # 2026-07-24 (SỬA LỖI ĐẶC TẢ) -- TÍNH ĐỘNG (KHÔNG tra RATIO_SIZES tĩnh ở
+    # trên, bảng đó chỉ để tham khảo/test) -- tôn trọng settings override thật
+    # (final_size/bottom_band_min_px), xem brand_stamp.select_ai_size().
+    (w, h), _size_reason = _select_ai_size(ratio, settings=settings)
     size_str = f"{w}x{h}"
 
     try:

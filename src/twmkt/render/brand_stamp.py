@@ -14,26 +14,49 @@ band đáy RIÊNG trên phần diện tích còn lại (matting, không phải s
 chạm chữ/nội dung khi đó là BẤT KHẢ THI VỀ CẤU TRÚC, không phải "đã canh cho
 khỏi đụng" (khác biệt cốt lõi, xem docstring `stamp_brand`).
 
-QUY TRÌNH MỚI (đúng thứ tự, xem `stamp_brand`):
+SỬA LỖI ĐẶC TẢ (2026-07-24, QUYẾT ĐỊNH LEAD -- Phần A2 bản 2026-07-23 ở trên
+tự nó có 1 lỗi đặc tả tại BƯỚC 2/5): "resize vừa khít vùng trong, cắt cân
+giữa nếu lệch" (center-crop/cover-fit) ăn mất nội dung ở CẢ HAI ĐẦU khi tỷ lệ
+ảnh AI lệch tỷ lệ vùng trong -- bằng chứng ảnh thật 6/6: tiêu đề cụt ở ĐỈNH
+VÀ dòng/chip cuối cùng cụt ở ĐÁY CÙNG LÚC (chữ ký kinh điển của center-crop:
+cắt đối xứng 2 đầu). Đồng thời logo (Bước 5 cũ) vẫn đặt ĐÈ lên ảnh AI tràn
+viền mép trên (không matting ở đỉnh) -- scrim chỉ che tạm, không sửa gốc.
+SỬA: Bước 2 đổi hẳn sang FIT-INSIDE (contain, KHÔNG BAO GIỜ cover/crop, KHÔNG
+phóng to quá độ phân giải gốc -- scale_factor luôn <=1.0), dành riêng đủ chỗ
+TOP_PAD cho logo NGAY TRONG phép tính scale (trừ thẳng vào target_h trước khi
+fit, xem `_matte`) -- logo giờ dán vào TOP_PAD (dải màu band phẳng, không còn
+ảnh AI bên dưới để đè) THAY VÌ đè lên ảnh AI -- scrim (Bước 5 cũ) do đó VÔ
+NGHĨA, XOÁ HẲN. Kích thước gọi API (`select_ai_size`) cũng tính lại khớp
+ratio_inner = FINAL_W/(FINAL_H-BAND_H) thay vì bảng cố định cũ lệch xa tỷ lệ
+thật (xác nhận qua gọi API thật 2026-07-24: gpt-image-2 chấp nhận size TUỲ Ý
+chia hết 16, KHÔNG phải enum cố định -- xem `select_ai_size` docstring).
+
+QUY TRÌNH (đúng thứ tự, xem `stamp_brand`):
   1. EDGE SANITIZER (`_edge_sanitize_top`) -- lưới an toàn cắt dải màu phẳng
      bất thường ở mép trên (vd dải kem do model sinh ảnh coi "safe zone" là
      vật thể cần vẽ, xem ai_full.py Phần B) -- KHÔNG thay cho việc sửa prompt
      (Phần B), chỉ là lưới an toàn tầng dưới.
-  2. MATTING (`_matte`) -- resize ảnh AI (sau bước 1) vừa khít vùng trong
-     FINAL_W x (FINAL_H - BAND_H), giữ tỷ lệ (cover-fit + cắt cân giữa nếu
-     lệch), không kéo giãn méo.
-  3. MÀU BAND (`_band_color`) -- màu TRUNG VỊ 20 hàng pixel cuối ảnh đã resize;
+  2. MATTING (`_matte`) -- FIT-INSIDE ảnh AI (sau bước 1) vào vùng trong
+     FINAL_W x (FINAL_H - BAND_H), TRỪ SẴN chỗ TOP_PAD cho logo (2e) --
+     scale_factor = min(1.0, target_w/src_w, (inner_h-TOP_PAD_MIN)/src_h) --
+     KHÔNG BAO GIỜ vượt 1.0 (không phóng to), KHÔNG BAO GIỜ cắt (ảnh luôn nằm
+     TRỌN VẸN trong vùng cho phép). Phần dư DỌC dồn hết lên ĐỈNH, phần dư
+     NGANG chia đều 2 bên -- lấp bằng ĐÚNG màu band (mối nối vô hình).
+  3. MÀU BAND (`_band_color`) -- màu TRUNG VỊ 20 hàng pixel cuối ảnh đã fit;
      tối (luminance <=140) -> dùng thẳng (mối nối vô hình); sáng -> fallback
      navy FVA cố định (config infographic.ai_full.navy_fallback).
   4. NỘI DUNG BAND (`_layout_band_text`) -- Trái "Nguồn: ...", Phải disclaimer,
      font = 0.30*BAND_H, KHÔNG BAO GIỜ cắt chữ/thu font dưới 18px -- band TỰ
      NỚI cao (matting lại với inner_h nhỏ hơn) nếu 1 dòng không đủ chỗ dù đã
      xuống 2 dòng.
-  5. LOGO (`_paste_logo` + scrim CÓ ĐIỀU KIỆN) -- ảnh AI vẫn tràn viền mép
-     trên (KHÔNG matting ở đỉnh, chỉ đáy) -- CHỖ DUY NHẤT còn dùng scrim: chỉ
-     vẽ khi luminance vùng bbox logo nở 20% > 110 (tương phản thật sự thấp).
+  5. LOGO (`_paste_logo`) -- dán vào TOP_PAD (dải màu band phẳng ở đỉnh, đã
+     bảo đảm đủ chỗ ở Bước 2), căn trái lề 4% chiều rộng, căn giữa theo chiều
+     dọc trong dải. KHÔNG còn scrim (nền phẳng 1 màu, không có gì để đè).
+     ASSERT bbox logo nằm TRỌN trong TOP_PAD.
   6. LOG JSON (`build_stamp_log`) -- trả kèm bytes để ai_full.py ghi cạnh ảnh,
-     Lead kiểm không cần mở ảnh (xem A2 Bước 6, STOP-REPORT).
+     Lead kiểm không cần mở ảnh (xem A2 Bước 6, STOP-REPORT) -- gồm cả
+     scale_factor/top_pad_px/side_pad_px để CHẤM BẰNG SỐ, không dựa mắt (mắt
+     không bắt được lỗi crop nếu band vẫn trông sạch, xem STOP-REPORT).
 
 LOGO THẬT THAY WORDMARK CHỮ (2026-07-22, theo yêu cầu Lead): dán ẢNH logo thật
 (`assets/icon_transparent.png`) thay vì vẽ chữ "FVA CAPITAL" bằng font -- xem
@@ -218,22 +241,130 @@ def _edge_sanitize_top(im: Image.Image, *, scan_pct: float = 0.12, min_run: int 
 
 
 # =====================================================================
-# Bước 2 -- MATTING (thu ảnh AI vào vùng trong, không đè band đáy)
+# Bước 2 -- MATTING (fit-inside ảnh AI vào vùng trong, KHÔNG BAO GIỜ crop)
 # =====================================================================
 
-def _matte(im: Image.Image, *, target_w: int, target_h: int) -> Image.Image:
-    """Resize `im` vừa khít (target_w, target_h) theo kiểu "cover" (giữ tỷ lệ,
-    KHÔNG kéo giãn méo) rồi CẮT CÂN GIỮA phần dư nếu tỷ lệ khung lệch. Đây là
-    kỹ thuật object-fit:cover chuẩn -- ảnh LUÔN lấp đầy khung đích, không có
-    viền/khoảng trống nào lộ ra."""
+# Neo 1 chiều khi chọn kích thước gọi API (`select_ai_size`) -- ngân sách độ
+# phân giải CÙNG BẬC chi phí/thời gian đã đo trước đây (~1024-1536px, xem
+# assets/README_AI_FULL.md) -- KHÔNG phóng to tuỳ tiện chỉ để khớp tỷ lệ đẹp
+# hơn (khớp tỷ lệ hoàn hảo sẽ triệt tiêu TOP_PAD tự nhiên, đẩy hết gánh nặng
+# co ảnh sang bước dành chỗ logo -- không sai, nhưng lãng phí không cần
+# thiết, xem báo cáo Δratio thật).
+_AI_SIZE_ANCHOR_PX = 1024
+
+
+def select_ai_size(ratio: str, *, settings=None) -> tuple[tuple[int, int], str]:
+    """SỬA LỖI ĐẶC TẢ (2026-07-24, Phần A 2a) -- chọn kích thước gọi API
+    gpt-image-2 khớp SÁT NHẤT ratio_inner = FINAL_W/(FINAL_H-BAND_H danh
+    nghĩa), thay bảng cố định cũ (`ai_full.RATIO_SIZES`) từng lệch xa tỷ lệ
+    vùng trong thật (vd 4:5 dùng 1024x1280 tỷ lệ 0.8 trong khi ratio_inner
+    thật ~0.865).
+
+    XÁC MINH THẬT (2026-07-24, KHÔNG suy đoán từ comment cũ) -- gọi API thật
+    2 lượt: (1) size KHÔNG chia hết 16 (vd "1023x1184") -> HTTP 400
+    "Invalid size '...'. Width and height must both be divisible by 16."
+    (lỗi CHỈ nói về chia hết 16, không phải danh sách enum); (2) size TUỲ Ý
+    chia hết 16 KHÔNG khớp bất kỳ giá trị "chuẩn" nào (vd "1024x1184",
+    "1024x1680", "1024x944") -> HTTP 200, ảnh trả về ĐÚNG size đã yêu cầu
+    (xác nhận bằng PIL.Image.size). Kết luận: gpt-image-2 chấp nhận size TUỲ
+    Ý miễn chia hết 16 -- KHÔNG phải enum cố định nhỏ như gpt-image-1. Do đó
+    thuật toán dưới đây tìm kích thước khớp NHẤT trong không gian chia-hết-16
+    (neo 1 chiều ở `_AI_SIZE_ANCHOR_PX`, tính chiều còn lại), không phải chọn
+    giữa vài lựa chọn liệt kê sẵn.
+
+    Trả ((w, h), lý_do_string) -- lý_do vào log JSON `ai_size_reason`
+    (`stamp_brand`)."""
+    final_w, final_h = _resolve_final_size(ratio, settings)
+    band_min_px = _resolve_band_min_px(settings)
+    nominal_band_h = max(round(final_h * 0.075), band_min_px)
+    inner_h = final_h - nominal_band_h
+    ratio_inner = final_w / inner_h
+
+    w = _AI_SIZE_ANCHOR_PX
+    h = max(round(w / ratio_inner / 16) * 16, 16)
+    ratio_ai = w / h
+    reason = (
+        f"neo width={w}px, ratio_inner=FINAL_W/(FINAL_H-BAND_H)={final_w}/{inner_h}"
+        f"={ratio_inner:.4f} -> height khớp gần nhất chia hết 16 = {h}px "
+        f"(ratio_ai={ratio_ai:.4f}, delta={abs(ratio_ai - ratio_inner):.4f}) -- "
+        f"xác nhận API thật (2026-07-24): gpt-image-2 chấp nhận size tuỳ ý chia hết 16."
+    )
+    return (w, h), reason
+
+
+def _logo_dimensions(logo_path: Path, *, final_w: int, final_h: int) -> tuple[int, int, int]:
+    """Trả (logo_w, logo_h, pad) -- pad = lề 4% chiều rộng (>=16px), logo_h =
+    6% chiều cao cuối (>=24px), logo_w suy từ tỷ lệ khung file logo thật.
+    Tính TRƯỚC matting (2e cần logo_h+2*pad để trừ vào TOP_PAD ngay trong
+    scale) -- file logo KHÔNG tồn tại vẫn trả logo_h/pad hợp lệ (TOP_PAD
+    không được đổi kích thước bất ngờ chỉ vì thiếu file logo)."""
+    logo_h = max(round(final_h * 0.06), 24)
+    pad = max(int(final_w * 0.04), 16)
+    logo_w = logo_h
+    if logo_path.exists():
+        try:
+            with Image.open(logo_path) as logo_im:
+                logo_w = max(round(logo_im.width * (logo_h / logo_im.height)), 1)
+        except Exception:
+            pass
+    return logo_w, logo_h, pad
+
+
+def _matte(im: Image.Image, *, target_w: int, target_h: int, min_top_pad: int) -> dict:
+    """FIT-INSIDE (contain) -- SỬA LỖI ĐẶC TẢ thay "cover-fit + cắt cân giữa"
+    cũ (ăn mất nội dung CẢ HAI ĐẦU khi tỷ lệ lệch -- xem module docstring,
+    bằng chứng ảnh thật 6/6 tiêu đề cụt đỉnh + chip cụt đáy CÙNG LÚC). Ảnh AI
+    luôn nằm TRỌN VẸN trong (target_w, target_h) -- scale_factor KHÔNG BAO
+    GIỜ vượt 1.0 (không phóng to ảnh gốc, chỉ có thể thu nhỏ hoặc giữ
+    nguyên). `min_top_pad` (logo_h + 2*pad) trừ THẲNG vào target_h trước khi
+    tính scale -- TOP_PAD đủ chỗ logo BẰNG TOÁN HỌC (bảo đảm cấu trúc, không
+    dựa vào bước "co thêm" tách biệt dễ quên). Phần dư DỌC dồn hết lên ĐỈNH,
+    phần dư NGANG chia đều 2 bên (2d) -- lấp bằng màu band ở nơi gọi (2c).
+
+    Raise ValueError nếu: (a) scale_factor > 1.0 (đang phóng to, BUG); (b)
+    ảnh sau scale vượt vùng trong (đang crop, BUG); (c) phải thu nhỏ quá 15%
+    so với fit tự nhiên (không tính riêng TOP_PAD) mới đủ chỗ logo -- DỪNG
+    KHI #2, cấu hình BAND_H/kích thước khung lệch quá xa, cần Lead quyết,
+    KHÔNG tự ý nới ngưỡng."""
     target_w, target_h = max(int(target_w), 1), max(int(target_h), 1)
     src_w, src_h = im.size
-    scale = max(target_w / src_w, target_h / src_h)
-    new_w, new_h = max(round(src_w * scale), 1), max(round(src_h * scale), 1)
-    resized = im.resize((new_w, new_h), Image.LANCZOS)
-    left = max((new_w - target_w) // 2, 0)
-    top = max((new_h - target_h) // 2, 0)
-    return resized.crop((left, top, left + target_w, top + target_h))
+    reduced_h = max(target_h - min_top_pad, 1)
+
+    natural_scale = min(1.0, target_w / src_w, target_h / src_h)
+    scale = min(1.0, target_w / src_w, reduced_h / src_h)
+
+    if scale > 1.0 + 1e-9:
+        raise ValueError(
+            f"brand_stamp: scale_factor={scale:.4f} > 1.0 -- BUG (xem A2 Bước 2f, "
+            "không được phóng to ảnh AI gốc)"
+        )
+
+    new_w = max(round(src_w * scale), 1)
+    new_h = max(round(src_h * scale), 1)
+    if new_w > target_w or new_h > target_h:
+        raise ValueError(
+            f"brand_stamp: ảnh sau scale ({new_w}x{new_h}) vượt vùng trong "
+            f"({target_w}x{target_h}) -- đang crop, ĐÂY LÀ BUG (xem A2 Bước 2f)"
+        )
+
+    if natural_scale > 0 and (1 - scale / natural_scale) > 0.15:
+        raise ValueError(
+            "DỪNG (Lead quyết, xem A2 Bước 2e DỪNG KHI #2): ảnh phải thu nhỏ quá 15% "
+            f"so với vùng trong mới đủ TOP_PAD (shrink={100 * (1 - scale / natural_scale):.1f}%, "
+            f"min_top_pad={min_top_pad}px, target={target_w}x{target_h}px, "
+            f"nguồn={src_w}x{src_h}px) -- tỷ lệ lệch quá nhiều, cần xem lại BAND_H "
+            "hoặc kích thước khung, KHÔNG tự ý nới ngưỡng 15%."
+        )
+
+    resized = im if (new_w, new_h) == (src_w, src_h) else im.resize((new_w, new_h), Image.LANCZOS)
+    top_pad_px = target_h - new_h
+    side_total = target_w - new_w
+
+    return {
+        "resized": resized, "new_w": new_w, "new_h": new_h,
+        "top_pad_px": top_pad_px, "side_pad_px": side_total // 2, "left": side_total // 2,
+        "scale_factor": scale,
+    }
 
 
 # =====================================================================
@@ -414,70 +545,44 @@ def _draw_right_block(draw: ImageDraw.ImageDraw, lines: list[str], font: ImageFo
 
 
 # =====================================================================
-# Bước 5 -- LOGO (ảnh tràn viền mép trên -- scrim CÓ ĐIỀU KIỆN, CHỖ DUY NHẤT)
+# Bước 5 -- LOGO (dán vào TOP_PAD -- nền phẳng 1 màu, KHÔNG còn scrim)
 # =====================================================================
 
-def _region_luminance(im: Image.Image, bbox: tuple[int, int, int, int]) -> float | None:
-    x0, y0, x1, y1 = bbox
-    w, h = im.size
-    x0, y0 = max(x0, 0), max(y0, 0)
-    x1, y1 = min(x1, w), min(y1, h)
-    if x1 <= x0 or y1 <= y0:
-        return None
-    region = im.convert("RGB").crop((x0, y0, x1, y1))
-    stat = ImageStat.Stat(region)
-    return _luminance(tuple(stat.mean))
+def _paste_logo(overlay: Image.Image, *, logo_path: Path, top_pad_px: int, pad: int,
+                logo_w: int, logo_h: int, final_w: int) -> bool:
+    """SỬA LỖI ĐẶC TẢ (2026-07-24, Phần A SỬA 2) -- dán ẢNH logo thật vào
+    TOP_PAD (dải màu band phẳng ở đỉnh, matting Bước 2 đã bảo đảm đủ chỗ:
+    top_pad_px >= logo_h + 2*pad) THAY VÌ đè lên ảnh AI tràn viền mép trên
+    (bản cũ). KHÔNG CÒN ẢNH AI NÀO BÊN DƯỚI ĐỂ ĐÈ -- scrim (bản cũ, chỉ vẽ
+    khi luminance nền sáng >110) trở nên VÔ NGHĨA, XOÁ HẲN cơ chế (không còn
+    field log `scrim_applied`).
 
-
-def _draw_top_scrim(overlay: Image.Image, *, w: int, h: int, scrim_h: int, max_alpha: int = 140) -> None:
-    """Scrim gradient ĐEN, alpha 0 (y=0, mép trên) -> `max_alpha` (y=scrim_h)
-    -- CHỖ DUY NHẤT còn dùng scrim (A2 Bước 5) -- chỉ gọi khi vùng bbox logo
-    nở 20% có luminance > 110 (tương phản thật sự thấp), KHÔNG vẽ mặc định.
-    max_alpha=140/255 ~= 0.55 (đúng yêu cầu Lead "alpha 0->0.55")."""
-    if scrim_h <= 0:
-        return
-    grad = Image.new("L", (1, scrim_h))
-    for i in range(scrim_h):
-        grad.putpixel((0, i), int(max_alpha * (i / max(scrim_h - 1, 1))))
-    grad = grad.resize((w, scrim_h))
-    scrim_rgba = Image.new("RGBA", (w, scrim_h), (0, 0, 0, 0))
-    scrim_rgba.putalpha(grad)
-    overlay.alpha_composite(scrim_rgba, (0, 0))
-
-
-def _paste_logo_with_scrim(canvas: Image.Image, overlay: Image.Image, *, logo_path: Path,
-                           pad: int, final_w: int, final_h: int) -> bool:
-    """Dán ẢNH logo thật góc trên-trái, lề `pad` (4% chiều rộng, xem
-    `stamp_brand`). Đo luminance vùng bbox logo NỞ RA 20% (đo trên `canvas`
-    TRƯỚC khi dán logo -- vùng nền thật AI vẽ) -- >110 (tương phản thấp) ->
-    vẽ scrim đen (A2 Bước 5) LÊN `overlay` trước khi dán logo. Trả True nếu
-    đã vẽ scrim (ghi vào log JSON `scrim_applied`)."""
-    scrim_applied = False
+    Căn trái lề `pad`, căn giữa theo chiều dọc trong dải TOP_PAD. ASSERT bbox
+    logo nằm TRỌN trong TOP_PAD -- raise ValueError nếu vi phạm (BUG cấu
+    trúc, xem A2 SỬA 2). Trả True nếu đã dán (ghi vào log JSON
+    `logo_in_pad`), False nếu không có/lỗi file logo (KHÔNG raise, giữ hành
+    vi cũ: thiếu logo không được chặn cả pipeline)."""
     if not logo_path.exists():
         logger.warning("brand_stamp: không tìm thấy file logo '%s' -- bỏ qua, KHÔNG đóng dấu logo.", logo_path)
-        return scrim_applied
+        return False
     try:
         logo = Image.open(logo_path).convert("RGBA")
     except Exception as e:
         logger.warning("brand_stamp: lỗi mở file logo '%s' (%s) -- bỏ qua, KHÔNG đóng dấu logo.", logo_path, e)
-        return scrim_applied
+        return False
 
-    logo_h = max(round(final_h * 0.06), 24)
-    logo_w = max(round(logo.width * (logo_h / logo.height)), 1)
-    logo_x, logo_y = pad, pad
+    logo_x = pad
+    logo_y = max((top_pad_px - logo_h) // 2, 0)
 
-    expand_x = int(logo_w * 0.20)
-    expand_y = int(logo_h * 0.20)
-    bbox = (logo_x - expand_x, logo_y - expand_y, logo_x + logo_w + expand_x, logo_y + logo_h + expand_y)
-    lum = _region_luminance(canvas, bbox)
-    if lum is not None and lum > 110:
-        scrim_h = max(round(final_h * 0.14), logo_y + logo_h)
-        _draw_top_scrim(overlay, w=final_w, h=final_h, scrim_h=scrim_h)
-        scrim_applied = True
+    if logo_y + logo_h > top_pad_px or logo_x + logo_w > final_w:
+        raise ValueError(
+            f"brand_stamp: bbox logo ({logo_x},{logo_y})-({logo_x + logo_w},{logo_y + logo_h}) "
+            f"vượt TOP_PAD (0,0)-({final_w},{top_pad_px}) -- BUG cấu trúc (xem A2 SỬA 2 ASSERT)"
+        )
 
     logo_resized = logo.resize((logo_w, logo_h), Image.LANCZOS)
     overlay.alpha_composite(logo_resized, (logo_x, logo_y))
-    return scrim_applied
+    return True
 
 
 # =====================================================================
@@ -496,22 +601,25 @@ def stamp_brand(
     logo_path: str | Path | None = None,
     settings=None,
 ) -> tuple[bytes, dict]:
-    """Đóng dấu brand THEO KIẾN TRÚC KHUNG CỨNG ĐÁY (2026-07-23, THAY hoàn
-    toàn hướng scrim đáy 2026-07-22 -- xem module docstring, đây là ĐẢO
-    HƯỚNG P0 quyết định bởi Lead sau khi xem ảnh thật cho thấy scrim che mất
-    dữ liệu thật thay vì sửa lỗi).
+    """Đóng dấu brand THEO KIẾN TRÚC KHUNG CỨNG ĐÁY (2026-07-23) + FIT-INSIDE
+    matting/logo-trong-TOP_PAD (SỬA LỖI ĐẶC TẢ 2026-07-24 -- xem module
+    docstring, phiên trước tự phát hiện lỗi ở "cover-fit + cắt cân giữa" của
+    chính đặc tả mình, KHÔNG phải bug lập trình).
 
-    KHÁC BIỆT CỐT LÕI với bản cũ: brand_stamp KHÔNG BAO GIỜ vẽ ĐÈ lên pixel
-    ảnh AI. Nó THU ảnh AI (matting, Bước 2) vào 1 vùng NHỎ HƠN khung cuối rồi
-    vẽ band đáy TRÊN PHẦN DIỆN TÍCH RIÊNG còn lại (Bước 3-4) -- va chạm chữ
-    với nội dung là BẤT KHẢ THI VỀ CẤU TRÚC (không có pixel chung giữa vùng
-    ảnh AI và vùng band), khác "canh toạ độ cho khỏi đụng" (có thể sai khi dữ
-    liệu đổi) của kiến trúc cũ.
+    KHÁC BIỆT CỐT LÕI với bản cover-fit cũ: ảnh AI KHÔNG BAO GIỜ bị cắt để
+    lấp đầy khung -- nó luôn nằm TRỌN VẸN bên trong (fit-inside/contain,
+    scale_factor <=1.0), phần dư (nếu có) lấp bằng màu band. TOP_PAD (dải
+    cho logo) được trừ sẵn vào phép tính scale (Bước 2) -- va chạm chữ/nội
+    dung, cắt nội dung, hay logo đè ảnh đều BẤT KHẢ THI VỀ CẤU TRÚC, không
+    phải "đã canh cho khỏi đụng" (có thể sai khi dữ liệu đổi).
 
     Trả (PNG bytes ĐÃ đóng dấu, log dict) -- log PHẢI được ai_full.py ghi
-    cạnh ảnh (JSON) để Lead kiểm không cần mở ảnh (A2 Bước 6): {cropped_top_
-    px, band_h, band_color, band_color_source, scrim_applied, source_text,
-    disclaimer_lines, final_wh}."""
+    cạnh ảnh (JSON) để Lead kiểm không cần mở ảnh, CHẤM BẰNG SỐ (scale_factor/
+    top_pad_px/side_pad_px) chứ KHÔNG dựa mắt -- mắt không bắt được lỗi crop
+    nếu band vẫn trông sạch (xem STOP-REPORT phiên trước): {cropped_top_px,
+    band_h, band_color, band_color_source, ai_size_requested, ai_size_reason,
+    ratio_inner, ratio_ai, scale_factor, top_pad_px, side_pad_px, logo_in_pad,
+    source_text, disclaimer_lines, final_wh}."""
     theme = theme if theme in _THEME_COLORS else "dark"
     colors = _THEME_COLORS[theme]
 
@@ -519,16 +627,23 @@ def stamp_brand(
 
     # --- Bước 1: edge sanitizer (lưới an toàn, KHÔNG thay cho sửa prompt) ---
     im, cropped_top_px = _edge_sanitize_top(im)
+    ratio_ai = im.size[0] / im.size[1]
 
-    # --- Bước 2: matting vào vùng trong (final_h - band_h danh nghĩa) -------
+    # --- kích thước khung + logo (TRƯỚC matting -- Bước 2 cần logo_h+2*pad để
+    # trừ vào TOP_PAD ngay trong phép tính scale, xem `_matte`) -------------
     final_w, final_h = _resolve_final_size(ratio, settings)
     band_min_px = _resolve_band_min_px(settings)
     nominal_band_h = max(round(final_h * 0.075), band_min_px)
-    matted = _matte(im, target_w=final_w, target_h=final_h - nominal_band_h)
+    resolved_logo_path = Path(logo_path) if logo_path else _DEFAULT_LOGO_PATH
+    logo_w, logo_h, pad = _logo_dimensions(resolved_logo_path, final_w=final_w, final_h=final_h)
+    min_top_pad = logo_h + 2 * pad
+
+    # --- Bước 2: matting fit-inside (final_h - band_h danh nghĩa) -----------
+    fit = _matte(im, target_w=final_w, target_h=final_h - nominal_band_h, min_top_pad=min_top_pad)
 
     # --- Bước 3: màu band tự khớp -------------------------------------------
     navy_fallback = _resolve_navy_fallback(settings)
-    band_color, band_color_source = _band_color(matted, navy_fallback=navy_fallback)
+    band_color, band_color_source = _band_color(fit["resized"], navy_fallback=navy_fallback)
 
     # --- Bước 4: đo nội dung band (CÓ THỂ khiến band nới cao hơn danh nghĩa) -
     margin_x = max(int(final_w * 0.04), 12)
@@ -545,12 +660,13 @@ def stamp_brand(
         # NỚI band -- re-matte với inner_h nhỏ hơn (final_h GIỮ NGUYÊN, xem A1
         # -- khung xuất bản cố định, phần hy sinh là diện tích ảnh AI, KHÔNG
         # BAO GIỜ là chữ bị cắt).
-        matted = _matte(im, target_w=final_w, target_h=final_h - band_h)
-        band_color, band_color_source = _band_color(matted, navy_fallback=navy_fallback)
+        fit = _matte(im, target_w=final_w, target_h=final_h - band_h, min_top_pad=min_top_pad)
+        band_color, band_color_source = _band_color(fit["resized"], navy_fallback=navy_fallback)
 
-    # --- Dựng canvas cuối: ảnh AI (đã matte) TRÊN + band màu ĐÁY, KHÔNG chồng
+    # --- Dựng canvas: nền màu band PHỦ TOÀN BỘ (2c -- phần dư lấp màu band) -
+    # rồi dán ảnh AI (đã fit-inside) đúng vị trí: đáy khớp band, ngang giữa --
     canvas = Image.new("RGB", (final_w, final_h), band_color)
-    canvas.paste(matted, (0, 0))
+    canvas.paste(fit["resized"], (fit["left"], fit["top_pad_px"]))
     overlay = Image.new("RGBA", (final_w, final_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
@@ -564,22 +680,29 @@ def stamp_brand(
         _draw_right_block(draw, layout["dis_lines"], layout["dis_font"], layout["dis_line_h"],
                           right_x=final_w - margin_x, y_center=band_center_y, color=(*colors["muted"], 255))
 
-    # --- Bước 5: logo (tràn viền mép trên) + scrim CÓ ĐIỀU KIỆN ------------
-    resolved_logo_path = Path(logo_path) if logo_path else _DEFAULT_LOGO_PATH
-    pad = max(int(final_w * 0.04), 16)
-    scrim_applied = _paste_logo_with_scrim(canvas, overlay, logo_path=resolved_logo_path,
-                                          pad=pad, final_w=final_w, final_h=final_h)
+    # --- Bước 5: logo trong TOP_PAD (KHÔNG scrim -- nền phẳng, xem SỬA 2) ---
+    logo_in_pad = _paste_logo(overlay, logo_path=resolved_logo_path, top_pad_px=fit["top_pad_px"],
+                              pad=pad, logo_w=logo_w, logo_h=logo_h, final_w=final_w)
 
     stamped = Image.alpha_composite(canvas.convert("RGBA"), overlay).convert("RGB")
     out = io.BytesIO()
     stamped.save(out, format="PNG")
+
+    ai_size, ai_size_reason = select_ai_size(ratio, settings=settings)
 
     log = {
         "cropped_top_px": cropped_top_px,
         "band_h": band_h,
         "band_color": "#%02x%02x%02x" % band_color,
         "band_color_source": band_color_source,
-        "scrim_applied": scrim_applied,
+        "ai_size_requested": list(ai_size),
+        "ai_size_reason": ai_size_reason,
+        "ratio_inner": round(final_w / (final_h - nominal_band_h), 4),
+        "ratio_ai": round(ratio_ai, 4),
+        "scale_factor": round(fit["scale_factor"], 4),
+        "top_pad_px": fit["top_pad_px"],
+        "side_pad_px": fit["side_pad_px"],
+        "logo_in_pad": logo_in_pad,
         "source_text": source_text,
         "disclaimer_lines": layout["dis_lines"],
         "final_wh": [final_w, final_h],
