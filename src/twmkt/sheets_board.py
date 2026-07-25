@@ -183,8 +183,32 @@ _GATE1_KEY = GATE1_COL.lower()   # dùng cho .index()/so sánh header đã lower
 _GATE2_KEY = GATE2_COL.lower()
 _GATE3_KEY = GATE3_COL.lower()
 
+# P2 store-as-truth Bước 4 (2026-07-25) — "Output Type": ĐẦU VÀO giới hạn Content
+# Factory (chỉ sinh loại được người chọn, xem produce_from_sheet.py::run() —
+# tra _wanted_types()). Giá trị hợp lệ (OUTPUT_TYPE_VALUES): Article ·
+# Long-Article · Infographic · Video · AUTO — chọn NHIỀU (phân tách dấu phẩy,
+# cùng nếp cột "tickers"), mặc định MỘT giá trị "AUTO" nếu để trống. AUTO =
+# KHÔNG thêm giới hạn nào ngoài quyết định router (RouterDecision.output_
+# channels đã tự đánh giá facts[]/tín hiệu nội dung sẵn — xem agents/
+# structure_router.py) — tương đương hành vi TRƯỚC Bước 4 (không có khái
+# niệm giới hạn chọn loại). "Long-Article" CHƯA có producer (chỉ 3 loại
+# article/infographic/video tồn tại thật) — CHẤP NHẬN là giá trị lưu hợp lệ
+# cho tương lai, hiện tại chọn nó không sinh gì (không khớp loại nào Content
+# Factory biết sinh).
+# VỊ TRÍ CỘT — QUYẾT ĐỊNH TỰ ĐƯA RA, CHƯA CÓ XÁC NHẬN RÕ RÀNG TỪ LEAD: đặc tả
+# gốc ghi "ngay SAU cột Duyệt Content" — nhưng Duyệt Content ở tab CONTENT,
+# sinh SAU khi Output Type phải đã tồn tại (input TRƯỚC sản xuất không thể
+# nằm SAU kết quả sản xuất) -- suy đoán đây là nhầm "Duyệt Content" thành
+# "Duyệt Context". Đặt tạm SAU "Duyệt Context" (GATE1_COL, tab CONTEXT) để
+# khớp thiết kế store Bước 2 (output_type nằm trong gate_status, CÙNG layer
+# gate1 — xem schema.sql) và tiếp tục có tiến triển — CẦN LEAD XÁC NHẬN LẠI,
+# đổi vị trí cột (chỉ append CUỐI, xem quy tắc "không chen giữa" ở
+# CONTENT_HEADER phía dưới) rẻ nếu sai.
+OUTPUT_TYPE_COL = "Output Type"
+OUTPUT_TYPE_VALUES = ("Article", "Long-Article", "Infographic", "Video", "AUTO")
+
 CONTEXT_HEADER = ["Timestamp", "Hot%", "Score", "Group", "Topic", "Context", "Hook",
-                  "Source", GATE1_COL, "Execute", "tickers", "Notes", "TopicKey"]
+                  "Source", GATE1_COL, OUTPUT_TYPE_COL, "Execute", "tickers", "Notes", "TopicKey"]
 # "engine" TẠM (haiku|sonnet|mock) — đối chiếu model NÀO thực sự chạy cho mỗi
 # dòng log, xem factory.model_engine_label(). Rỗng nếu dòng log không gắn LLM.
 LOG_HEADER = ["timestamp", "level", "message", "engine"]
@@ -522,7 +546,8 @@ def _source_cell(source_url: str, other_sources: list[str] | None) -> str:
 def context_row(*, title: str, hook_line: str, source_url: str, score: int, hot_pct: float,
                 topic: str = "", group: str = "", other_sources: list[str] | None = None,
                 tickers: list[str] | None = None, status: str = "PENDING",
-                execute: str = "", topic_key: str = "", ts: str | None = None) -> list[str]:
+                execute: str = "", topic_key: str = "", ts: str | None = None,
+                notes: str = "", output_type: list[str] | None = None) -> list[str]:
     """Một hàng CONTEXT ĐÚNG thứ tự CONTEXT_HEADER (Timestamp đầu tiên).
 
     Status mặc định PENDING, Execute mặc định rỗng (tự chuyển RUN khi Status=
@@ -533,8 +558,15 @@ def context_row(*, title: str, hook_line: str, source_url: str, score: int, hot_
     `topic_key` (Lớp 5 Phase 1) — CALLER tự tính (curation.keys.compute_topic_key)
     rồi truyền vào, hàm này KHÔNG tự tính (giữ context_row() thuần/không phụ
     thuộc curation, giống triết lý các tham số khác ở đây); rỗng nếu caller
-    chưa wire (vd đường --draft cũ) — backfill xử lý sau. Đặt CUỐI danh sách
-    (khớp CONTEXT_HEADER append, KHÔNG lệch vị trí các cột hiện có).
+    chưa wire (vd đường --draft cũ) — backfill xử lý sau.
+    `notes` (P2 store-as-truth Bước 3, mặc định "" — tương thích ngược MỌI
+    caller cũ) — NGƯỜI-SỞ-HỮU (xem store/sync_service.py::_CONTEXT_USER_COLS).
+    render_context_to_sheet() đọc THẲNG từ store (gate_status), KHÔNG đọc lại
+    Sheet hiện có trước khi ghi đè — store là nguồn sự thật cho cả Notes lẫn
+    Duyệt Context (xem docstring hàm đó).
+    `output_type` (P2 store-as-truth Bước 4, mặc định None -> rỗng, sync
+    service coi rỗng = "AUTO" khi đọc lại) — list giá trị trong
+    OUTPUT_TYPE_VALUES, ghi phân tách dấu phẩy (cùng nếp `tickers`).
     """
     return [
         ts or _now_ddmmyyyy(),                            # Timestamp (DD/MM/YYYY, không giờ)
@@ -545,11 +577,12 @@ def context_row(*, title: str, hook_line: str, source_url: str, score: int, hot_
         title,                                                  # Context
         hook_line,                                               # Hook
         _source_cell(source_url, other_sources),                  # Source (gộp báo khác)
-        status,                                                     # Status
-        execute,                                                     # Execute
-        ", ".join(tickers or []),                                    # tickers
-        "",                                                           # Notes
-        topic_key,                                                     # TopicKey (Lớp 5, cuối)
+        status,                                                     # Status (Duyệt Context)
+        ", ".join(output_type or []),                                # Output Type
+        execute,                                                      # Execute
+        ", ".join(tickers or []),                                     # tickers
+        notes,                                                         # Notes
+        topic_key,                                                      # TopicKey (Lớp 5, cuối)
     ]
 
 

@@ -127,6 +127,34 @@ def _is_fully_produced(topic_key: str, seen: set[tuple[str, str]]) -> bool:
 # minh để nếu tách lại vocabulary về sau chỉ sửa 1 chỗ.
 _CHANNEL_TO_TYPE = {"article": "article", "infographic": "infographic", "video": "video"}
 
+# P2 store-as-truth Bước 4 — Output Type (sheets_board.OUTPUT_TYPE_VALUES) là
+# ĐẦU VÀO giới hạn Content Factory, ĐỘC LẬP với quyết định router (2 lớp gate
+# riêng: router quyết "tuyến này CÓ HỢP tin không" theo nội dung; Output Type
+# quyết "người CÓ MUỐN sinh tuyến này không" theo lựa chọn Sheet — CẢ HAI phải
+# đồng ý mới sinh, xem run() chỗ áp vào `channels`). "Long-Article" CHƯA có
+# producer -- không map, chọn nó không sinh gì (không phải lỗi, không raise).
+_OUTPUT_TYPE_TO_CONTENT_TYPE = {"Article": "article", "Infographic": "infographic", "Video": "video"}
+
+
+def _allowed_output_types(output_type: list[str]) -> set[str] | None:
+    """None = KHÔNG áp giới hạn thêm (output_type rỗng hoặc chứa "AUTO") --
+    giữ NGUYÊN hành vi router-only từ trước Bước 4. Set cụ thể = CHỈ các
+    content_type này được sinh, bất kể router có đồng ý hay không."""
+    if not output_type or "AUTO" in output_type:
+        return None
+    return {_OUTPUT_TYPE_TO_CONTENT_TYPE[t] for t in output_type if t in _OUTPUT_TYPE_TO_CONTENT_TYPE}
+
+
+def _channel_skip_reason(ch: str, decision, output_type_excluded: set[str]) -> str:
+    """Notes giải thích ĐÚNG nguyên nhân SKIPPED — phân biệt router (nội dung
+    không hợp tuyến) với Output Type (người không chọn tuyến, dù router có
+    thể đã đồng ý) — 2 nguyên nhân KHÁC NHAU, gộp làm 1 thông điệp sẽ đánh
+    lừa người đọc Notes khi tra vì sao thiếu 1 loại."""
+    if ch in output_type_excluded:
+        return f"Output Type không chọn tuyến {ch} cho chủ đề này (người giới hạn qua cột Output Type)."
+    return (f"Router quyết định tuyến {ch} không hợp tin này: "
+           f"{decision.channel_rationale.get(ch) or '(router không cho lý do)'}")
+
 
 def _is_fully_produced_channels(topic_key: str, seen: set[tuple[str, str]], channels: dict) -> bool:
     """True nếu MỌI tuyến channels[c]=True của chủ đề (tra theo `topic_key` —
@@ -376,14 +404,23 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
         # Phase 4.13 Mục A: tuyến nào ĐƯỢC sinh cho chủ đề này — quyết-định-từ-
         # đầu của router (đóng băng CÙNG decision), THAY nhánh "SKIPPED-vì-rỗng"
         # phản ứng-sau của Phase 4.12 (xem nhánh infographic bên dưới).
-        channels = decision.output_channels
+        channels = dict(decision.output_channels)
+        # Bước 4 — Output Type AND với quyết định router (xem docstring
+        # _allowed_output_types/_channel_skip_reason): output_type rỗng/AUTO
+        # -> KHÔNG đổi channels (hành vi router-only như trước Bước 4).
+        allowed_types = _allowed_output_types(item.get("output_type") or [])
+        output_type_excluded: set[str] = set()
+        if allowed_types is not None:
+            for ch, enabled in list(channels.items()):
+                if enabled and ch not in allowed_types:
+                    output_type_excluded.add(ch)
+                    channels[ch] = False
 
         article_outcome = None
         if not write_article:
             skipped += 1
         elif not channels.get("article", True):
-            reason = (f"Router quyết định tuyến article không hợp tin này: "
-                     f"{decision.channel_rationale.get('article') or '(router không cho lý do)'}")
+            reason = _channel_skip_reason("article", decision, output_type_excluded)
             _write_content(topic_key, "article", status="SKIPPED", output="", notes=reason, facts_json=facts_json)
             written += 1
             seen.add((topic_key, "article"))
@@ -446,8 +483,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                 if (topic_key, type_key) in seen:
                     skipped += 1
                     continue
-                reason = (f"Router quyết định tuyến {ch} không hợp tin này: "
-                         f"{decision.channel_rationale.get(ch) or '(router không cho lý do)'}")
+                reason = _channel_skip_reason(ch, decision, output_type_excluded)
                 _write_content(topic_key, type_key, status="SKIPPED", output="", notes=reason, facts_json=facts_json)
                 written += 1
                 seen.add((topic_key, type_key))

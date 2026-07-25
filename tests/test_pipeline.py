@@ -928,14 +928,16 @@ def test_sheets_sources_from_rows_filters_enable():
 
 def test_sheets_context_row_column_order():
     """context_row header MỚI: Timestamp ĐẦU TIÊN, KHÔNG còn cột Use, Execute
-    NGAY SAU Status. Source gộp báo khác; Status=PENDING, Execute rỗng mặc định.
-    TopicKey (Lớp 5 Phase 1) — APPEND CUỐI (không chen giữa, xem sheets_board.py
-    comment CONTEXT_HEADER: tránh lệch vị trí mọi cột hiện có)."""
+    NGAY SAU Output Type (P2 store-as-truth Bước 4, chèn sau Duyệt Context —
+    xem sheets_board.py comment OUTPUT_TYPE_COL cho lý do vị trí). Source gộp
+    báo khác; Status=PENDING, Execute rỗng mặc định. TopicKey (Lớp 5 Phase 1)
+    — APPEND CUỐI (không chen giữa, xem sheets_board.py comment CONTEXT_HEADER:
+    tránh lệch vị trí mọi cột hiện có)."""
     from twmkt.sheets_board import GATE1_COL, context_row, CONTEXT_HEADER
 
     assert CONTEXT_HEADER == ["Timestamp", "Hot%", "Score", "Group", "Topic", "Context",
-                             "Hook", "Source", GATE1_COL, "Execute", "tickers", "Notes",
-                             "TopicKey"]
+                             "Hook", "Source", GATE1_COL, "Output Type", "Execute", "tickers",
+                             "Notes", "TopicKey"]
     row = context_row(title="Tiêu đề bài", hook_line="FPT: hook hấp dẫn",
                       source_url="http://u", score=5, hot_pct=42.5, topic="CoPhieu",
                       group="CoPhieu, ChinhSach", other_sources=["http://u2", "http://u3"],
@@ -3541,30 +3543,35 @@ class _EmptyRouteLLM:
         return ""
 
 
-def _approved_row(context: str, row: int, *, source: str = "", topic_key: str = "") -> dict:
+def _approved_row(context: str, row: int, *, source: str = "", topic_key: str = "",
+                  output_type: list[str] | None = None) -> dict:
     """`row` giữ lại CHỈ để test đặt tên/tra cứu tiện tay — KHÔNG còn ý nghĩa
     Sheet-row-index (store không có khái niệm dòng). `topic_key` rỗng -> tính
     TẤT ĐỊNH từ `source` (compute_topic_key() thật — khớp hành vi assign_topic_key
     cũ khi có URL, cho test idempotent-theo-URL tiếp tục đúng) hoặc surrogate
     ổn định theo `row` nếu không có source (thay uuid4 ngẫu nhiên cũ — test cần
-    tái lập được)."""
+    tái lập được). `output_type` (Bước 4) — mặc định None -> [] (AUTO, không
+    giới hạn thêm, khớp hành vi trước Bước 4)."""
     from twmkt.curation.keys import compute_topic_key
     tk = topic_key or (compute_topic_key(source) if source else f"row-{row}-key")
     return {"context": context, "hook": "hook gợi ý", "source": source, "tickers": [],
-           "group": "", "topic": "", "execute": "RUN", "row": row, "topic_key": tk}
+           "group": "", "topic": "", "execute": "RUN", "row": row, "topic_key": tk,
+           "output_type": output_type or []}
 
 
 def _seed_approved(row: dict, *, db_path) -> None:
     """Ghi 1 approved_row (dict _approved_row) vào store thật: raw (crawl output)
-    + gate_status (gate1=APPROVE, execute=row['execute'] hoặc 'RUN' mặc định) —
-    tương đương "dòng CONTEXT Status=APPROVE" cũ trên Sheet."""
+    + gate_status (gate1=APPROVE, execute=row['execute'] hoặc 'RUN' mặc định,
+    output_type=row['output_type'] nếu có) — tương đương "dòng CONTEXT
+    Status=APPROVE" cũ trên Sheet."""
     from store import pipeline_store as ps
     tk = row["topic_key"]
     ps.write_raw(tk, {
         "context": row["context"], "hook": row["hook"], "source": row["source"],
         "tickers": row["tickers"], "group": row["group"], "topic": row["topic"],
     }, db_path=db_path)
-    ps.write_gate_status(tk, gate1="APPROVE", execute=row.get("execute") or "RUN", db_path=db_path)
+    ps.write_gate_status(tk, gate1="APPROVE", execute=row.get("execute") or "RUN",
+                         output_type=row.get("output_type") or None, db_path=db_path)
 
 
 def _read_back_produce_result(rows: list[dict], *, db_path):
@@ -3888,6 +3895,80 @@ def test_run_article_skipped_when_router_decides_channel_false_upfront():
     article_rows = [r for r in board.appended_content if r[2] == "article"]
     assert len(article_rows) == 1 and article_rows[0][3] == "SKIPPED"
     assert "Tin chỉ 1 câu" in article_rows[0][5]
+
+
+def test_run_output_type_restricts_to_selected_type_only():
+    """Bước 4: output_type=["Infographic"] -> CHỈ infographic được thử sinh
+    (KHÔNG bị SKIPPED-vì-Output-Type), article/video bị SKIPPED với lý do
+    "Output Type không chọn" — KHÔNG gọi writer_llm cho article (PoisonWriterLLM
+    raise nếu lỡ gọi) dù router (mặc định _EmptyRouteLLM, fallback an toàn)
+    đồng ý CẢ 3 tuyến."""
+    class _PoisonWriterLLM:
+        def complete(self, *a, **kw):
+            raise AssertionError("KHÔNG được gọi writer khi Output Type không chọn article")
+
+    result, board, notifier = _run_produce_scenario(
+        _PoisonWriterLLM(),
+        _approved_row("Bài test Output Type infographic-only", row=2, output_type=["Infographic"]))
+
+    rows_by_type = {r[2]: r for r in board.appended_content}
+    assert rows_by_type["infographic"][3] != "SKIPPED"   # thật sự được thử sinh
+    assert rows_by_type["article"][3] == "SKIPPED"
+    assert "Output Type không chọn" in rows_by_type["article"][5]
+    assert rows_by_type["video"][3] == "SKIPPED"
+    assert "Output Type không chọn" in rows_by_type["video"][5]
+    skipped_events = [ctx for e, ctx in notifier.events if e == "skipped"]
+    assert {ctx.get("type") for ctx in skipped_events} == {"article", "video"}
+
+
+def test_run_output_type_auto_behaves_like_no_restriction():
+    """output_type=["AUTO"] -> KHÔNG thêm giới hạn nào (giữ hành vi router-only
+    trước Bước 4) — không dòng SKIPPED nào mang lý do "Output Type"."""
+    class _CleanWriterLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            return _clean_writer_json()
+
+    result, board, notifier = _run_produce_scenario(
+        _CleanWriterLLM(),
+        _approved_row("Bài test Output Type AUTO", row=2, output_type=["AUTO"]))
+
+    for row in board.appended_content:
+        if row[3] == "SKIPPED":
+            assert "Output Type không chọn" not in row[5]
+
+
+def test_run_output_type_empty_behaves_like_no_restriction():
+    """output_type rỗng (mặc định, chưa ai chọn) -> tương đương AUTO, KHÔNG
+    thêm giới hạn — regression-guard cho hành vi TRƯỚC Bước 4 (mọi test run()
+    cũ không truyền output_type vẫn phải chạy y hệt)."""
+    class _CleanWriterLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            return _clean_writer_json()
+
+    result, board, notifier = _run_produce_scenario(
+        _CleanWriterLLM(), _approved_row("Bài test Output Type rỗng", row=2))
+
+    for row in board.appended_content:
+        if row[3] == "SKIPPED":
+            assert "Output Type không chọn" not in row[5]
+
+
+def test_run_output_type_long_article_has_no_producer_all_skipped():
+    """"Long-Article" là giá trị hợp lệ nhưng CHƯA có producer -- chọn riêng
+    nó -> KHÔNG sinh loại nào trong 3 loại thật (article/infographic/video),
+    tất cả SKIPPED vì Output Type, KHÔNG raise/crash."""
+    class _PoisonWriterLLM:
+        def complete(self, *a, **kw):
+            raise AssertionError("KHÔNG được gọi writer khi Output Type chỉ chọn Long-Article")
+
+    result, board, notifier = _run_produce_scenario(
+        _PoisonWriterLLM(),
+        _approved_row("Bài test Output Type Long-Article", row=2, output_type=["Long-Article"]))
+
+    rows_by_type = {r[2]: r for r in board.appended_content}
+    for type_ in ("article", "infographic", "video"):
+        assert rows_by_type[type_][3] == "SKIPPED"
+        assert "Output Type không chọn" in rows_by_type[type_][5]
     assert board.execute_updates.get(2) not in ("FAILED", "NEEDS_HUMAN")
 
 
