@@ -257,11 +257,11 @@ def test_ingest_context_from_sheet_writes_gate1_and_notes_changes(board, db_path
 def test_ingest_context_from_sheet_no_op_when_nothing_changed(board, db_path):
     ps.write_raw("tk-1", {"context": "Bài 1", "hook": "h", "source": "u1",
                           "tickers": [], "group": "", "topic": ""}, db_path=db_path)
-    ps.write_gate_status("tk-1", gate1="APPROVE", notes="giu nguyen", db_path=db_path)
+    ps.write_gate_status("tk-1", gate1="APPROVE", execute="RUN", notes="giu nguyen", db_path=db_path)
 
     board._tab("CONTEXT").set_rows([
         CONTEXT_HEADER,
-        ["24/07/2026", "0.0", "0", "", "", "Bài 1", "h", "u1", "APPROVE", "", "", "", "giu nguyen", "tk-1"],
+        ["24/07/2026", "0.0", "0", "", "", "Bài 1", "h", "u1", "APPROVE", "", "RUN", "", "giu nguyen", "tk-1"],
     ])
 
     n = ss.ingest_context_from_sheet(board, db_path=db_path)
@@ -491,3 +491,50 @@ def test_sync_all_round_trip_preserves_output_type_selection(board, db_path):
     row_after = grid_after[1]
     assert row_after[_header_index(header, OUTPUT_TYPE_COL)] == "Article"
     assert ps.read_gate_status("tk-1", db_path=db_path)["output_type"] == ["Article"]
+
+
+# =============================================================================
+# Execute bootstrap (Gate1 vừa APPROVE -> tự đặt RUN, thay
+# SheetsBoard.sync_approve_execute_flags() cũ)
+# =============================================================================
+
+def test_ingest_context_from_sheet_bootstraps_execute_run_for_existing_topic(board, db_path):
+    ps.write_raw("tk-1", {"context": "Bài 1", "hook": "h", "source": "u1",
+                          "tickers": [], "group": "", "topic": ""}, db_path=db_path)
+    ps.write_gate_status("tk-1", gate1="PENDING", db_path=db_path)   # chưa duyệt, chưa Execute
+
+    board._tab("CONTEXT").set_rows([
+        CONTEXT_HEADER,
+        ["24/07/2026", "0.0", "0", "", "", "Bài 1", "h", "u1", "APPROVE", "", "", "", "", "tk-1"],
+    ])
+
+    n = ss.ingest_context_from_sheet(board, db_path=db_path)
+    assert n == 1
+    gate = ps.read_gate_status("tk-1", db_path=db_path)
+    assert gate["gate1"] == "APPROVE"
+    assert gate["execute"] == "RUN"
+
+
+def test_ingest_context_from_sheet_bridges_new_topic_already_approved_bootstraps_run(board, db_path):
+    """review_to_sheet.py KHÔNG tự đặt Execute -- topic mới nạp vào store lần
+    đầu mà Sheet đã Gate1=APPROVE (người duyệt rất nhanh) vẫn phải bootstrap
+    Execute=RUN NGAY, không phải chờ 1 lượt ingest thứ 2."""
+    board._tab("CONTEXT").set_rows([
+        CONTEXT_HEADER,
+        ["24/07/2026", "50.0", "5", "", "", "Bài mới đã duyệt ngay", "h",
+         "https://cafef.vn/x.chn", "APPROVE", "", "", "", "", "tk-moi-approved"],
+    ])
+    ss.ingest_context_from_sheet(board, db_path=db_path)
+    gate = ps.read_gate_status("tk-moi-approved", db_path=db_path)
+    assert gate["gate1"] == "APPROVE"
+    assert gate["execute"] == "RUN"
+
+
+def test_ingest_context_from_sheet_does_not_bootstrap_when_gate1_still_pending(board, db_path):
+    board._tab("CONTEXT").set_rows([
+        CONTEXT_HEADER,
+        ["24/07/2026", "0.0", "0", "", "", "Bài chưa duyệt", "h", "u1", "PENDING", "", "", "", "", "tk-1"],
+    ])
+    ss.ingest_context_from_sheet(board, db_path=db_path)
+    gate = ps.read_gate_status("tk-1", db_path=db_path)
+    assert "execute" not in gate   # KHÔNG bootstrap khi chưa duyệt

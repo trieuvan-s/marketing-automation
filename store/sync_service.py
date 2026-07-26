@@ -19,13 +19,14 @@ BỐN HÀM CHÍNH:
 
 NGUYÊN TẮC 3.3 — KHÔNG CỘT NÀO 2 CHIỀU (xem _CONTEXT_MACHINE_COLS/
 _CONTEXT_USER_COLS/_CONTENT_MACHINE_COLS/_CONTENT_USER_COLS bên dưới cho danh
-sách đầy đủ + lý do từng cột). NGOẠI LỆ DUY NHẤT đã biết: cột Execute (CONTEXT)
-— máy ghi RUN/DONE/FAILED/NEEDS_HUMAN, NHƯNG người được phép tự đổi
-NEEDS_HUMAN -> RUN để yêu cầu thử lại (đã tài liệu hoá ở agents/writer.py
-Phase 4.9, "chờ người đổi Execute về RUN"). ingest_context_from_sheet() CHỈ
-đọc ĐÚNG transition này (NEEDS_HUMAN -> RUN), KHÔNG đọc mọi giá trị Execute
-như 1 cột người-sở-hữu bình thường — vẫn giữ đúng tinh thần "không 2 chiều
-đầy đủ", chỉ mở 1 khe hẹp đã biết trước.
+sách đầy đủ + lý do từng cột). 2 KHE HẸP đã biết trước cho cột Execute
+(CONTEXT — máy ghi RUN/DONE/FAILED/NEEDS_HUMAN), ingest_context_from_sheet()
+CHỈ đọc ĐÚNG 2 transition này, KHÔNG đọc mọi giá trị Execute như 1 cột
+người-sở-hữu bình thường:
+  1. rỗng -> RUN khi Gate1 vừa APPROVE (thay SheetsBoard.sync_approve_
+     execute_flags() cũ — bootstrap lần đầu, KHÔNG phải người gõ tay "RUN").
+  2. NEEDS_HUMAN -> RUN (người tự đổi để yêu cầu thử lại, đã tài liệu hoá ở
+     agents/writer.py Phase 4.9, "chờ người đổi Execute về RUN").
 
 CẦU NỐI TẠM (móc nối chéo đã báo Lead ở Bước 1/Bước 2, CHƯA giải quyết dứt
 điểm): review_to_sheet.py (crawl -> CONTEXT mới) nằm NGOÀI ranh giới file
@@ -197,6 +198,12 @@ def ingest_context_from_sheet(board: SheetsBoard, *, db_path=None) -> int:
         raw_src = _cell(row, i_src)
         source_url = raw_src.splitlines()[0] if raw_src else ""
         tickers = [t.strip() for t in _cell(row, i_tk).split(",") if t.strip()]
+        # Execute="" khi Gate1 vừa APPROVE -> tự đặt RUN (thay
+        # SheetsBoard.sync_approve_execute_flags() cũ — nay là việc sync
+        # service, xem docstring run() trong produce_from_sheet.py). Đây là
+        # NGOẠI LỆ THỨ 2 (cùng NEEDS_HUMAN->RUN) -- không đọc mọi giá trị
+        # Execute, chỉ đúng transition "vừa duyệt, chưa từng chạy".
+        bootstrap_execute = "RUN" if (sheet_gate1 == "APPROVE" and not sheet_execute) else None
 
         if ps.read_raw(topic_key, db_path=db_path) is None:
             # Cầu nối tạm: topic MỚI từ review_to_sheet.py, chưa có trong store.
@@ -216,7 +223,7 @@ def ingest_context_from_sheet(board: SheetsBoard, *, db_path=None) -> int:
             }, db_path=db_path)
             writes += 1
             ps.write_gate_status(topic_key, gate1=sheet_gate1,
-                                 execute=sheet_execute or None, notes=sheet_notes or None,
+                                 execute=sheet_execute or bootstrap_execute, notes=sheet_notes or None,
                                  output_type=sheet_output_type or None,
                                  db_path=db_path)
             writes += 1
@@ -230,8 +237,10 @@ def ingest_context_from_sheet(board: SheetsBoard, *, db_path=None) -> int:
             updates["notes"] = sheet_notes
         if sheet_output_type != (gate.get("output_type") or []):
             updates["output_type"] = sheet_output_type
-        # NGOẠI LỆ DUY NHẤT (xem docstring module): người đổi NEEDS_HUMAN -> RUN
-        # để yêu cầu thử lại -- KHÔNG đọc mọi giá trị Execute khác.
+        if bootstrap_execute and not gate.get("execute"):
+            updates["execute"] = bootstrap_execute
+        # NGOẠI LỆ DUY NHẤT KHÁC (xem docstring module): người đổi NEEDS_HUMAN
+        # -> RUN để yêu cầu thử lại -- KHÔNG đọc mọi giá trị Execute khác.
         if gate.get("execute") == "NEEDS_HUMAN" and sheet_execute == "RUN":
             updates["execute"] = "RUN"
         if updates:
