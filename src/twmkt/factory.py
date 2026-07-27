@@ -45,7 +45,20 @@ def _build_llm(settings: Settings, *, model_key: str, default_model: str) -> LLM
             model=settings.get(model_key, default_model),
             max_tokens=int(settings.get("llm.max_tokens", 1500)),
         )
-    raise ValueError(f"llm.provider không hỗ trợ: {provider} (mock|anthropic)")
+    if provider == "claude_code":
+        # 2026-07-27 (theo yêu cầu Lead — phiên phát triển, số request còn ít,
+        # dùng gói Claude Pro/Max hiện có thay vì trả phí riêng qua Anthropic
+        # API): CLI `claude -p`, KHÔNG cần ANTHROPIC_API_KEY. Trước bản vá này,
+        # build_content_llm() (Producers -- InfographicSpecAgent/VideoScriptAgent)
+        # LUÔN đi qua nhánh 'anthropic' bất kể `llm.mode` (khác make_llm()/
+        # build_writer_llm() đã hỗ trợ claude_code từ trước) -- thiếu
+        # ANTHROPIC_API_KEY khiến content_llm âm thầm lùi mượt về MOCK (xem
+        # AnthropicLLM.complete()), sinh nội dung "MOCK (chưa bật Sonnet)" giả
+        # thay vì thật. Cùng timeout với make_llm() (`llm.claude_code.timeout_s`)
+        # -- 1 cấu hình timeout CLI duy nhất, không tách riêng theo bước.
+        timeout_s = float(settings.get("llm.claude_code.timeout_s", 120))
+        return ClaudeCodeLLM(timeout_s=timeout_s)
+    raise ValueError(f"llm.provider không hỗ trợ: {provider} (mock|anthropic|claude_code)")
 
 
 def _hook_model(settings: Settings) -> str:

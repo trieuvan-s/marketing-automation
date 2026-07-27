@@ -96,3 +96,34 @@ CREATE TABLE IF NOT EXISTS documents (
 );
 
 CREATE INDEX IF NOT EXISTS idx_documents_topic_layer ON documents (topic_key, layer);
+
+-- PHASE QUEUE (2026-07-27, theo chỉ đạo Lead) -- hàng đợi request thực thi,
+-- BẢNG RIÊNG khỏi `documents` (khác bản chất: đây là bookkeeping VẬN HÀNH
+-- dispatch 1 job, không phải lịch sử nội dung cần audit-theo-version --
+-- CÓ UPDATE (chuyển trạng thái job tại chỗ), KHÔNG giống `documents`
+-- append-only. Vẫn giữ kỷ luật KHÔNG DELETE -- job done/failed giữ lại để
+-- xem lại lịch sử xử lý, xem store/queue_store.py). `id` tự tăng cho thứ tự
+-- FIFO THẬT (khác `documents`: list_topics() ở đó sắp theo topic_key/hash,
+-- không theo thời gian -- hàng đợi này mới thật sự có thứ tự đến trước-xử-
+-- trước). `job_type` mặc định 'produce' (đường run() LLM trực tiếp, ĐANG
+-- dùng thật) -- để hở cho loại job tương lai, KHÔNG tự thêm loại nào bây giờ.
+CREATE TABLE IF NOT EXISTS execution_queue (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    topic_key     TEXT NOT NULL CHECK (length(topic_key) > 0),
+    job_type      TEXT NOT NULL DEFAULT 'produce',
+    -- queued -> claimed (worker đã lấy, xem queue_store.claim_next()) ->
+    -- done | failed. release_stale_claims() đưa claimed quá hạn (worker chết
+    -- giữa chừng -- rủi ro C8 đã ghi nhận ở VPS_MIGRATION_BACKLOG.md) VỀ LẠI
+    -- queued (thử lại) hoặc failed hẳn (vượt max_attempts).
+    status        TEXT NOT NULL DEFAULT 'queued'
+                  CHECK (status IN ('queued', 'claimed', 'done', 'failed')),
+    requested_at  TEXT NOT NULL,
+    claimed_at    TEXT,
+    claimed_by    TEXT,
+    finished_at   TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    error         TEXT,
+    payload_json  TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_queue_status_id ON execution_queue (status, id);

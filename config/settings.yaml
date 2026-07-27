@@ -428,10 +428,18 @@ knowledge:
 # dữ liệu CafeF thật + đo token. Producers (article/video) tầng đắt (content_model)
 # CHỈ chạy SAU cổng duyệt 1 -> run_pipeline dừng trước cổng nên chúng chưa tốn token.
 llm:
-  provider: "anthropic"           # mock | anthropic (thiếu SDK/khóa -> LÙI MƯỢT về $0)
-  triage_model: "claude-haiku-4-5-20251001"   # RESEARCHER (tầng rẻ, đo token trước)
-  hook_model: "claude-sonnet-4-6"             # HOOK (Sonnet: hook ngắn -> rẻ mà chất lượng cao)
-  content_model: "claude-sonnet-4-6"          # Producers (tầng 2) — chưa bật ở bước này
+  # 2026-07-27 (theo yêu cầu Lead — phiên phát triển, số request còn ít): đổi
+  # "anthropic" -> "claude_code" để build_research_llm/build_hook_llm/
+  # build_content_llm (Producers -- InfographicSpecAgent/VideoScriptAgent)
+  # ĐI QUA gói Claude Pro/Max hiện có (CLI `claude -p`, xem factory._build_llm())
+  # thay vì trả phí riêng qua Anthropic API (ANTHROPIC_API_KEY chưa cấu hình,
+  # trước đây khiến content_llm âm thầm lùi mượt về MOCK). ĐỔI LẠI "anthropic"
+  # khi có ANTHROPIC_API_KEY thật hoặc khi khối lượng request lớn hơn (CLI có
+  # rate/spend limit theo gói, không phù hợp quy mô sản xuất lớn).
+  provider: "claude_code"          # mock | anthropic | claude_code
+  triage_model: "claude-haiku-4-5-20251001"   # RESEARCHER (tầng rẻ, đo token trước) — chỉ áp dụng khi provider=anthropic
+  hook_model: "claude-sonnet-4-6"             # HOOK (Sonnet: hook ngắn -> rẻ mà chất lượng cao) — chỉ áp dụng khi provider=anthropic
+  content_model: "claude-sonnet-4-6"          # Producers (tầng 2) — chỉ áp dụng khi provider=anthropic
   max_tokens: 1500
   budget_usd: 1.0                 # hạn mức mềm cho 1 lần chạy (LLMRouter -> BudgetExceeded)
 
@@ -650,6 +658,15 @@ schedule_draft:
 # --- Giới hạn xử lý mỗi lần --draft (config-first, tránh hard-code trong scheduler)
 production:
   draft_limit: 5                  # số dòng CONTEXT APPROVE tối đa xử lý mỗi lần --draft
+
+# --- PHASE QUEUE (2026-07-27) — scripts/queue_worker.py, store/queue_store.py.
+# Đường run() LLM trực tiếp (khác hẳn schedule_draft ở trên, luồng --draft/
+# Claude Code file-drop) — hàng đợi execution_queue thay cờ Execute đơn thuần,
+# xem docstring store/queue_store.py.
+queue:
+  poll_interval_s: 3               # nghỉ giữa 2 lượt poll khi hàng đợi rỗng
+  lease_timeout_s: 600             # 10 phút — claim quá hạn coi là worker chết, tự giải phóng (C8)
+  max_attempts: 3                  # số lần requeue tối đa trước khi đánh failed hẳn
 
 # --- Production Factory: seam gọi AIGEN pipeline thật (media_factory/aigen_seam.py) --
 # CÙNG NẾP với storage.data_root: đường dẫn SIBLING NGOÀI repo, đọc qua

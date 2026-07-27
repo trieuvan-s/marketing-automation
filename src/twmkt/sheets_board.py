@@ -183,8 +183,61 @@ _GATE1_KEY = GATE1_COL.lower()   # dùng cho .index()/so sánh header đã lower
 _GATE2_KEY = GATE2_COL.lower()
 _GATE3_KEY = GATE3_COL.lower()
 
+# P2 store-as-truth Bước 4 (2026-07-25) — "Output Type": ĐẦU VÀO giới hạn Content
+# Factory (chỉ sinh loại được người chọn, xem produce_from_sheet.py::run() —
+# tra _wanted_types()). Giá trị hợp lệ (OUTPUT_TYPE_VALUES): Article ·
+# Long-Article · Infographic · Video · AUTO — chọn NHIỀU (phân tách dấu phẩy,
+# cùng nếp cột "tickers"), mặc định MỘT giá trị "AUTO" nếu để trống
+# (context_row() tự điền chữ "AUTO" cho ô rỗng, KHÔNG còn để trắng — sửa
+# 2026-07-27, xem BUG DROPDOWN dưới).
+#
+# BUG DROPDOWN (2026-07-27, Lead phát hiện, ĐÃ SỬA): cột này chưa từng có
+# nhánh setDataValidation ở _tab_requests() -> ô Sheet hiển thị dropdown SÓT
+# LẠI của cột Execute (4 giá trị RUN/DONE/FAILED/NEEDS_HUMAN, do Output Type
+# được chèn giữa Duyệt Context/Execute bằng ghi lại header thay vì true
+# "insert column" -> validation cũ theo chỉ số cột không tự dịch chuyển theo
+# tên). Đã thêm nhánh riêng cho "output type" (xem _tab_requests()).
+#
+# GIỚI HẠN API (không sửa được, đã xác nhận qua tra cứu googleapis/google-api-
+# python-client issue #2676, 2026-07-27): Google Sheets API v4 KHÔNG hỗ trợ
+# đặt "dropdown chip / cho phép chọn nhiều" qua batchUpdate/setDataValidation
+# -- đây là tính năng CHỈ bật được thủ công qua UI Sheets (Data > Data
+# validation > Dropdown chip > "Allow multiple selections"). Dropdown ở đây
+# vẫn là single-pick-tại-1-lúc, nhưng `strict: False` cho phép NGƯỜI vẫn gõ
+# tay nhiều giá trị phân tách dấu phẩy (vd "Article, Video") -- đủ để thoả
+# "chọn >= 1 định dạng" ở tầng DỮ LIỆU (ingest/produce_from_sheet đọc đúng),
+# chỉ KHÔNG có trải nghiệm chip multi-select đẹp trên UI qua đường tự động.
+#
+# NGỮ NGHĨA AUTO — Lead làm rõ lại 2026-07-27 (CHƯA XÂY, note cho agent-B):
+# AUTO hiện tại = "KHÔNG thêm giới hạn ngoài quyết định router" (tương đương
+# hành vi TRƯỚC Bước 4). Lead MUỐN AUTO có nghĩa MỚI: Composer tự đánh giá độ
+# giàu thông tin + mức độ quan trọng của facts[] -> chủ động CHỌN 1 hoặc 2
+# định dạng để sản xuất (không phải "không giới hạn", mà là "để LLM quyết
+# thay vì người chọn tay"). Đây là logic Content Factory (agents/route_once.py
+# hoặc agents/structure_router.py) — NGOÀI phạm vi file agent-A (store/
+# sync_service.py/sheets_board.py/produce_from_sheet.py) — ĐÃ DỪNG, không tự
+# xây, giao agent-B.
+#
+# "Long-Article" CHƯA có producer (chỉ 3 loại article/infographic/video tồn
+# tại thật) — Lead xác nhận 2026-07-27: sẽ viết theo RULE MỚI đang được agent-C
+# xử lý (content-rules/, READ-ONLY với agent-A) — production logic (sinh nội
+# dung thật cho loại này) là việc agent-B, SAU KHI agent-C chốt rule. Hiện
+# chọn giá trị này trên Sheet vẫn KHÔNG sinh gì (không khớp loại nào Content
+# Factory biết sinh) — ĐÃ DỪNG, không tự xây.
+# VỊ TRÍ CỘT — QUYẾT ĐỊNH TỰ ĐƯA RA, CHƯA CÓ XÁC NHẬN RÕ RÀNG TỪ LEAD: đặc tả
+# gốc ghi "ngay SAU cột Duyệt Content" — nhưng Duyệt Content ở tab CONTENT,
+# sinh SAU khi Output Type phải đã tồn tại (input TRƯỚC sản xuất không thể
+# nằm SAU kết quả sản xuất) -- suy đoán đây là nhầm "Duyệt Content" thành
+# "Duyệt Context". Đặt tạm SAU "Duyệt Context" (GATE1_COL, tab CONTEXT) để
+# khớp thiết kế store Bước 2 (output_type nằm trong gate_status, CÙNG layer
+# gate1 — xem schema.sql) và tiếp tục có tiến triển — CẦN LEAD XÁC NHẬN LẠI,
+# đổi vị trí cột (chỉ append CUỐI, xem quy tắc "không chen giữa" ở
+# CONTENT_HEADER phía dưới) rẻ nếu sai.
+OUTPUT_TYPE_COL = "Output Type"
+OUTPUT_TYPE_VALUES = ("Article", "Long-Article", "Infographic", "Video", "AUTO")
+
 CONTEXT_HEADER = ["Timestamp", "Hot%", "Score", "Group", "Topic", "Context", "Hook",
-                  "Source", GATE1_COL, "Execute", "tickers", "Notes", "TopicKey"]
+                  "Source", GATE1_COL, OUTPUT_TYPE_COL, "Execute", "tickers", "Notes", "TopicKey"]
 # "engine" TẠM (haiku|sonnet|mock) — đối chiếu model NÀO thực sự chạy cho mỗi
 # dòng log, xem factory.model_engine_label(). Rỗng nếu dòng log không gắn LLM.
 LOG_HEADER = ["timestamp", "level", "message", "engine"]
@@ -522,7 +575,8 @@ def _source_cell(source_url: str, other_sources: list[str] | None) -> str:
 def context_row(*, title: str, hook_line: str, source_url: str, score: int, hot_pct: float,
                 topic: str = "", group: str = "", other_sources: list[str] | None = None,
                 tickers: list[str] | None = None, status: str = "PENDING",
-                execute: str = "", topic_key: str = "", ts: str | None = None) -> list[str]:
+                execute: str = "", topic_key: str = "", ts: str | None = None,
+                notes: str = "", output_type: list[str] | None = None) -> list[str]:
     """Một hàng CONTEXT ĐÚNG thứ tự CONTEXT_HEADER (Timestamp đầu tiên).
 
     Status mặc định PENDING, Execute mặc định rỗng (tự chuyển RUN khi Status=
@@ -533,8 +587,18 @@ def context_row(*, title: str, hook_line: str, source_url: str, score: int, hot_
     `topic_key` (Lớp 5 Phase 1) — CALLER tự tính (curation.keys.compute_topic_key)
     rồi truyền vào, hàm này KHÔNG tự tính (giữ context_row() thuần/không phụ
     thuộc curation, giống triết lý các tham số khác ở đây); rỗng nếu caller
-    chưa wire (vd đường --draft cũ) — backfill xử lý sau. Đặt CUỐI danh sách
-    (khớp CONTEXT_HEADER append, KHÔNG lệch vị trí các cột hiện có).
+    chưa wire (vd đường --draft cũ) — backfill xử lý sau.
+    `notes` (P2 store-as-truth Bước 3, mặc định "" — tương thích ngược MỌI
+    caller cũ) — NGƯỜI-SỞ-HỮU (xem store/sync_service.py::_CONTEXT_USER_COLS).
+    render_context_to_sheet() đọc THẲNG từ store (gate_status), KHÔNG đọc lại
+    Sheet hiện có trước khi ghi đè — store là nguồn sự thật cho cả Notes lẫn
+    Duyệt Context (xem docstring hàm đó).
+    `output_type` (P2 store-as-truth Bước 4, mặc định None -> hiển thị chữ
+    "AUTO" (sửa 2026-07-27 theo yêu cầu Lead — để TRẮNG trước đây tuy tương
+    đương AUTO về mặt xử lý (`_allowed_output_types()`) nhưng không rõ ràng
+    cho người nhìn Sheet) — list giá trị trong OUTPUT_TYPE_VALUES, ghi phân
+    tách dấu phẩy (cùng nếp `tickers`); ingest đọc lại "AUTO" y hệt rỗng cũ
+    (`_allowed_output_types(["AUTO"])` vẫn trả None — không đổi hành vi xử lý).
     """
     return [
         ts or _now_ddmmyyyy(),                            # Timestamp (DD/MM/YYYY, không giờ)
@@ -545,11 +609,12 @@ def context_row(*, title: str, hook_line: str, source_url: str, score: int, hot_
         title,                                                  # Context
         hook_line,                                               # Hook
         _source_cell(source_url, other_sources),                  # Source (gộp báo khác)
-        status,                                                     # Status
-        execute,                                                     # Execute
-        ", ".join(tickers or []),                                    # tickers
-        "",                                                           # Notes
-        topic_key,                                                     # TopicKey (Lớp 5, cuối)
+        status,                                                     # Status (Duyệt Context)
+        ", ".join(output_type or ["AUTO"]),                          # Output Type (mặc định hiển thị AUTO)
+        execute,                                                      # Execute
+        ", ".join(tickers or []),                                     # tickers
+        notes,                                                         # Notes
+        topic_key,                                                      # TopicKey (Lớp 5, cuối)
     ]
 
 
@@ -1262,6 +1327,21 @@ def _tab_requests(t: TabMeta) -> list[dict]:
         c = low.index(_GATE1_KEY)
         out.append(_set_validation(sid, 1, fmt_rows, c,
                                    _one_of_list(["PENDING", "APPROVE", "REJECT"])))
+    if t.name == "CONTEXT" and "output type" in low:  # -> dropdown loại nội dung (Bước 4)
+        # BUG (2026-07-27, Lead phát hiện): cột này CHƯA TỪNG có nhánh ở đây —
+        # ô Sheet đang hiển thị dropdown SÓT LẠI của cột Execute (4 giá trị cũ,
+        # trùng vị trí cột trước khi Output Type được chèn vào giữa Duyệt
+        # Context/Execute — insert bằng ghi lại header, KHÔNG phải true "insert
+        # column", nên validation cũ theo CHỈ SỐ cột không tự dịch chuyển).
+        # setDataValidation GHI ĐÈ đúng chỉ số cột "output type" HIỆN TẠI (tra
+        # theo TÊN, không phải chỉ số cứng) -> tự sửa đúng ô, không cần dọn tay.
+        # `strict: False` (trong _one_of_list) vẫn cho gõ tay nhiều giá trị
+        # phân tách dấu phẩy (vd "Article, Video") vì Sheets API KHÔNG hỗ trợ
+        # dropdown multi-select (chip) qua batchUpdate (chỉ có qua UI thủ công,
+        # xem ghi chú OUTPUT_TYPE_VALUES) -- đây là giới hạn của Google Sheets
+        # API, không phải thiếu sót ở đây.
+        c = low.index("output type")
+        out.append(_set_validation(sid, 1, fmt_rows, c, _one_of_list(list(OUTPUT_TYPE_VALUES))))
     if t.name == "CONTEXT" and "execute" in low:  # -> dropdown cờ thực thi sản xuất
         c = low.index("execute")
         out.append(_set_validation(sid, 1, fmt_rows, c,

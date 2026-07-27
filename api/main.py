@@ -1,18 +1,25 @@
 """FastAPI webhook nấc 1 — thay scheduler 30' (docs/VPS_MIGRATION_BACKLOG.md
 A1). User duyệt Context=APPROVE + bấm "Thực Thi" trên Sheet -> Apps Script
-bắn HTTP POST /webhook/execute -> endpoint này kích hoạt sản xuất ĐÚNG topic_key
-đó ngay, không chờ scheduler quét 30 phút/lần.
+bắn HTTP POST /webhook/execute -> endpoint này **ENQUEUE 1 job vào
+`store/queue_store.py`** (bảng `execution_queue`) — KHÔNG tự chạy pipeline,
+KHÔNG đọc/ghi Sheet nữa. `scripts/queue_worker.py` (tiến trình RIÊNG, poll
+hàng đợi vài giây/lần) mới THẬT SỰ tiêu thụ job và gọi
+`produce_from_sheet.run()`.
 
-RÁP THẬT (VIỆC 5, Lead chốt hướng 1 — 2026-07-20):
-- `pipeline_bridge.run_pipeline()` gọi `produce_from_sheet.run(topic_keys=[k])`.
-- `run()` là NƠI DUY NHẤT ghi cờ Execute (DONE/FAILED/NEEDS_HUMAN). Webhook KHÔNG
-  tự đặt/ghi Execute (tránh 2 nguồn trạng thái — 5.2/5.3). `report_result()` chỉ
-  còn LOG.
-- GET /status/{topic_key} ĐỌC cờ Execute từ Sheet -> trạng thái THẬT cho client
-  (POST vẫn trả 202 ngay vì Apps Script timeout ngắn).
-- Đọc Sheet ở đây LÀ ĐỌC TRỰC TIẾP: dựng SheetsBoard THẲNG, KHÔNG qua
-  produce_from_sheet._open_board (nó gọi ensure_tabs). CHỈ ĐỌC, không ghi, KHÔNG
-  ensure_tabs()/migrate_rows() (QUY TẮC VÀNG, 5.5 ⚠️).
+PHASE QUEUE (2026-07-27, theo chỉ đạo Lead — "ráp luôn api/ webhook vào hàng
+đợi"): ĐẢO NGƯỢC 1 quyết định Lead cũ (2026-07-19, xem `api/README.md` mục
+"RÁP SAU" #4 — "KHÔNG xây trạng thái bền thứ hai cho double-fire", lúc đó cờ
+Execute trên Sheet là nguồn DUY NHẤT). Nay Lead muốn ĐÚNG 1 trạng thái bền
+MỚI: hàng đợi trong store. `execution_queue` giờ là nguồn double-fire DUY
+NHẤT — thay CẢ đọc Sheet trực tiếp LẪN registry in-memory cũ (giải quyết dứt
+điểm rủi ro C8 đã ghi nhận: service chết giữa chừng -> registry mất, Sheet
+không có lease/timestamp — `execution_queue.claimed_at` giờ theo dõi đúng
+việc này, xem `queue_store.release_stale_claims()`).
+
+KHÔNG kiểm "đã duyệt Gate1 chưa" ở đây nữa — `produce_from_sheet.run(topic_
+keys=[...])` tự an toàn với topic_key chưa duyệt (lọc qua
+`list_approved_topics()`, không thấy -> no-op, không crash), nên webhook
+không cần đọc Sheet để biết trước; kết quả thật xem qua GET /status.
 
 Chạy dev: uvicorn api.main:app --reload --port 8899
 
@@ -24,34 +31,28 @@ from __future__ import annotations
 import logging
 import os
 import secrets
-import threading
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-# import pipeline_bridge TRƯỚC: nó thêm scripts/ + src/ vào sys.path (module-level)
-# nên các import `twmkt.*` phía dưới (đường đọc Sheet) chạy được.
-from api.pipeline_bridge import run_pipeline
+# api/ -> repo root; thêm root vào sys.path Ở MODULE-LEVEL để import `store`
+# (execution_queue) — webhook KHÔNG còn cần scripts/ hay src/ (không gọi
+# produce_from_sheet/twmkt trực tiếp nữa, xem docstring trên).
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from store import queue_store as qs  # noqa: E402
 
 load_dotenv(Path(__file__).parent / ".env", override=False)
 
 logger = logging.getLogger("webhook.main")
 
-app = FastAPI(title="Marketing Automation Webhook", version="0.2.0")
-
-# --- Chống double-fire (in-memory, lưới NHANH cùng tiến trình). Idempotency BỀN
-# là cờ Execute trên Sheet (5.2). HẠN CHẾ: registry MẤT khi restart -> chấp nhận
-# ở nấc 1 (Execute trên Sheet đỡ ca cross-restart). ---
-_lock = threading.Lock()
-_running: set[str] = set()
-
-# Trạng thái Execute coi là "đang chạy" -> chặn fire mới (409).
-_RUNNING_EXECUTE = "RUN"
-# Trạng thái Execute cho phép fire (chưa chạy / lỗi tạm thời tái chạy được).
-_FIREABLE_EXECUTE = {"", "FAILED"}
+app = FastAPI(title="Marketing Automation Webhook", version="0.3.0")
 
 
 class ExecuteRequest(BaseModel):
@@ -67,94 +68,25 @@ def _check_token(token: str) -> None:
         raise HTTPException(status_code=401, detail="Token không hợp lệ")
 
 
-def _read_topic_context(topic_key: str) -> dict | None:
-    """ĐỌC TRỰC TIẾP dòng CONTEXT khớp `topic_key` (đã lọc Status=APPROVE).
-
-    QUY TẮC VÀNG (5.5 ⚠️): dựng SheetsBoard THẲNG (KHÔNG qua _open_board ->
-    KHÔNG ensure_tabs()/migrate_rows()). read_approved_context()/_tab() chỉ
-    get_all_values() — thuần ĐỌC. Trả dict {context, execute, topic_key, ...}
-    hoặc None nếu không có dòng APPROVE nào mang topic_key này."""
-    from twmkt.config import load_settings
-    from twmkt.sheets_board import SheetsBoard
-
-    settings = load_settings()
-    sheet_id = (os.environ.get("TWMKT_SHEET_ID") or settings.get("sheets.spreadsheet_id") or "").strip()
-    creds = (os.environ.get("TWMKT_SHEETS_CREDS") or settings.get("sheets.creds_path") or "").strip()
-    if not sheet_id or not creds:
-        raise HTTPException(status_code=500, detail="Thiếu cấu hình Sheet (spreadsheet_id/creds).")
-    board = SheetsBoard(spreadsheet_id=sheet_id, creds_path=creds)  # KHÔNG ensure_tabs
-    for item in board.read_approved_context():
-        if item.get("topic_key") == topic_key:
-            return item
-    return None
-
-
-def report_result(topic_key: str, status: str) -> None:
-    """CHỈ LOG (5.3, Lead chốt): `run()` đã ghi DONE/FAILED/NEEDS_HUMAN lên cột
-    Execute — webhook KHÔNG ghi Sheet ở đây (một nguồn trạng thái duy nhất).
-    Giữ lại để _process log kết quả/lỗi cho quan sát."""
-    logger.info("report_result(topic_key=%s, status=%s) — chỉ log (run() đã ghi Execute)",
-                topic_key, status)
-
-
-async def _process(topic_key: str) -> None:
-    """Background task — webhook đã trả 202 trước khi hàm này xong."""
-    try:
-        status = await run_pipeline(topic_key)
-        report_result(topic_key, status)
-    except Exception:
-        logger.exception("run_pipeline(%s) lỗi không bắt được", topic_key)
-        report_result(topic_key, "FAILED")
-    finally:
-        with _lock:
-            _running.discard(topic_key)
-
-
 @app.post("/webhook/execute", status_code=202)
-async def webhook_execute(req: ExecuteRequest, background_tasks: BackgroundTasks) -> dict:
-    """Thứ tự kiểm (5.5): a) token; b) Execute trên Sheet đang RUN -> 409;
-    c) chưa duyệt (server-side, không tin client) -> 400; d) registry in-memory
-    -> 409; e) 202 + background run(topic_keys=[topic_key]). KHÔNG tự đặt cờ
-    Execute — run() lo."""
-    # a) token sai -> 401
+async def webhook_execute(req: ExecuteRequest) -> dict:
+    """Thứ tự kiểm: a) token -> 401; b) đã có job 'queued'/'claimed' cho
+    topic_key này trong hàng đợi -> 409 (chống double-fire — nguồn sự thật
+    DUY NHẤT giờ là `execution_queue`, xem `queue_store.find_pending()`);
+    c) enqueue job mới -> 202 kèm `job_id` (client dùng GET /status để theo
+    dõi)."""
     _check_token(req.token)
 
-    # b/c) ĐỌC TRỰC TIẾP Sheet — kiểm điều kiện phía SERVER (Apps Script đã chặn
-    # nhưng request có thể đến từ nơi khác qua tunnel).
-    item = _read_topic_context(req.topic_key)
-    if item is None:
-        # c) không có dòng APPROVE nào mang topic_key này -> chưa duyệt.
-        raise HTTPException(
-            status_code=400,
-            detail=f"topic_key '{req.topic_key}' chưa duyệt (không thấy dòng CONTEXT Status=APPROVE).",
-        )
-    execute = (item.get("execute") or "").upper()
-    if execute == _RUNNING_EXECUTE:
-        # b) đang RUN -> 409 (KHÔNG tự đặt cờ, run() lo).
+    existing = qs.find_pending(req.topic_key, job_type="produce")
+    if existing is not None:
         raise HTTPException(
             status_code=409,
-            detail=f"topic_key '{req.topic_key}' đang xử lý (Execute=RUN trên Sheet).",
-        )
-    if execute not in _FIREABLE_EXECUTE:
-        # DONE/NEEDS_HUMAN -> không tái kích hoạt (idempotent).
-        raise HTTPException(
-            status_code=409,
-            detail=f"topic_key '{req.topic_key}' Execute='{execute}' — đã xong/đang chờ người, bỏ qua.",
+            detail=f"topic_key '{req.topic_key}' đã có job #{existing['id']} "
+                   f"đang '{existing['status']}' trong hàng đợi.",
         )
 
-    # d) registry in-memory (lưới nhanh cùng tiến trình, khoảng hở trước khi
-    # run() kịp đặt Execute=RUN).
-    with _lock:
-        if req.topic_key in _running:
-            raise HTTPException(
-                status_code=409,
-                detail=f"topic_key '{req.topic_key}' đang được xử lý (registry) — chống double-fire.",
-            )
-        _running.add(req.topic_key)
-
-    # e) 202 + background.
-    background_tasks.add_task(_process, req.topic_key)
-    return {"accepted": True, "topic_key": req.topic_key}
+    job_id = qs.enqueue(req.topic_key, job_type="produce")
+    return {"accepted": True, "topic_key": req.topic_key, "job_id": job_id}
 
 
 @app.get("/health")
@@ -165,11 +97,13 @@ async def health() -> dict:
 
 @app.get("/status/{topic_key}")
 async def status(topic_key: str) -> dict:
-    """ĐỌC cờ Execute từ Sheet -> trạng thái THẬT (5.4). Đây là nơi client (Apps
-    Script) biết kết quả sau khi POST trả 202. Kèm cờ `running` in-memory (tham
-    khảo). Không thấy dòng APPROVE -> execute=None (chưa duyệt/đã đổi Status)."""
-    item = _read_topic_context(topic_key)
-    execute = item.get("execute") if item else None
-    with _lock:
-        is_running = topic_key in _running
-    return {"topic_key": topic_key, "execute": execute, "running": is_running}
+    """Job MỚI NHẤT (mọi job_type) của topic_key trong hàng đợi — thay đọc cờ
+    Execute từ Sheet (Sheet không còn là nguồn trạng thái xử lý). `status`/
+    `job_id` là `None` nếu topic_key chưa từng có job nào."""
+    jobs = [j for j in qs.list_queue() if j["topic_key"] == topic_key]
+    latest = jobs[-1] if jobs else None
+    return {
+        "topic_key": topic_key,
+        "status": latest["status"] if latest else None,
+        "job_id": latest["id"] if latest else None,
+    }
