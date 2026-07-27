@@ -419,6 +419,57 @@ TTS; (h) `avatarId` lấy từ đâu (Content Factory tự chọn hay danh sách
 ⚠️ File `AVATAR_HEYGEN_PROPOSAL.md` hiện UNTRACKED bên aigen — người vận hành
 `git add` để đưa vào lịch sử repo (đề xuất đã đánh giá là chính xác, nên giữ).
 
+### D2. Hàng đợi thời gian thực (Redis/RabbitMQ) + Webhook Google Sheets thật — kế hoạch cho VPS
+
+Thêm 2026-07-27 (agent-A → agent-B, sau khi Lead yêu cầu kiến trúc
+event-driven qua message broker cho request thực thi từ Sheet). Đề xuất, KHÔNG
+CODE — giao cho agent-B khi có VPS.
+
+**Đã làm NGAY (không chờ VPS)**: `store/queue_store.py` (bảng SQLite mới
+`execution_queue`, xem `store/schema.sql`) + `scripts/queue_worker.py` (worker
+độc lập, poll 3-5s) + `api/main.py` (webhook đã ráp vào hàng đợi này, thay đọc/
+ghi Sheet trực tiếp). Đây là **bước đệm**, KHÔNG phải bản rút gọn tạm bợ rồi bỏ
+— API `enqueue()/claim_next()/mark_done()/mark_failed()/release_stale_claims()`
+trong `queue_store.py` được thiết kế để **đổi backend mà KHÔNG cần sửa caller**
+(`sync_service.py`, `api/main.py`, `queue_worker.py` chỉ gọi qua các hàm này,
+không tự thao tác SQL).
+
+**Vì sao CHƯA làm Redis/RabbitMQ + webhook thật ngay** (2 lý do, xem thêm mục
+A1 ở trên):
+1. Cả webhook thật (Apps Script on-edit trigger → HTTP POST) LẪN message
+   broker đều cần 1 địa chỉ **luôn-bật** để nhận request — máy dev hiện tại
+   không phải môi trường đó (đúng lý do A1 tự ghi "hoãn tới giờ: webhook cần
+   endpoint always-on, môi trường local không có").
+2. Redis/RabbitMQ là hạ tầng MỚI hoàn toàn (repo hiện không có dependency nào
+   liên quan) — cài đặt/vận hành/bảo mật 1 service ngoài, cho quy mô hiện tại
+   (~7 chủ đề/ngày, 1 người vận hành, 1 máy) là quá cỡ so với nhu cầu thật, đi
+   ngược kỷ luật "một mặt trận một lúc" + "VPS trước khi xây store phân tán"
+   (mục 5, "Ranh giới kiến trúc đã CHỐT" trong CLAUDE.md).
+
+**Kiến trúc đề xuất khi có VPS**:
+```
+Google Sheets (Apps Script onEdit trigger, cột Duyệt Context APPROVE)
+   → HTTP POST tới api/main.py (chạy trên VPS, always-on, đã có sẵn khung)
+   → publish message vào Redis Streams (khuyến nghị, đơn giản hơn RabbitMQ
+     cho quy mô này — ack/consumer-group đủ dùng) hoặc RabbitMQ (nếu cần
+     delivery guarantee mạnh hơn/multi-consumer phức tạp hơn)
+   → 1+ consumer (có thể CHẠY SONG SONG NHIỀU worker — Redis/RabbitMQ tự lo
+     an toàn concurrent-consume, khác giới hạn 1-worker-1-máy của SQLite
+     `BEGIN IMMEDIATE` hiện tại) gọi ĐÚNG `produce_from_sheet.run(topic_
+     keys=[...])` — không đổi phần này.
+```
+
+**Việc cần Lead/agent-B quyết khi bắt tay làm**:
+- Redis Streams hay RabbitMQ (đề xuất Redis — nhẹ hơn, đủ cho quy mô này).
+- Hosting: Redis/RabbitMQ tự cài trên VPS hay dùng managed service (Upstash/
+  CloudAMQP...).
+- Auth cho endpoint public (`api/main.py` hiện chỉ có `WEBHOOK_TOKEN` đơn giản
+  — đủ cho nấc 1, cân nhắc siết hơn khi ra internet thật).
+- Viết Apps Script thật (nút "Thực Thi" hiện CHƯA gọi HTTP đi đâu — xem
+  `api/README.md` mục "Còn treo").
+- `store/queue_store.py` cần viết LẠI (không phải sửa thêm) phần lưu trữ để
+  dùng Redis/RabbitMQ client thay SQLite — chữ ký hàm giữ nguyên.
+
 ---
 
 ## QUY TẮC VÀNG KHI ĐỘNG VÀO SHEET

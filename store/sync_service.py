@@ -45,8 +45,21 @@ from twmkt.sheets_board import (
 
 from . import document_store as ds
 from . import pipeline_store as ps
+from . import queue_store as qs
 
 _ALL_TYPES = ("article", "infographic", "video")
+
+# store/content_output.output giữ NGUYÊN VĂN (Lead xác nhận 2026-07-27) --
+# TRUNCATE CHỈ còn ở đây, điểm đẩy sang Sheet cho người LIẾC nhanh. Bất kỳ
+# code nào cần parse lại nội dung (vd render_production_assets.py) PHẢI đọc
+# thẳng ps.read_content_output() từ store, KHÔNG BAO GIỜ đọc lại ô Sheet này.
+_OUTPUT_PREVIEW = 1500
+
+
+def _preview_output(output: str) -> str:
+    if len(output) <= _OUTPUT_PREVIEW:
+        return output
+    return output[:_OUTPUT_PREVIEW] + "\n…(bản đầy đủ nằm trong Store, xem content_output)"
 
 # --- Quyền sở hữu cột (Nguyên tắc 3.3) --------------------------------------
 # MÁY-SỞ-HỮU (store->Sheet, render ghi đè KHÔNG hỏi) — dữ liệu NGUỒN từ raw/
@@ -126,7 +139,11 @@ def render_content_to_sheet(board: SheetsBoard, *, db_path=None) -> int:
     content_row() hard-code Duyệt Public="PENDING" (INVARIANT — KHÔNG luồng
     máy nào được ghi Gate3, xem docstring content_row()) nên override 3 cột
     người-sở-hữu SAU khi gọi, bằng giá trị đọc từ content_status — vẫn KHÔNG
-    máy TỰ SINH giá trị, chỉ phản ánh lại cái người đã ghi (qua ingest)."""
+    máy TỰ SINH giá trị, chỉ phản ánh lại cái người đã ghi (qua ingest).
+
+    Cột Output ghi lên Sheet đi qua `_preview_output()` (cắt 1500 ký tự) —
+    CHỈ để người liếc, KHÔNG phải nguồn parse lại. `out.get("output", "")`
+    (từ content_output) là bản NGUYÊN VĂN, không cắt."""
     i_h_social = CONTENT_HEADER.index("Social Link")
     i_h_g3 = CONTENT_HEADER.index(GATE3_COL)
     i_h_posting = CONTENT_HEADER.index("Posting Status")
@@ -142,7 +159,7 @@ def render_content_to_sheet(board: SheetsBoard, *, db_path=None) -> int:
             status_data = ps.read_content_status(topic_key, type_, db_path=db_path)
             row = content_row(
                 context=context_title, type_=type_, status=out.get("status", ""),
-                output=out.get("output", ""), notes=out.get("notes", ""),
+                output=_preview_output(out.get("output", "")), notes=out.get("notes", ""),
                 approve=status_data.get("gate2", "PENDING"), topic_key=topic_key,
                 facts=out.get("facts", ""),
                 asset_path=status_data.get("asset_url") or status_data.get("asset_local_path") or "",
@@ -167,7 +184,15 @@ def ingest_context_from_sheet(board: SheetsBoard, *, db_path=None) -> int:
     (TopicKey có trên Sheet, store CHƯA có raw — CẦU NỐI TẠM, xem docstring
     module), (2) Duyệt Context/Notes đổi so với gate_status hiện có, (3)
     NGOẠI LỆ Execute: NEEDS_HUMAN -> RUN (người yêu cầu thử lại, xem Phase
-    4.9). Trả số lần ghi (write_document calls)."""
+    4.9). Trả số lần ghi (write_document calls).
+
+    PHASE QUEUE (2026-07-27): MỌI lần Execute chuyển thành "RUN" ở đây (bootstrap
+    Gate1 vừa APPROVE, HOẶC NEEDS_HUMAN->RUN người yêu cầu thử lại) ĐỀU gọi
+    thêm `queue_store.enqueue()` — đây là điểm enqueue TỰ ĐỘNG duy nhất (đối
+    xứng với enqueue THỦ CÔNG qua `api/main.py::webhook_execute()`).
+    `gate_status.execute="RUN"` VẪN được ghi y hệt trước (Sheet hiển thị không
+    đổi, `run_draft()` vẫn lọc execute=="RUN" như cũ) — hàng đợi là 1 khái
+    niệm KHÁC (đã dispatch xử lý chưa), KHÔNG thay thế cờ Execute."""
     header, rows = _read_sheet_rows(board, "CONTEXT")
     if not header:
         return 0
@@ -222,11 +247,14 @@ def ingest_context_from_sheet(board: SheetsBoard, *, db_path=None) -> int:
                 "score": score_val, "hot_pct": hot_val,
             }, db_path=db_path)
             writes += 1
+            new_execute = sheet_execute or bootstrap_execute
             ps.write_gate_status(topic_key, gate1=sheet_gate1,
-                                 execute=sheet_execute or bootstrap_execute, notes=sheet_notes or None,
+                                 execute=new_execute, notes=sheet_notes or None,
                                  output_type=sheet_output_type or None,
                                  db_path=db_path)
             writes += 1
+            if new_execute == "RUN":
+                qs.enqueue(topic_key, job_type="produce", db_path=db_path)
             continue
 
         gate = ps.read_gate_status(topic_key, db_path=db_path)
@@ -246,6 +274,8 @@ def ingest_context_from_sheet(board: SheetsBoard, *, db_path=None) -> int:
         if updates:
             ps.write_gate_status(topic_key, db_path=db_path, **updates)
             writes += 1
+            if updates.get("execute") == "RUN":
+                qs.enqueue(topic_key, job_type="produce", db_path=db_path)
     return writes
 
 

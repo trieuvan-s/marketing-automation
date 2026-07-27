@@ -33,6 +33,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
+sys.path.insert(0, str(REPO_ROOT))
 
 from twmkt._encoding import ensure_utf8_stdio  # noqa: E402
 
@@ -42,6 +43,8 @@ from twmkt.asset_server import DEFAULT_PORT, asset_url  # noqa: E402
 from twmkt.config import data_path, load_settings  # noqa: E402
 from twmkt.render.ai_full import render_ai_full  # noqa: E402
 from twmkt.sheets_board import SheetsBoard  # noqa: E402
+
+from store import pipeline_store as ps  # noqa: E402
 
 
 def _today() -> str:
@@ -101,9 +104,21 @@ def render_one(item: dict, *, settings) -> tuple[dict[str, bytes | None], dict[s
     bytes theo tỷ lệ, cảnh báo theo tỷ lệ, log JSON theo tỷ lệ -- xem
     ai_full.render_ai_full()). Hàm THUẦN về mặt Sheet (không tự ghi Sheet)
     nhưng CÓ gọi mạng thật (OpenAI Images API qua ai_full, cache-first) --
-    khác quy ước "Hàm THUẦN" cũ của renderer SVG $0."""
+    khác quy ước "Hàm THUẦN" cũ của renderer SVG $0.
+
+    ĐỌC JSON TỪ STORE (Lead xác nhận 2026-07-27), KHÔNG từ item["output"]
+    (ô Sheet CONTENT.Output) -- ô đó chỉ là PREVIEW cắt 1500 ký tự cho người
+    liếc (xem store/sync_service.py::_preview_output()), nội dung dài hơn
+    ngưỡng sẽ bị cắt cụt JSON -> json.loads() vỡ (bug gốc gây NEEDS_HUMAN oan
+    ở Bước 5.3). `item["topic_key"]` vẫn đọc từ Sheet (chỉ dùng làm KHOÁ tra
+    store, không phải nội dung)."""
+    topic_key = item.get("topic_key", "")
+    full = ps.read_content_output(topic_key, "infographic") if topic_key else None
+    if full is None:
+        err = f"Không tìm thấy content_output trong store cho TopicKey={topic_key!r}"
+        return {r: None for r in _RATIOS}, {r: err for r in _RATIOS}, {}
     try:
-        output_data = json.loads(item["output"])
+        output_data = json.loads(full.get("output", ""))
     except json.JSONDecodeError:
         err = "Output không phải JSON hợp lệ (đã bị sửa hỏng ở Gate 2?)"
         return {r: None for r in _RATIOS}, {r: err for r in _RATIOS}, {}

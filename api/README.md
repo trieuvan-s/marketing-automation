@@ -1,9 +1,26 @@
 # api/ — FastAPI webhook nấc 1
 
 > Thay scheduler 30' hiện tại (`system_power_on.py`) cho luồng Execute=RUN.
-> Xem `docs/VPS_MIGRATION_BACKLOG.md` mục A1. Module này **CHƯA RÁP** vào
-> pipeline sản xuất thật — xem "RÁP SAU" cuối file trước khi coi module này
-> là hoàn chỉnh.
+> Xem `docs/VPS_MIGRATION_BACKLOG.md` mục A1.
+
+## PHASE QUEUE (2026-07-27) — ĐÃ RÁP vào `store/queue_store.py`
+
+Webhook giờ **CHỈ ENQUEUE** job vào `execution_queue` (SQLite,
+`store/queue_store.py`) — KHÔNG còn đọc/ghi Sheet trực tiếp, KHÔNG còn
+registry in-memory. `scripts/queue_worker.py` (tiến trình RIÊNG, poll hàng
+đợi vài giây/lần) là nơi THẬT SỰ gọi `produce_from_sheet.run()`.
+
+**ĐẢO NGƯỢC quyết định Lead cũ (2026-07-19, xem lịch sử git mục "RÁP SAU" #4
+bên dưới nếu cần đối chiếu)**: trước đây "KHÔNG xây trạng thái bền thứ hai
+cho double-fire" (cờ Execute trên Sheet là nguồn DUY NHẤT). Lead nay
+(2026-07-27) muốn đúng 1 trạng thái bền MỚI: hàng đợi trong store —
+`execution_queue` giờ là nguồn double-fire DUY NHẤT, giải quyết dứt điểm rủi
+ro "service chết giữa chừng → registry mất/Execute kẹt RUN" (mục C8 cũ) nhờ
+`claimed_at` + `queue_store.release_stale_claims()`.
+
+`pipeline_bridge.py` đã **XOÁ** (dead code sau khi webhook không còn gọi
+`produce_from_sheet.run()` trực tiếp nữa — việc đó nay là của
+`queue_worker.py`).
 
 ## Chạy dev
 
@@ -15,10 +32,13 @@ uvicorn api.main:app --reload --port 8899
 
 Hoặc tạo file `api/.env` (tự gitignore, KHÔNG BAO GIỜ commit) với
 `WEBHOOK_TOKEN=...` — `main.py` tự nạp qua `python-dotenv`
-(`override=False`, ENV thật của process luôn thắng file, cùng nếp
-`twmkt.config._load_dotenv()`) — khỏi cần `export` tay mỗi phiên shell.
+(`override=False`, ENV thật của process luôn thắng file).
 
 Kiểm tra: `curl http://127.0.0.1:8899/health`
+
+**Chạy song song `scripts/queue_worker.py`** để job thật sự được xử lý (xem
+gốc repo `python scripts/queue_worker.py`) — webhook chỉ enqueue, không tự
+chạy pipeline.
 
 ## Chạy test
 
@@ -31,13 +51,14 @@ python -m pytest api/test_main.py -v
 
 | Route | Method | Mục đích |
 |---|---|---|
-| `/webhook/execute` | POST | Body `{"topic_key": str, "token": str}` — trả **202** ngay (không chờ xử lý xong), xử lý thật chạy nền. Token sai → 401. `topic_key` đang xử lý → 409 (chống double-fire). |
+| `/webhook/execute` | POST | Body `{"topic_key": str, "token": str}` — token sai → 401; đã có job `queued`/`claimed` cho topic_key này → 409 (chống double-fire, xem `queue_store.find_pending()`); ngược lại → **202** + `job_id` (enqueue, xử lý thật do `queue_worker.py` làm, không đồng bộ ở đây). |
 | `/health` | GET | Cho NSSM/monitor kiểm tiến trình còn sống. Không kiểm gì sâu (không chạm DB/pipeline). |
-| `/status/{topic_key}` | GET | `{"topic_key": ..., "running": bool}` — tham khảo cho Apps Script tự kiểm trước khi bắn lại. |
+| `/status/{topic_key}` | GET | `{"topic_key", "status", "job_id"}` — trạng thái job MỚI NHẤT trong hàng đợi (`queued`/`claimed`/`done`/`failed`, `None` nếu chưa từng có job). |
 
 ## Biến môi trường cần
 
 - `WEBHOOK_TOKEN` (**bắt buộc**) — shared token, endpoint so khớp hằng-thời-gian (`secrets.compare_digest`). Thiếu biến này → mọi request đều 401.
+- `DOCUMENT_STORE_PATH` (khớp `store/document_store.py`) — webhook đọc/ghi CÙNG file DB với pipeline/queue_worker, phải trỏ đúng.
 - `WEBHOOK_PORT` (tuỳ chọn, mặc định 8899 nếu không set — chỉ dùng bởi `install_service.ps1`, KHÔNG được `main.py` tự đọc, port truyền qua `uvicorn --port` lúc chạy).
 
 ## Cài thành Windows Service (VPS)
@@ -46,59 +67,18 @@ python -m pytest api/test_main.py -v
 .\api\install_service.ps1
 ```
 
-Xem chi tiết/cảnh báo trong docstring đầu file `install_service.ps1` — **CHƯA test thật** trên máy có NSSM, chỉ viết theo tài liệu NSSM.
+Xem chi tiết/cảnh báo trong docstring đầu file `install_service.ps1` —
+**CHƯA test thật** trên máy có NSSM, chỉ viết theo tài liệu NSSM. Khi triển
+khai thật, `queue_worker.py` CŨNG cần 1 service riêng (không tự khởi động
+cùng webhook).
 
-## Chống double-fire — thiết kế nấc 1
+## Còn treo (chưa làm ở phiên này)
 
-Registry `set` in-memory + `threading.Lock`, đơn tiến trình. **Hạn chế đã biết**: mất trạng thái khi service restart (1 request đang chạy lúc restart sẽ "quên", request trùng sau đó không bị chặn).
-
-**[ĐÃ CHỐT — Lead quyết định 2026-07-19, xem RÁP SAU #4]**: registry này là lưới nhanh CỤC BỘ, KHÔNG phải nguồn sự thật cho double-fire — nguồn sự thật là cờ `Execute` trên Sheet (đã tồn tại). `store/document_store.py` (viết cùng lượt với module này) **KHÔNG** phải "ứng viên thay thế" registry (Lead đã bác bỏ xây trạng thái bền thứ hai — 2 nguồn sự thật cho cùng 1 trạng thái là cấm) — 2 module hoàn toàn độc lập ở nấc này, sẽ tiếp tục độc lập kể cả sau khi ráp.
-
-## Đã kiểm thật (smoke test, không phải mock) — 2026-07-19
-
-Chạy `uvicorn api.main:app --host 127.0.0.1 --port 8899` foreground thật
-trên PC-A, gọi bằng `curl` từ tiến trình khác (không phải `TestClient`):
-
-| Ca | Lệnh | Kỳ vọng | Thực tế |
-|---|---|---|---|
-| 1 | `GET /health` | 200 | **200** — `{"status":"ok","time":"..."}` |
-| 2 | `POST /webhook/execute` token sai | 401 | **401** — `{"detail":"Token không hợp lệ"}` |
-| 3 | `POST /webhook/execute` hợp lệ | 202 | **202** — `{"accepted":true,"topic_key":"..."}` |
-| 4 | `POST` lại NGAY cùng `topic_key` | 409 | **409** — `{"detail":"topic_key '...' đang được xử lý -- bỏ qua, chống double-fire."}` |
-
-Ca 4 lúc đầu 2 lần liên tiếp trả về 202 thay vì 409 — nguyên nhân: độ trễ
-giả lập của stub (`asyncio.sleep(0.1)`) quá ngắn so với khoảng cách thật
-giữa 2 lệnh gọi tuần tự (mỗi lệnh là 1 vòng round-trip riêng, không phải
-2 request bắn đồng thời) — cửa sổ 0,1s và cả 3s đều bị lỡ. Đã **TẠM** tăng
-`asyncio.sleep()` lên 20s để có đủ thời gian gọi ca 4 trước khi stub tự
-xong, xác nhận 409 hoạt động đúng, rồi **khôi phục lại 0,1s** ngay sau đó
-(xác nhận bằng `git diff` rỗng trên file này + chạy lại 24/24 test xanh).
-Đây là hạn chế của PHƯƠNG PHÁP TEST tuần tự bằng tay, KHÔNG phải lỗi logic
-409 — 8 test tự động (`test_main.py`) đã chứng minh logic đúng bằng cách
-chủ động set trạng thái registry, không phụ thuộc timing.
-
-Quan sát phụ: log của `pipeline_bridge.py` (qua `logging.getLogger`) KHÔNG
-hiện trong stdout uvicorn — logger tuỳ biến chưa có handler/level cấu hình,
-chỉ log request (uvicorn tự log) mới hiện. Không ảnh hưởng hành vi (409 vẫn
-đúng), nhưng đáng sửa khi ráp thật để dễ debug production.
-
-`install_service.ps1` — **CHƯA chạy thật** (máy PC-A này không có NSSM để
-cài đầy đủ, và cũng KHÔNG có venv tại `.venv\Scripts\python.exe` — venv
-thật nằm trên VPS của agent-B, dùng để chạy pytest ở đó). **SỬA 2026-07-19**:
-bỏ hẳn cơ chế fallback sang `python` hệ thống khi không thấy venv (rủi ro
-hỏng ÂM THẦM nếu service chạy sai bộ package/version) — giờ KHÔNG thấy venv
-tại đúng đường dẫn `<repo>\.venv\Scripts\python.exe` → script `Write-Error`
-+ `exit 1` ngay, nêu rõ đường dẫn đã thử, không đoán mù (cùng nguyên tắc bài
-học A5). Đã xác nhận `python -m uvicorn api.main:app` tự nó chạy được thật
-(smoke test ở trên, dùng Python hệ thống trực tiếp không qua script này) —
-nhưng **bản thân `install_service.ps1` với venv + NSSM thật vẫn CHƯA được
-verify end-to-end trên máy nào cả**, chỉ verify logic path bằng đọc code.
-
-## RÁP SAU (bắt buộc đọc trước khi coi webhook "xong")
-
-1. **`api/pipeline_bridge.py::run_pipeline()`** — hiện là stub (sleep giả lập, luôn trả `"DONE"`). Phải thay bằng lệnh gọi `produce_from_sheet` thật — **chữ ký giả định `produce_from_sheet(topic_key: str) -> status` CHƯA được đối chiếu với code thật** (lúc viết module này, `scripts/produce_from_sheet.py` đang nằm trong vùng agent-B sửa dở, chưa commit — cố ý không đụng để tránh xung đột).
-2. **`api/main.py::report_result()`** — hiện chỉ log, không ghi Sheet thật. Phải nối vào cơ chế ghi cột Execute (nghi vấn `sheets_board.py::set_execute_values`, **chưa xác nhận tên hàm/chữ ký thật**).
-3. **Đăng ký endpoint với Apps Script** — chưa viết phía Apps Script (nút "Thực Thi" hiện chưa gọi HTTP đi đâu cả), và chưa có tunnel (ngrok/Cloudflare Tunnel/reverse proxy) để endpoint này ra được internet từ VPS.
-4. **[ĐÃ CHỐT — Lead quyết định 2026-07-19]** KHÔNG xây trạng thái bền thứ hai cho double-fire. Lý do: idempotency bền vững ĐÃ tồn tại — cờ `Execute` trên Sheet (`empty→RUN→DONE/FAILED/NEEDS_HUMAN`). Hai cơ chế bền cho cùng một trạng thái = hai nguồn sự thật, cấm. **HỆ QUẢ BẮT BUỘC khi ráp**: `webhook_execute()` phải ĐỌC cờ `Execute` trên Sheet TRƯỚC khi nhận việc — thấy `RUN` → trả 409 giống như đang trùng registry. Registry in-memory hiện tại CHỈ là lưới nhanh cục bộ (đỡ 1 round-trip đọc Sheet cho ca double-click sát nhau trong cùng tiến trình), KHÔNG phải nguồn sự thật — cờ Sheet mới là nguồn sự thật.
-   ⚠️ **Rủi ro đã ghi nhận, KHÔNG xử ở nấc này**: service chết giữa chừng lúc đang xử lý → cờ `Execute` kẹt ở `RUN` vĩnh viễn (không ai đặt lại `DONE`/`FAILED`). Nấc 1 xử tay (người vận hành tự xoá ô về rỗng). Xử tử tế hơn khi có Document Store (`store/`) theo dõi tiến trình bền hơn cờ Sheet đơn thuần — **[ĐÃ GHI — mục C6 trong `docs/VPS_MIGRATION_BACKLOG.md`, thêm 2026-07-19]**, không còn là việc tồn đọng.
-5. **`requirements-webhook.txt` riêng** — cần hợp nhất vào `requirements.txt` gốc (hoặc giữ tách nếu muốn webhook là optional dependency) khi ráp.
+1. **Đăng ký endpoint với Apps Script** — chưa viết phía Apps Script (nút
+   "Thực Thi" hiện chưa gọi HTTP đi đâu cả), và chưa có tunnel/VPS để endpoint
+   này ra được internet. Xem đề xuất Phần B (Redis/RabbitMQ + webhook thật +
+   VPS) ở `docs/VPS_MIGRATION_BACKLOG.md`.
+2. **`requirements-webhook.txt` riêng** — cần hợp nhất vào `requirements.txt`
+   gốc (hoặc giữ tách nếu muốn webhook là optional dependency) khi ráp thật.
+3. **`install_service.ps1`** — vẫn chưa verify end-to-end trên máy có NSSM
+   (như trước phiên này), và giờ cần cài THÊM 1 service cho `queue_worker.py`.

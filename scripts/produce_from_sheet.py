@@ -99,7 +99,10 @@ from twmkt.utils.telegram_notifier import make_notifier  # noqa: E402
 
 from store import pipeline_store as ps  # noqa: E402
 
-_OUTPUT_PREVIEW = 1500   # số ký tự Output đưa lên Sheet (đủ xem; full lưu ra file)
+# store phải giữ NGUYÊN VĂN (Lead xác nhận 2026-07-27, sau khi bug
+# render_production_assets.py lộ ra store cũng chỉ nhận bản cắt) -- KHÔNG còn
+# hằng số/preview ở tầng ghi store. Truncate hiển thị (nếu cần) giờ CHỈ còn ở
+# điểm đẩy sang Sheet, xem store/sync_service.py::render_content_to_sheet().
 _ALL_TYPES = ("infographic", "article", "video")   # 3 loại all_production_agents() sinh (C7: "video" khớp Sheet)
 _DEFAULT_ACTOR = "[user request]"
 
@@ -435,9 +438,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
             if r.outcome == WriterOutcome.DONE:
                 fn = out_dir / f"{_slug(item['context'])}-article.md"
                 fn.write_text(r.draft.body, encoding="utf-8")
-                preview = r.draft.body if len(r.draft.body) <= _OUTPUT_PREVIEW else \
-                    r.draft.body[:_OUTPUT_PREVIEW] + f"\n…(xem {fn.name})"
-                _write_content(topic_key, "article", status="DONE", output=preview, notes="", facts_json=facts_json)
+                _write_content(topic_key, "article", status="DONE", output=r.draft.body, notes="", facts_json=facts_json)
                 written += 1
                 seen.add((topic_key, "article"))
                 produced += 1
@@ -448,9 +449,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                 note = "; ".join(r.draft.compliance_issues)
                 fn = out_dir / f"{_slug(item['context'])}-article.md"
                 fn.write_text(r.draft.body, encoding="utf-8")
-                preview = r.draft.body if len(r.draft.body) <= _OUTPUT_PREVIEW else \
-                    r.draft.body[:_OUTPUT_PREVIEW] + f"\n…(xem {fn.name})"
-                _write_content(topic_key, "article", status="ERROR", output=preview, notes=note, facts_json=facts_json)
+                _write_content(topic_key, "article", status="ERROR", output=r.draft.body, notes=note, facts_json=facts_json)
                 written += 1
                 flagged += 1
                 notifier.notify("error", topic=item["context"], type="article", issues=note)
@@ -557,12 +556,12 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
             note = "; ".join(draft.compliance_issues)
             if not use_llm and type_ != "infographic":
                 note = (note + " | " if note else "") + "MOCK (chưa bật Sonnet)"
-            # Lưu full ra file (tham chiếu cục bộ); store giữ preview để đọc lại nhanh.
+            # Lưu full ra file (tham chiếu cục bộ, tiện đọc tay); store CŨNG giữ
+            # NGUYÊN VĂN draft.body (Lead xác nhận 2026-07-27 -- store là nguồn
+            # sự thật, KHÔNG được chỉ có bản cắt như Sheet preview).
             fn = out_dir / f"{_slug(item['context'])}-{type_}.{_ext(type_)}"
             fn.write_text(draft.body, encoding="utf-8")
-            preview = draft.body if len(draft.body) <= _OUTPUT_PREVIEW else \
-                draft.body[:_OUTPUT_PREVIEW] + f"\n…(xem {fn.name})"
-            _write_content(topic_key, type_, status=status, output=preview, notes=note, facts_json=facts_json)
+            _write_content(topic_key, type_, status=status, output=draft.body, notes=note, facts_json=facts_json)
             written += 1
             seen.add((topic_key, type_))
             produced += 1
@@ -747,7 +746,7 @@ def run_draft(*, limit: int = 5, setup: bool = False) -> dict:
             fn.write_text(draft.body, encoding="utf-8")
             _write_content(topic_key, "infographic",
                           status="DONE" if draft.is_clean else "ERROR",
-                          output=draft.body[:_OUTPUT_PREVIEW],
+                          output=draft.body,
                           notes="; ".join(draft.compliance_issues),
                           facts_json=facts_to_json(brief.facts))   # rỗng ở đường --draft (chưa wire run_brief())
             written += 1
@@ -864,10 +863,8 @@ def run_ingest() -> dict:
             draft = draft_to_content_draft(type_, data, brief, approx_tolerance=approx_tol)
             fn = out_dir / f"{slug}-{ctype}.md"
             fn.write_text(draft.body, encoding="utf-8")
-            preview = draft.body if len(draft.body) <= _OUTPUT_PREVIEW else \
-                draft.body[:_OUTPUT_PREVIEW] + f"\n…(xem {fn.name})"
             _write_content(topic_key, ctype, status="DONE" if draft.is_clean else "ERROR",
-                          output=preview, notes="; ".join(draft.compliance_issues),
+                          output=draft.body, notes="; ".join(draft.compliance_issues),
                           facts_json=facts_to_json(brief.facts))   # rỗng ở đường --ingest (chưa wire run_brief())
             written += 1
             seen.add((topic_key, ctype))

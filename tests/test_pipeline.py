@@ -405,11 +405,39 @@ def test_gate_factory_rejects_unknown_type():
 
 # --- LLM factory: chọn theo provider (không gọi API) ------------------------
 def test_build_llm_by_provider():
-    from twmkt.agents.base import MockLLM, AnthropicLLM
+    from twmkt.agents.base import MockLLM, AnthropicLLM, ClaudeCodeLLM
     assert isinstance(factory.build_llm(Settings({"llm": {"provider": "mock"}})), MockLLM)
     # anthropic chỉ *dựng* client, không gọi API (import SDK cũng lazy trong complete)
     assert isinstance(factory.build_llm(Settings({"llm": {"provider": "anthropic"}})),
                       AnthropicLLM)
+    # claude_code (2026-07-27 -- Producers dùng gói Claude Pro/Max thay Anthropic
+    # API khi ANTHROPIC_API_KEY chưa cấu hình) -- chỉ dựng CLI client, không gọi.
+    cc = factory.build_llm(Settings({"llm": {"provider": "claude_code",
+                                             "claude_code": {"timeout_s": 99}}}))
+    assert isinstance(cc, ClaudeCodeLLM)
+    assert cc.timeout_s == 99.0
+
+
+def test_build_llm_unsupported_provider_raises():
+    try:
+        factory.build_llm(Settings({"llm": {"provider": "openai"}}))
+    except ValueError as e:
+        assert "mock|anthropic|claude_code" in str(e)
+    else:
+        raise AssertionError("phải raise ValueError với provider lạ")
+
+
+def test_build_content_llm_uses_claude_code_when_provider_claude_code():
+    """VIỆC PHÁT SINH (2026-07-27, Lead yêu cầu): trước bản vá, build_content_llm()
+    (Producers -- InfographicSpecAgent/VideoScriptAgent) LUÔN đi nhánh 'anthropic'
+    bất kể llm.mode -- thiếu ANTHROPIC_API_KEY khiến video/infographic âm thầm
+    lùi mượt MOCK. Đổi llm.provider='claude_code' phải khiến content_llm dùng
+    ClaudeCodeLLM (CLI, KHÔNG cần ANTHROPIC_API_KEY)."""
+    from twmkt.agents.base import ClaudeCodeLLM
+
+    settings = Settings({"llm": {"provider": "claude_code"}})
+    router = factory.build_content_llm(settings, offline=False)
+    assert isinstance(router.base, ClaudeCodeLLM)
 
 
 # --- Pipeline dựng-từ-config vẫn chạy offline, $0 token ----------------------
@@ -987,7 +1015,7 @@ def test_build_format_requests_covers_features_and_is_deterministic():
     """Hàm thuần build_format_requests: đủ loại request + idempotent (xóa trước thêm)."""
     from twmkt.sheets_board import (
         build_format_requests, TabMeta, TABS,
-        SOURCES_HEADER, CONTEXT_HEADER,
+        SOURCES_HEADER, CONTEXT_HEADER, OUTPUT_TYPE_VALUES,
     )
     tabs = []
     for i, (name, header) in enumerate(TABS.items()):
@@ -1014,12 +1042,25 @@ def test_build_format_requests_covers_features_and_is_deterministic():
     # Duyệt Public (Phase 1.3, trước đây "Gate3", APPROVE/PENDING/REJECT=3) => 9+3+3 = 15
     assert kinds.count("addConditionalFormatRule") == 15
     # checkbox: SOURCES.Enable + PROMPTS.Enable (Use đã xoá, KHÔNG còn checkbox CONTEXT)
-    # dropdown: CONTEXT.Duyệt Context + CONTEXT.Execute + CONTENT.Status + CONTENT.Duyệt Content
-    # + CONTENT.Duyệt Public (Phase 1.3) + CONTENT.Posting Status (Sheet UI cleanup
-    # Phase 6) => 6
+    # dropdown: CONTEXT.Duyệt Context + CONTEXT.Output Type (Bước 4, sửa 2026-07-27 —
+    # trước đó THIẾU nhánh này, ô Sheet lộ dropdown sót của Execute) + CONTEXT.Execute
+    # + CONTENT.Status + CONTENT.Duyệt Content + CONTENT.Duyệt Public (Phase 1.3)
+    # + CONTENT.Posting Status (Sheet UI cleanup Phase 6) => 7
     sd = [r["setDataValidation"] for r in reqs if "setDataValidation" in r]
     conds = [v["rule"]["condition"]["type"] for v in sd]
-    assert conds.count("BOOLEAN") == 2 and conds.count("ONE_OF_LIST") == 6
+    assert conds.count("BOOLEAN") == 2 and conds.count("ONE_OF_LIST") == 7
+
+    # Output Type PHẢI dùng đúng OUTPUT_TYPE_VALUES (bug cũ: cột này chưa từng
+    # có nhánh riêng -> lộ dropdown sót của Execute, xem sheets_board.py).
+    low_ctx = [c.lower() for c in CONTEXT_HEADER]
+    output_type_col = low_ctx.index("output type")
+    output_type_reqs = [r["setDataValidation"] for r in reqs
+                        if "setDataValidation" in r
+                        and r["setDataValidation"]["range"]["startColumnIndex"] == output_type_col]
+    assert len(output_type_reqs) == 1
+    got_values = {v["userEnteredValue"] for v in output_type_reqs[0]["rule"]["condition"]["values"]}
+    assert got_values == set(OUTPUT_TYPE_VALUES)
+
     # determinism = idempotent theo cấu trúc
     assert build_format_requests(tabs) == reqs
     assert SOURCES_HEADER[0].lower() == "enable"
@@ -3712,6 +3753,42 @@ def test_run_article_done_writes_content_marks_execute_done_and_notifies():
     article_events = [e for e, ctx in notifier.events if ctx.get("type") == "article"]
     assert "start" in events and "gate2_done" in events
     assert "draft_changed" in article_events and "error" not in article_events
+
+
+def test_run_writes_full_body_to_store_over_1500_chars_not_truncated():
+    """VIỆC 1.2 + VIỆC 3 (Lead 2026-07-27) — bug gốc Bước 5.3: store
+    (content_output.output) từng nhận bản `preview` cắt 1500 ký tự (giống hệt
+    ô Sheet), KHÔNG PHẢI draft.body đầy đủ -- render_production_assets.py đọc
+    lại thì vỡ JSON. Fix: _write_content() giờ ghi draft.body NGUYÊN VĂN;
+    truncate CHỈ còn ở store/sync_service.py::_preview_output() (điểm đẩy
+    Sheet). Test dùng nội dung DÀI HƠN 1500 ký tự thật (mock cũ luôn ngắn hơn
+    ngưỡng nên bug không lộ ra qua test có sẵn)."""
+    import json as _json
+
+    long_content = ("Doanh thu quý này tăng mạnh nhờ xuất khẩu tăng tốc. " * 40) + "MARKER_CUOI_BAI_KHONG_DUOC_CAT"
+    assert len(long_content) > 1500   # đúng điều kiện gây bug thật
+
+    class _LongWriterLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            return _json.dumps({
+                "title": "Bài dài hơn 1500 ký tự", "sapo": "Tóm tắt.",
+                "sections": [{"heading": "Bối cảnh", "content": long_content}],
+                "disclaimer": "Nội dung chỉ mang tính thông tin, không phải khuyến nghị đầu tư. "
+                              "Nhà đầu tư tự chịu trách nhiệm với quyết định của mình.",
+                "sources": [],
+            }, ensure_ascii=False)
+
+    result, board, notifier = _run_produce_scenario(
+        _LongWriterLLM(), _approved_row("Bài test dài >1500 ký tự", row=2))
+
+    article_rows = [r for r in board.appended_content if r[2] == "article"]
+    assert len(article_rows) == 1
+    output_field = article_rows[0][4]   # content_row(): index 4 = Output
+    assert len(output_field) > 1500
+    assert "MARKER_CUOI_BAI_KHONG_DUOC_CAT" in output_field, (
+        "store bị cắt bản đầy đủ -- marker cuối bài biến mất (đúng bug Bước 5.3, "
+        "nội dung dài chỉ được lưu ra file cục bộ, KHÔNG vào store)")
+    assert "…(xem" not in output_field   # hậu tố cắt cũ KHÔNG được xuất hiện trong store
 
 
 def test_run_topic_keys_filters_to_matched_rows_and_ignores_limit():
@@ -7542,9 +7619,15 @@ def _render_prod_assets_module():
 
 def test_render_one_clean_spec_returns_png_bytes(monkeypatch, tmp_path):
     """render_one() giờ gọi ai_full (AI thật, MOCK ở đây) thay vì SVG tất
-    định — 2026-07-21, xem docstring render_production_assets.py."""
+    định — 2026-07-21, xem docstring render_production_assets.py.
+
+    2026-07-27 (Lead, sau bug Bước 5.3): render_one() giờ đọc JSON từ STORE
+    (theo topic_key), KHÔNG còn item["output"] (ô Sheet) — seed content_output
+    thật qua pipeline_store trước khi gọi."""
     import json as _json
     import httpx
+    from store import document_store as ds
+    from store import pipeline_store as ps
     from twmkt.config import Settings
 
     rpa = _render_prod_assets_module()
@@ -7559,13 +7642,68 @@ def test_render_one_clean_spec_returns_png_bytes(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-fake-key-not-real")
     monkeypatch.setattr(httpx, "post", _fake_success)
 
+    db_path = tmp_path / "store.db"
+    monkeypatch.setenv("DOCUMENT_STORE_PATH", str(db_path))
+    ds.init_db(db_path)
     output = {"title": "GDP tăng mạnh", "hero": [{"label": "GDP", "value": "8,18%"}]}
-    item = {"output": _json.dumps(output), "topic_key": "tk-1", "context": "GDP tăng mạnh"}
+    ps.write_content_output("tk-1", "infographic", {"output": _json.dumps(output)}, db_path=db_path)
+
+    item = {"topic_key": "tk-1", "context": "GDP tăng mạnh"}
     settings = Settings({"storage": {"data_root": str(tmp_path)}})
     # 2026-07-23 (Phần A-C): render_one() giờ trả (png_map, warn_map, logs)
     # theo TỪNG TỶ LỆ (_RATIOS = 4:5/9:16/1:1), không còn 1 cặp duy nhất.
     png_map, warn_map, logs = rpa.render_one(item, settings=settings)
     assert png_map[rpa._PRIMARY_RATIO] is not None and warn_map[rpa._PRIMARY_RATIO] == ""
+
+
+def test_render_one_parses_full_json_over_1500_chars_from_store(monkeypatch, tmp_path):
+    """VIỆC 3 (Lead 2026-07-27) — khoá lại ĐÚNG bug Bước 5.3: JSON infographic
+    THẬT (bài Google) dài 1565 ký tự, vượt ngưỡng _OUTPUT_PREVIEW=1500 --
+    trước fix, render_one() đọc item["output"] (ô Sheet, đã bị cắt ở đúng
+    ngưỡng này + hậu tố "…(xem ...)") -> json.loads() vỡ giữa chừng ->
+    NEEDS_HUMAN oan dù dữ liệu hoàn toàn hợp lệ. Test PHẢI dùng nội dung DÀI
+    HƠN 1500 ký tự thật (không phải mock ngắn — bug chỉ lộ ở dữ liệu dài,
+    xem ghi chú "Nguyên tắc đã học" HANDOFF_2026-07-25_agentA.md)."""
+    import json as _json
+    import httpx
+    from store import document_store as ds
+    from store import pipeline_store as ps
+    from twmkt.config import Settings
+
+    rpa = _render_prod_assets_module()
+    tiny_png_b64 = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+
+    def _fake_success(*a, **kw):
+        return httpx.Response(200, json={"data": [{"b64_json": tiny_png_b64}]},
+                              request=httpx.Request("POST", "https://api.openai.com/v1/images/generations"))
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-fake-key-not-real")
+    monkeypatch.setattr(httpx, "post", _fake_success)
+
+    output = {
+        "title": "Chỉ trong nửa năm, công ty mẹ Google thu hơn 6 triệu tỷ đồng",
+        "hero": [
+            {"label": f"Chỉ số tài chính thứ {i}",
+             "value": f"{i} tỷ đồng, tăng trưởng ổn định so với cùng kỳ năm trước"}
+            for i in range(20)
+        ],
+    }
+    output_json = _json.dumps(output, ensure_ascii=False)
+    assert len(output_json) > 1500   # tái hiện ĐÚNG điều kiện gây bug (bài thật 1565 ký tự)
+
+    db_path = tmp_path / "store.db"
+    monkeypatch.setenv("DOCUMENT_STORE_PATH", str(db_path))
+    ds.init_db(db_path)
+    ps.write_content_output("tk-long", "infographic", {"output": output_json}, db_path=db_path)
+
+    item = {"topic_key": "tk-long", "context": output["title"]}
+    settings = Settings({"storage": {"data_root": str(tmp_path)}})
+    png_map, warn_map, logs = rpa.render_one(item, settings=settings)
+    assert png_map[rpa._PRIMARY_RATIO] is not None, (
+        f"JSON >1500 ký tự bị chặn oan -- store đọc lại KHÔNG đầy đủ: {warn_map[rpa._PRIMARY_RATIO]}")
+    assert warn_map[rpa._PRIMARY_RATIO] == ""
 
 
 def test_render_one_gate2_typo_flows_through_unchecked_known_risk(monkeypatch, tmp_path):
@@ -7574,9 +7712,14 @@ def test_render_one_gate2_typo_flows_through_unchecked_known_risk(monkeypatch, t
     cùng lượt chuyển renderer sang ai_full, nên số gõ nhầm ở Gate 2 KHÔNG còn
     bị chặn tự động trước render -- Gate 2/Gate 3 (duyệt người) là lớp chặn
     còn lại duy nhất. Test này khoá lại hành vi HIỆN TẠI, không phải khẳng
-    định đây là an toàn."""
+    định đây là an toàn.
+
+    2026-07-27 (Lead, sau bug Bước 5.3): seed content_output qua store, giống
+    test_render_one_clean_spec_returns_png_bytes."""
     import json as _json
     import httpx
+    from store import document_store as ds
+    from store import pipeline_store as ps
     from twmkt.config import Settings
 
     rpa = _render_prod_assets_module()
@@ -7591,21 +7734,246 @@ def test_render_one_gate2_typo_flows_through_unchecked_known_risk(monkeypatch, t
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-fake-key-not-real")
     monkeypatch.setattr(httpx, "post", _fake_success)
 
+    db_path = tmp_path / "store.db"
+    monkeypatch.setenv("DOCUMENT_STORE_PATH", str(db_path))
+    ds.init_db(db_path)
     output = {"title": "GDP", "hero": [{"label": "GDP", "value": "99%"}]}   # gõ nhầm ở Gate 2, KHÔNG khớp facts[]
-    item = {"output": _json.dumps(output), "topic_key": "tk-1", "context": "GDP"}
+    ps.write_content_output("tk-1", "infographic", {"output": _json.dumps(output)}, db_path=db_path)
+
+    item = {"topic_key": "tk-1", "context": "GDP"}
     settings = Settings({"storage": {"data_root": str(tmp_path)}})
     png_map, warn_map, logs = rpa.render_one(item, settings=settings)
     assert png_map[rpa._PRIMARY_RATIO] is not None and warn_map[rpa._PRIMARY_RATIO] == ""   # KHÔNG bị chặn -- đúng đánh đổi đã ghi trong docstring
 
 
-def test_render_one_bad_output_json_returns_error_reason():
+def test_render_one_bad_output_json_returns_error_reason(monkeypatch, tmp_path):
+    """2026-07-27: JSON hỏng NẰM TRONG STORE (không phải ô Sheet) vẫn phải bị
+    bắt đúng chỗ (json.loads() vỡ), KHÔNG bị lẫn với ca 'không tìm thấy
+    topic_key trong store' (2 lỗi khác nhau, message khác nhau)."""
+    from store import document_store as ds
+    from store import pipeline_store as ps
     from twmkt.config import Settings
 
     rpa = _render_prod_assets_module()
 
-    item = {"output": "khong phai JSON", "topic_key": "tk-1", "context": "X"}
+    db_path = tmp_path / "store.db"
+    monkeypatch.setenv("DOCUMENT_STORE_PATH", str(db_path))
+    ds.init_db(db_path)
+    ps.write_content_output("tk-1", "infographic", {"output": "khong phai JSON"}, db_path=db_path)
+
+    item = {"topic_key": "tk-1", "context": "X"}
     png_map, warn_map, logs = rpa.render_one(item, settings=Settings({}))
     assert png_map[rpa._PRIMARY_RATIO] is None and "JSON hợp lệ" in warn_map[rpa._PRIMARY_RATIO]
+
+
+def test_render_one_missing_topic_key_in_store_returns_error_reason(monkeypatch, tmp_path):
+    """VIỆC 1.1 (Lead 2026-07-27): topic_key KHÔNG có content_output trong
+    store (khác ca JSON hỏng) -> lỗi RÕ RÀNG NÊU RA store/TopicKey, không lẫn
+    với ca JSON hỏng và KHÔNG crash."""
+    from store import document_store as ds
+    from twmkt.config import Settings
+
+    rpa = _render_prod_assets_module()
+
+    db_path = tmp_path / "store.db"
+    monkeypatch.setenv("DOCUMENT_STORE_PATH", str(db_path))
+    ds.init_db(db_path)   # store rỗng -- topic_key chưa từng ghi content_output
+
+    item = {"topic_key": "khong-ton-tai", "context": "X"}
+    png_map, warn_map, logs = rpa.render_one(item, settings=Settings({}))
+    assert png_map[rpa._PRIMARY_RATIO] is None
+    assert "store" in warn_map[rpa._PRIMARY_RATIO].lower()
+    assert "khong-ton-tai" in warn_map[rpa._PRIMARY_RATIO]
+
+
+# =============================================================================
+# PHASE QUEUE (2026-07-27) — scripts/queue_worker.py::run_once()
+# =============================================================================
+
+def _queue_worker_module():
+    import os as _os
+    import sys as _sys
+    REPO_ROOT_ = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), ".."))
+    _sys.path.insert(0, _os.path.join(REPO_ROOT_, "scripts"))
+    import queue_worker as qw
+    return qw
+
+
+def test_queue_worker_run_once_returns_false_when_queue_empty(monkeypatch, tmp_path):
+    from store import document_store as ds
+    from twmkt.config import Settings
+
+    qw = _queue_worker_module()
+    db_path = tmp_path / "store.db"
+    monkeypatch.setenv("DOCUMENT_STORE_PATH", str(db_path))
+    ds.init_db(db_path)
+
+    handled = qw.run_once(settings=Settings({}), worker_id="test-worker")
+    assert handled is False
+
+
+def test_queue_worker_run_once_claims_processes_and_marks_done(monkeypatch, tmp_path):
+    """1 vòng: claim job -> gọi ĐÚNG produce_from_sheet.run(topic_keys=[tk],
+    limit=1) -> mark_done. `run()` chỉ MOCK ở test này (đã có test thật cho
+    run() riêng) -- trọng tâm là dây nối claim->run->mark_done đúng."""
+    from store import document_store as ds
+    from store import queue_store as qs
+    from twmkt.config import Settings
+
+    qw = _queue_worker_module()
+    db_path = tmp_path / "store.db"
+    monkeypatch.setenv("DOCUMENT_STORE_PATH", str(db_path))
+    ds.init_db(db_path)
+    qs.enqueue("tk-1", db_path=db_path)
+
+    called = []
+
+    def _fake_run(*, topic_keys, limit):
+        called.append((topic_keys, limit))
+        return {"approved": 1, "produced": 1}
+
+    monkeypatch.setattr(qw.produce_from_sheet, "run", _fake_run)
+
+    handled = qw.run_once(settings=Settings({}), worker_id="test-worker")
+    assert handled is True
+    assert called == [(["tk-1"], 1)]
+
+    row = qs.list_queue(db_path=db_path)[0]
+    assert row["status"] == "done"
+
+
+def test_queue_worker_run_once_marks_failed_when_run_raises(monkeypatch, tmp_path):
+    """Crash HẠ TẦNG thật sự (run() raise, không tự bắt gọn được) -> job hàng
+    đợi 'failed', KHÁC hẳn NEEDS_HUMAN/FAILED nghiệp vụ (cái đó run() tự ghi
+    vào gate_status.execute, không raise, không rơi vào nhánh này)."""
+    from store import document_store as ds
+    from store import queue_store as qs
+    from twmkt.config import Settings
+
+    qw = _queue_worker_module()
+    db_path = tmp_path / "store.db"
+    monkeypatch.setenv("DOCUMENT_STORE_PATH", str(db_path))
+    ds.init_db(db_path)
+    qs.enqueue("tk-1", db_path=db_path)
+
+    def _fake_run_raises(*, topic_keys, limit):
+        raise RuntimeError("crash hạ tầng giả lập")
+
+    monkeypatch.setattr(qw.produce_from_sheet, "run", _fake_run_raises)
+
+    handled = qw.run_once(settings=Settings({}), worker_id="test-worker")
+    assert handled is True   # job ĐÃ được xử lý (dù kết quả là failed)
+
+    row = qs.list_queue(db_path=db_path)[0]
+    assert row["status"] == "failed"
+    assert "crash hạ tầng giả lập" in row["error"]
+
+
+def test_queue_worker_run_once_releases_stale_claim_then_reprocesses_same_job(monkeypatch, tmp_path):
+    """Job 'claimed' quá hạn lease (worker CŨ chết giữa chừng) phải được giải
+    phóng về 'queued' TRƯỚC khi lấy job mới trong CÙNG 1 lần gọi `run_once()`
+    — worker MỚI phải xử lý ĐƯỢC job đó ngay, không phải chờ vòng lặp sau."""
+    import sqlite3
+    from datetime import datetime, timedelta, timezone
+
+    from store import document_store as ds
+    from store import queue_store as qs
+    from twmkt.config import Settings
+
+    qw = _queue_worker_module()
+    db_path = tmp_path / "store.db"
+    monkeypatch.setenv("DOCUMENT_STORE_PATH", str(db_path))
+    ds.init_db(db_path)
+    job_id = qs.enqueue("tk-1", db_path=db_path)
+    qs.claim_next("worker-cu-da-chet", db_path=db_path)
+    old_ts = (datetime.now(timezone.utc) - timedelta(seconds=9999)).isoformat()
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("UPDATE execution_queue SET claimed_at = ? WHERE id = ?", (old_ts, job_id))
+    conn.commit()
+    conn.close()
+
+    called = []
+    monkeypatch.setattr(qw.produce_from_sheet, "run",
+                        lambda *, topic_keys, limit: called.append(topic_keys))
+
+    settings = Settings({"queue": {"lease_timeout_s": 600, "max_attempts": 3}})
+    handled = qw.run_once(settings=settings, worker_id="worker-moi")
+    assert handled is True
+    assert called == [["tk-1"]]
+
+    row = qs.list_queue(db_path=db_path)[0]
+    assert row["status"] == "done"
+    assert row["claimed_by"] == "worker-moi"
+
+
+def test_queue_worker_run_once_ingests_sheet_approval_before_claiming(monkeypatch, tmp_path):
+    """VIỆC PHÁT SINH (2026-07-27, phát hiện khi chuẩn bị test e2e thật):
+    TRƯỚC bản vá này, KHÔNG có gì gọi `ingest_context_from_sheet()` định kỳ ->
+    người duyệt Gate1=APPROVE trên Sheet thật sẽ KHÔNG BAO GIỜ tự sinh job
+    trong hàng đợi (enqueue chỉ nằm TRONG hàm ingest, xem store/sync_service.py).
+    `run_once(board=...)` giờ tự ingest TRƯỚC khi kiểm hàng đợi — 1 lần gọi
+    PHẢI đủ để: đọc Sheet thấy Gate1=APPROVE mới -> enqueue -> claim NGAY ->
+    gọi run() -> done, không cần đợi vòng lặp sau."""
+    from twmkt.sheets_board import CONTEXT_HEADER
+    from store import document_store as ds
+    from store import queue_store as qs
+    from twmkt.config import Settings
+
+    class _FakeWorksheet:
+        """Đủ method cả ingest (get_all_values) LẪN render (clear/update) --
+        run_once(board=...) giờ gọi CẢ 2 chiều sau khi xử lý xong 1 job."""
+        def __init__(self, values):
+            self._v = values
+
+        def get_all_values(self):
+            return [list(row) for row in self._v]
+
+        def clear(self):
+            self._v = []
+
+        def update(self, range_str, values, value_input_option="RAW"):
+            self._v = [list(row) for row in values]
+
+    class _FakeBoard:
+        def __init__(self, context_rows):
+            self._tabs = {"CONTEXT": _FakeWorksheet(context_rows), "CONTENT": _FakeWorksheet([])}
+
+        def _tab(self, name):
+            return self._tabs.get(name, _FakeWorksheet([]))
+
+    qw = _queue_worker_module()
+    db_path = tmp_path / "store.db"
+    monkeypatch.setenv("DOCUMENT_STORE_PATH", str(db_path))
+    ds.init_db(db_path)
+
+    board = _FakeBoard([
+        CONTEXT_HEADER,
+        ["24/07/2026", "0.0", "0", "", "", "Bài vừa duyệt", "h", "u1",
+         "APPROVE", "", "", "", "", "tk-vua-duyet"],
+    ])
+
+    called = []
+    monkeypatch.setattr(qw.produce_from_sheet, "run",
+                        lambda *, topic_keys, limit: called.append(topic_keys))
+
+    settings = Settings({})
+    handled = qw.run_once(settings=settings, worker_id="worker-test", board=board)
+    assert handled is True
+    assert called == [["tk-vua-duyet"]]
+
+    # VIỆC PHÁT SINH #2 (2026-07-27): Sheet PHẢI được render lại NGAY sau khi
+    # xử lý xong job -- không thì Execute đứng hình mãi ở giá trị lúc duyệt
+    # (thường là rỗng/RUN người tự gõ), dù store đã có cờ RUN thật do bootstrap
+    # ghi (khớp mock produce_from_sheet.run() ở test này không tự đổi Execute).
+    rendered = board._tab("CONTEXT").get_all_values()
+    header = rendered[0]
+    i_ex = header.index("Execute")
+    i_tk = header.index("TopicKey")
+    row = next(r for r in rendered[1:] if r[i_tk] == "tk-vua-duyet")
+    assert row[i_ex] == "RUN"   # store đã bootstrap Execute=RUN, Sheet phải phản ánh đúng
+
+    row = qs.list_queue(db_path=db_path)[0]
+    assert row["topic_key"] == "tk-vua-duyet" and row["status"] == "done"
 
 
 def test_asset_hyperlink_formula_wraps_url_string():
