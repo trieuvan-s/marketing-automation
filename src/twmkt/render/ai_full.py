@@ -510,12 +510,14 @@ def render_ai_full(
 
     brand = load_brand()
     wordmark = brand.get("wordmark", "FVA CAPITAL")
-    brand_disclaimer = brand.get("footer", {}).get("disclaimer", "") if isinstance(brand.get("footer"), dict) else ""
-    # CÙNG NẾP render/infographic.py::brand_kit_from_settings() -- ghi đè
-    # RIÊNG cho infographic (không đụng brand.yaml dùng chung article/video)
-    # qua render.infographic.disclaimer. Yêu cầu Lead 2026-07-22: đổi văn bản
-    # disclaimer CHỈ cho infographic, KHÔNG đổi brand.yaml toàn cục.
-    disclaimer = settings.get("render.infographic.disclaimer", brand_disclaimer) if settings is not None else brand_disclaimer
+    # 2026-07-24 (quyết định Lead, SỬA VIỆC 2 -- "một nguồn sự thật"): BỎ HẲN
+    # override render.infographic.disclaimer (settings.yaml) từng thêm 2026-
+    # 07-22 -- 2 nguồn (brand.yaml + settings.yaml) đã LỆCH NHAU về câu chữ
+    # (khác nhau đúng 1 dấu chấm cuối), rủi ro thật của việc có 2 chỗ giữ
+    # cùng 1 chuỗi pháp lý. disclaimer giờ CHỈ đọc từ config/brand.yaml (đổi
+    # disclaimer sau này CHỈ sửa brand.yaml, không đụng code) -- xem
+    # config/brand.yaml::footer.disclaimer, config.load_brand().
+    disclaimer = brand.get("footer", {}).get("disclaimer", "") if isinstance(brand.get("footer"), dict) else ""
     source = spec.get("source", "")
 
     results: dict[str, tuple[bytes | None, str]] = {}

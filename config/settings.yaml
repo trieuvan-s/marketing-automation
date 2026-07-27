@@ -90,11 +90,14 @@ render:
     # "hybrid": GIỮ CHẠY ĐƯỢC làm đường tối ưu tương lai (kết hợp React/Vue để
     #   giảm chi phí + giảm AI hoá) — KHÔNG phát triển thêm đợt này.
     render_mode: "ai_full"
-    # Ghi đè disclaimer CHỈ cho infographic (2026-07-22, yêu cầu Lead) — KHÔNG
-    # đụng config/brand.yaml (dùng chung article/video, đổi ở đó sẽ ảnh hưởng
-    # ngoài phạm vi). Đọc bởi CẢ render/infographic.py (hybrid) LẪN
-    # render/ai_full.py (ai_full) — cùng 1 khoá, cùng nếp brand_kit_from_settings().
-    disclaimer: "Nội dung mang tính tham khảo, không phải khuyến nghị đầu tư."
+    # 2026-07-24 (quyết định Lead, SỬA VIỆC 2 -- "một nguồn sự thật"): ĐÃ XOÁ
+    # khoá `disclaimer` từng ghi đè riêng ở đây (thêm 2026-07-22) -- nó đã
+    # LỆCH câu chữ so với config/brand.yaml::footer.disclaimer (khác nhau 1
+    # dấu chấm cuối), đúng rủi ro "2 nguồn sự thật" Lead chỉ ra. Disclaimer
+    # infographic giờ đọc DUY NHẤT từ brand.yaml (ai_full.py::render_ai_full,
+    # infographic.py::brand_kit_from_settings đều tự lùi về đó khi khoá này
+    # vắng mặt -- KHÔNG cần sửa code 2 file đó, `settings.get(...)` đã có
+    # default an toàn từ trước).
 
 # Lớp AI (mềm) của renderer Infographic Hybrid — CHỈ sinh ẢNH NỀN, KHÔNG BAO
 # GIỜ chữ/số/bản đồ/icon (xem render/ai_background.py docstring). model/size/
