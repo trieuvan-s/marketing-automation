@@ -38,6 +38,7 @@ vẫn được — bỏ qua bước resolve/validate config, giữ nguyên hành
 """
 from __future__ import annotations
 
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -95,7 +96,25 @@ def run_aigen_pipeline(script_path: Path, *, aigen_repo_path: Path | None = None
                                    skipped_already_rendered=True, exit_code=None,
                                    stdout="", stderr="")
 
-    cmd = ["npm", "run", "pipeline", "--", str(script_path)]
+    # `produce:content` (KHÔNG phải `pipeline`) — SỬA 2026-07-28 sau khi chạy
+    # thật. Hai lý do, cả hai đều làm bản cũ KHÔNG BAO GIỜ chạy nổi:
+    #  1. `npm run pipeline` (cli.ts) nhận `TemplateScript` ĐÃ chuyển đổi, còn
+    #     ta đưa vào `CONTENT.Output` -> Zod từ chối ngay. Bước chuyển đổi
+    #     (`buildTemplateScriptFromContentOutput`) trước đây chỉ nằm trong
+    #     `scripts/_e2e_real_build.ts` (script thử nghiệm, không phải cổng vào).
+    #  2. `pipeline` KHÔNG tự bật OmniVoice TTS; `produce:content` thì có
+    #     (dùng lại nếu healthy, không thì spawn warm --device cuda:0, chờ
+    #     /health tối đa 180s) — nên KHÔNG cần khởi động TTS bằng tay nữa.
+    # `script_path` giờ trỏ file `content-output.json`; aigen tự ghi
+    # `script.json` + `video.mp4` CÙNG thư mục đó.
+    # `shutil.which("npm")` — BẮT BUỘC trên Windows (bug thật 2026-07-29):
+    # npm cài bằng shim `npm.cmd`, mà `subprocess.run(shell=False)` KHÔNG tự
+    # thử phần mở rộng theo PATHEXT như shell -> bare "npm" luôn
+    # FileNotFoundError dù npm có trong PATH và gõ tay chạy được. ĐÚNG bài học
+    # đã giải quyết ở `agents/base.py::ClaudeCodeLLM.complete()` cho `claude`
+    # — cùng lỗi, cùng cách sửa, chỉ khác chỗ chưa ai áp vào đây.
+    npm = shutil.which("npm") or "npm"
+    cmd = [npm, "run", "produce:content", "--", str(script_path)]
 
     if dry_run:
         return AigenPipelineResult(
@@ -107,6 +126,14 @@ def run_aigen_pipeline(script_path: Path, *, aigen_repo_path: Path | None = None
     try:
         proc = subprocess.run(cmd, cwd=str(aigen_repo_path), capture_output=True,
                               text=True, timeout=timeout_s)
+    except FileNotFoundError:
+        return AigenPipelineResult(
+            ok=False, video_path=None, skipped_already_rendered=False, exit_code=None,
+            stdout="", stderr="",
+            error=f"Không chạy được '{cmd[0]}' (cwd={aigen_repo_path}). Cài Node/npm "
+                 f"hoặc thêm vào PATH của TIẾN TRÌNH chạy worker — trên Windows npm là "
+                 f"shim .cmd, tiến trình nền có thể có PATH khác terminal.",
+        )
     except subprocess.TimeoutExpired as e:
         return AigenPipelineResult(
             ok=False, video_path=None, skipped_already_rendered=False, exit_code=None,
