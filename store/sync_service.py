@@ -38,9 +38,10 @@ migrate.
 """
 from __future__ import annotations
 
-from twmkt.sheets_board import (
-    CONTENT_HEADER, CONTEXT_HEADER, GATE1_COL, GATE2_COL, GATE3_COL, OUTPUT_TYPE_COL,
-    SheetsBoard, content_row, context_row, facts_to_json,
+from twmkt.sheets_board import (  # noqa: F401
+    _col_a1,
+    CONTENT_HEADER, CONTEXT_HEADER, EXECUTE_WAITING, GATE1_COL, GATE2_COL, GATE3_COL,
+    OUTPUT_TYPE_COL, SheetsBoard, content_row, context_row, facts_to_json,
 )
 
 from . import document_store as ds
@@ -49,11 +50,148 @@ from . import queue_store as qs
 
 _ALL_TYPES = ("article", "infographic", "video")
 
+# Nhãn AssetPath khi Gate 2 đã duyệt mà asset chưa có (xem _asset_cell()).
+ASSET_PROCESSING_LABEL = "Processing..."
+
 # store/content_output.output giữ NGUYÊN VĂN (Lead xác nhận 2026-07-27) --
 # TRUNCATE CHỈ còn ở đây, điểm đẩy sang Sheet cho người LIẾC nhanh. Bất kỳ
 # code nào cần parse lại nội dung (vd render_production_assets.py) PHẢI đọc
 # thẳng ps.read_content_output() từ store, KHÔNG BAO GIỜ đọc lại ô Sheet này.
 _OUTPUT_PREVIEW = 1500
+
+
+def _band_day(board, method: str, tab: str) -> None:
+    """Gọi hàm tô khối ngày ĐÃ CÓ SẴN trong sheets_board (band_context_by_day /
+    regroup_and_band_content).
+
+    ⚠️ 2026-07-29: hai hàm này TỒN TẠI TỪ 2026-07-23 và `review_to_sheet.py`
+    vẫn gọi sau mỗi lượt crawl — nhưng `render_*_to_sheet()` trước đây gọi
+    `ws.clear()`, XOÁ SẠCH băng màu chúng vừa tô, mỗi vòng worker. Logic không
+    hề mất; nó bị ghi đè liên tục. Nay render không clear nữa VÀ tự tô lại ở
+    đây, nên khối ngày sống qua mọi lượt cập nhật.
+    KHÔNG viết hàm tô mới — dùng đúng hàm đã có, tránh 2 định nghĩa lệch nhau."""
+    fn = getattr(board, method, None)
+    if fn is None:
+        return          # fake board trong test
+    try:
+        fn()
+    except Exception as e:   # noqa: BLE001 -- lớp trình bày, không chặn dữ liệu
+        print(f"[sync] Tô khối ngày {tab} thất bại (bỏ qua, dữ liệu vẫn đúng): {e!r}")
+
+
+def _visible_rows(rows: list[list[str]], i_ts: int, *, settings=None) -> list[list[str]]:
+    """Giữ lại dòng trong `sheets.display_days` ngày gần nhất (mặc định 7).
+
+    Quy ước Lead: Sheet là BẢNG LÀM VIỆC, không phải kho — dữ liệu từ ngày thứ
+    8 trở về trước CHỈ nằm trong DB, không hiển thị. Không xoá gì khỏi DB:
+    đổi `display_days` rồi render lại là dòng cũ hiện lại ngay.
+    `display_days: 0` -> hiện tất cả (đường thoát khi cần soi lịch sử)."""
+    if settings is None:
+        # Tự nạp config khi caller không truyền — để MỌI lối gọi hiện có
+        # (worker, sync_store_sheet, script tay) đều tôn trọng display_days mà
+        # không phải sửa từng chỗ. Thiếu config -> mặc định 7, không nổ.
+        try:
+            from twmkt.config import load_settings
+            settings = load_settings()
+        except Exception:   # noqa: BLE001
+            settings = None
+    days = 7
+    if settings is not None:
+        try:
+            days = int(settings.get("sheets.display_days", 7))
+        except (TypeError, ValueError):
+            days = 7
+    if days <= 0:
+        return rows
+    from datetime import date, timedelta
+    cutoff = date.today() - timedelta(days=days - 1)
+    ck = (cutoff.year, cutoff.month, cutoff.day)
+    out = []
+    for r in rows:
+        k = _day_key(r[i_ts] if i_ts < len(r) else "")
+        if k == (0, 0, 0) or k >= ck:   # ngày hỏng -> GIỮ, không âm thầm giấu
+            out.append(r)
+    return out
+
+
+def _day_key(ts: str) -> tuple[int, int, int]:
+    """"DD/MM/YYYY" -> (yyyy, mm, dd) để SẮP XẾP. Chuỗi lạ -> (0,0,0) (xuống
+    cuối) chứ KHÔNG raise: 1 ô ngày hỏng không đáng làm hỏng cả lượt render."""
+    parts = (ts or "").strip().split("/")
+    if len(parts) != 3:
+        return (0, 0, 0)
+    try:
+        d, m, y = (int(x) for x in parts)
+        return (y, m, d)
+    except ValueError:
+        return (0, 0, 0)
+
+
+def _num(v: str) -> float:
+    try:
+        return float(str(v).replace(",", "."))
+    except ValueError:
+        return 0.0
+
+
+def _write_rows(board: SheetsBoard, tab: str, header: list[str], rows: list[list[str]]) -> None:
+    """Ghi GIÁ TRỊ vào tab — KHÔNG `clear()` cả bảng.
+
+    ⚠️ ĐÂY LÀ THAY ĐỔI CỐT LÕI 2026-07-29 (Lead: "thiết lập của user bị ghi đè",
+    "block dữ liệu theo ngày chưa có"). Bản cũ gọi `ws.clear()` rồi ghi lại tất
+    cả — mà `clear()` XOÁ CẢ ĐỊNH DẠNG: băng màu, viền, mọi thiết lập hiển thị
+    người dựng tay đều bay sau MỖI lượt render (worker render sau mỗi job).
+    Không có cách nào "tô lại cho kịp" — cứ tô xong lại bị xoá ở lượt sau.
+
+    `values.update` KHÔNG đụng tới format, nên chỉ ghi giá trị là định dạng
+    sống nguyên. Dòng THỪA (bảng co lại) được `batch_clear` RIÊNG phần đuôi —
+    hẹp nhất có thể, không chạm vùng còn dữ liệu.
+
+    Đây cũng chính là cơ chế "chỉ cập nhật phần thay đổi" Lead hỏi: ta ghi đè
+    vùng dữ liệu bằng 1 lệnh values (rẻ, 1 API call) thay vì clear+ghi (2 lệnh
+    + mất format). Diff từng ô là bước tối ưu tiếp theo, chưa cần ở quy mô này."""
+    ws = board._tab(tab)
+    ncols = len(header)
+    current = ws.get_all_values()
+    # Header: chỉ ghi khi THIẾU/SAI. Ghi đè vô cớ mỗi lượt là tự xoá định dạng
+    # hàng tiêu đề — đúng thứ vừa sửa ở dưới.
+    if not current or [c.strip() for c in current[0]] != list(header):
+        ws.update("A1", [list(header)], value_input_option="USER_ENTERED")
+    if rows:
+        ws.update("A2", rows, value_input_option="USER_ENTERED")
+    old_n = max(len(current) - 1, 0)
+    if old_n > len(rows):
+        last_col = _col_a1(ncols)
+        ws.batch_clear([f"A{len(rows) + 2}:{last_col}{old_n + 1}"])
+
+
+def _asset_cell(status_data: dict) -> str:
+    """Ô AssetPath trên Sheet từ content_status. `asset_url` -> công thức
+    HYPERLINK bấm được; không có URL thì lùi về đường file cục bộ (không bọc
+    — không bấm được, nhưng vẫn cho người biết ảnh nằm đâu); không có gì ->
+    rỗng.
+
+    Công thức viết TẠI ĐÂY thay vì import từ
+    `scripts/render_production_assets.py::asset_hyperlink_formula()`: store/ là
+    tầng dưới, KHÔNG được phụ thuộc vào scripts/ (script là tầng vận hành, gọi
+    xuống store chứ không ngược lại). Một dòng f-string, và có test khoá 2 lối
+    ghi ra CÙNG chuỗi -- xem test_asset_cell_matches_render_script_formula."""
+    url = (status_data.get("asset_url") or "").strip()
+    if url:
+        return f'=HYPERLINK("{url}", "Mở file")'
+    local = (status_data.get("asset_local_path") or "").strip()
+    if local:
+        return local
+    # CHƯA có asset nhưng NGƯỜI ĐÃ DUYỆT Gate 2 -> hệ thống đang xử lý
+    # (2026-07-28, yêu cầu Lead). Ô trống trong quãng này khiến người duyệt
+    # tưởng hệ thống không nhận — render ảnh mất hàng chục giây tới vài phút.
+    # CÙNG TINH THẦN cờ Execute="Running..." bên tab CONTEXT: phản hồi thị giác
+    # cho quãng chờ dài. Suy ra TỪ gate2, KHÔNG thêm field mới vào store —
+    # trạng thái phái sinh thì tính lúc hiển thị, không lưu (lưu là tự tạo thêm
+    # 1 thứ có thể lệch với sự thật).
+    if (status_data.get("gate2") or "").strip().upper() == "APPROVE":
+        return ASSET_PROCESSING_LABEL
+    return ""
 
 
 def _preview_output(output: str) -> str:
@@ -101,7 +239,7 @@ def _cell(row: list[str], i: int | None) -> str:
 # store -> Sheet (render, idempotent, = lệnh phục hồi)
 # =============================================================================
 
-def render_context_to_sheet(board: SheetsBoard, *, db_path=None) -> int:
+def render_context_to_sheet(board: SheetsBoard, *, db_path=None, settings=None) -> int:
     """Dựng lại TOÀN BỘ tab CONTEXT từ store — bao gồm CẢ Duyệt Context/Notes,
     đọc THẲNG từ gate_status (KHÔNG đọc lại giá trị hiện có trên Sheet trước
     khi xoá — store, KHÔNG PHẢI Sheet, là nguồn sự thật cho 2 cột người-sở-
@@ -121,17 +259,34 @@ def render_context_to_sheet(board: SheetsBoard, *, db_path=None) -> int:
             score=int(raw.get("score", 0) or 0), hot_pct=float(raw.get("hot_pct", 0.0) or 0.0),
             topic=raw.get("topic", ""), group=raw.get("group", ""),
             tickers=raw.get("tickers", []), status=gate.get("gate1", "PENDING"),
-            execute=gate.get("execute", ""), topic_key=topic_key, notes=gate.get("notes", ""),
+            # Mặc định Waiting, KHÔNG để rỗng (2026-07-28) — ô trống trông như
+            # "hệ thống chưa thấy dòng này", đúng thứ gây hiểu nhầm khi chờ lâu.
+            execute=gate.get("execute") or EXECUTE_WAITING,
+            topic_key=topic_key, notes=gate.get("notes", ""),
             output_type=gate.get("output_type") or [],
+            # BUG THẬT (Lead báo 2026-07-29): KHÔNG truyền `ts` thì context_row
+            # lấy _now_ddmmyyyy() -> MỖI LƯỢT RENDER ghi đè Timestamp thành
+            # HÔM NAY. Mọi dòng crawl 28/07 hoá thành 29/07, không còn phân
+            # biệt được tin ngày nào — đúng thứ Lead cần để lọc/nhóm theo ngày.
+            # `raw["timestamp"]` ghi MỘT LẦN lúc ingest đầu, không đổi về sau.
+            ts=raw.get("timestamp") or None,
         ))
 
-    ws = board._tab("CONTEXT")
-    ws.clear()
-    ws.update("A1", [CONTEXT_HEADER, *out_rows], value_input_option="USER_ENTERED")
+    i_ts = CONTEXT_HEADER.index("Timestamp")
+    i_hot = CONTEXT_HEADER.index("Hot%")
+    out_rows = _visible_rows(out_rows, i_ts, settings=settings)
+    # NGÀY TĂNG DẦN -> tin MỚI NHẤT nằm DƯỚI CÙNG (quy ước Lead): người vận
+    # hành cuộn xuống cuối là thấy việc hôm nay, và dòng mới thêm vào không đẩy
+    # dòng cũ trôi chỗ. Trong cùng 1 ngày vẫn Hot% giảm dần.
+    out_rows.sort(key=lambda r: (_day_key(r[i_ts]), _num(r[i_hot])))
+    out_rows.sort(key=lambda r: _day_key(r[i_ts]))
+
+    _write_rows(board, "CONTEXT", CONTEXT_HEADER, out_rows)
+    _band_day(board, "band_context_by_day", "CONTEXT")
     return len(out_rows)
 
 
-def render_content_to_sheet(board: SheetsBoard, *, db_path=None) -> int:
+def render_content_to_sheet(board: SheetsBoard, *, db_path=None, settings=None) -> int:
     """Dựng lại TOÀN BỘ tab CONTENT từ store. Đọc TRƯỚC giá trị NGƯỜI-SỞ-HỮU
     hiện có — bao gồm CẢ Duyệt Content/Social Link/Duyệt Public/Posting
     Status, đọc THẲNG từ content_status (KHÔNG đọc lại Sheet hiện tại trước
@@ -162,16 +317,34 @@ def render_content_to_sheet(board: SheetsBoard, *, db_path=None) -> int:
                 output=_preview_output(out.get("output", "")), notes=out.get("notes", ""),
                 approve=status_data.get("gate2", "PENDING"), topic_key=topic_key,
                 facts=out.get("facts", ""),
-                asset_path=status_data.get("asset_url") or status_data.get("asset_local_path") or "",
+                # Cùng lý do CONTEXT (xem render_context_to_sheet): không
+                # truyền `ts` thì mỗi lượt render ghi đè Timestamp thành hôm nay.
+                ts=out.get("timestamp") or None,
+                # Store giữ URL THUẦN (asset_url) — bọc thành công thức
+                # HYPERLINK ở ĐÚNG biên đẩy sang Sheet, cùng nếp
+                # `_preview_output()`: định dạng cho người xem là việc của lớp
+                # hiển thị, không phải của kho dữ liệu. Trùng khớp cái
+                # render_production_assets.py ghi thẳng ô Sheet cho đường chạy
+                # tay, nên 2 lối cho ra CÙNG 1 giá trị.
+                asset_path=_asset_cell(status_data),
             )
             row[i_h_social] = status_data.get("social_link", "")
             row[i_h_g3] = status_data.get("gate3", "PENDING")
             row[i_h_posting] = status_data.get("posting_status", "")
             out_rows.append(row)
 
-    ws = board._tab("CONTENT")
-    ws.clear()
-    ws.update("A1", [CONTENT_HEADER, *out_rows], value_input_option="USER_ENTERED")
+    i_ts_c = CONTENT_HEADER.index("Timestamp")
+    out_rows = _visible_rows(out_rows, i_ts_c, settings=settings)
+    out_rows.sort(key=lambda r: _day_key(r[i_ts_c]))   # mới nhất DƯỚI CÙNG
+    _write_rows(board, "CONTENT", CONTENT_HEADER, out_rows)
+
+    # BĂNG MÀU theo TopicKey + viền theo NGÀY (Lead báo thiếu 2026-07-29).
+    # `clear()` xoá cả nền/viền nên PHẢI tô lại sau MỖI lần dựng tab, không thì
+    # tab CONTENT trắng trơn, nhìn không ra đâu là nhóm của cùng 1 chủ đề.
+    # Đặt trong try: đây là lớp TRÌNH BÀY — hỏng nó không đáng làm hỏng cả lượt
+    # sync (dữ liệu đã ghi xong ở trên rồi). Fake board trong test không có
+    # method này -> bỏ qua êm, không cần fake thêm.
+    _band_day(board, "regroup_and_band_content", "CONTENT")
     return len(out_rows)
 
 
@@ -209,9 +382,11 @@ def ingest_context_from_sheet(board: SheetsBoard, *, db_path=None) -> int:
     i_notes = _col_index(header, "Notes")
     i_ex = _col_index(header, "Execute")
     i_ot = _col_index(header, OUTPUT_TYPE_COL)
+    i_ts = _col_index(header, "Timestamp")
 
     writes = 0
-    for row in rows:
+    deleted_rows: list[int] = []
+    for row_i, row in enumerate(rows, start=2):   # +2: hàng 1 là header
         topic_key = _cell(row, i_key)
         if not topic_key:
             continue   # dòng chưa có TopicKey (vd chưa backfill) -- bỏ qua, KHÔNG đoán khoá
@@ -223,15 +398,44 @@ def ingest_context_from_sheet(board: SheetsBoard, *, db_path=None) -> int:
         raw_src = _cell(row, i_src)
         source_url = raw_src.splitlines()[0] if raw_src else ""
         tickers = [t.strip() for t in _cell(row, i_tk).split(",") if t.strip()]
-        # Execute="" khi Gate1 vừa APPROVE -> tự đặt RUN (thay
-        # SheetsBoard.sync_approve_execute_flags() cũ — nay là việc sync
-        # service, xem docstring run() trong produce_from_sheet.py). Đây là
-        # NGOẠI LỆ THỨ 2 (cùng NEEDS_HUMAN->RUN) -- không đọc mọi giá trị
-        # Execute, chỉ đúng transition "vừa duyệt, chưa từng chạy".
-        bootstrap_execute = "RUN" if (sheet_gate1 == "APPROVE" and not sheet_execute) else None
+        # 2026-07-28 — Execute KHÔNG CÒN ĐƯỢC ĐỌC TỪ SHEET.
+        # Trước đây cột này 2 chiều qua 2 "khe hẹp" (rỗng->RUN khi vừa APPROVE;
+        # NEEDS_HUMAN->RUN khi người xin chạy lại). Nay Execute là cờ TRẠNG
+        # THÁI MÁY-GHI, read-only với người (dropdown đã gỡ + Protected Range,
+        # xem sheets_board.EXECUTE_VALUES) -> đọc ngược từ Sheet là VÔ NGHĨA và
+        # nguy hiểm: giá trị người lỡ gõ sẽ ghi đè trạng thái thật trong store.
+        # Cột này giờ THUẦN MỘT CHIỀU store->Sheet.
+        #
+        # Hệ quả: cổng điều khiển DUY NHẤT còn lại là Gate 1. Enqueue xảy ra
+        # khi Gate 1 CHUYỂN sang APPROVE (xem `_should_enqueue` bên dưới) —
+        # cũng chính là đường CHẠY LẠI sau NEEDS_HUMAN: bỏ APPROVE rồi APPROVE
+        # lại, Execute reset về Waiting và job mới vào hàng đợi.
+
+        # XOÁ CHỦ ĐỀ (2026-07-29, quyết định Lead) — xử lý TRƯỚC mọi nhánh
+        # khác: người đã ra lệnh bỏ hẳn thì không cần ingest/enqueue gì nữa.
+        # Job chờ bị huỷ; job ĐANG CHẠY vẫn chạy nốt (cùng lý do
+        # cancel_pending: giết giữa chừng là nguồn bug), nhưng kết quả của nó
+        # sẽ ghi vào một topic_key không còn ai đọc — vô hại.
+        # Dòng biến mất khỏi Sheet ở lượt render kế tiếp vì store hết dữ liệu.
+        if sheet_gate1.upper() == "DELETE":
+            qs.cancel_pending(topic_key, db_path=db_path, reason="người xoá chủ đề (Gate 1=DELETE)")
+            n = ds.delete_topic(topic_key, db_path=db_path)
+            # XOÁ DÒNG NGAY trên Sheet (2026-07-29, yêu cầu Lead: "thực thi
+            # realtime"). Không chờ lượt render kế tiếp — người bấm xong phải
+            # thấy dòng biến mất luôn, nếu không sẽ tưởng lệnh không ăn.
+            # `row_i` là chỉ số dòng THẬT của vòng lặp này; ta xoá NGAY nên
+            # không có cửa sổ để bảng bị sắp lại giữa chừng (đúng bài học
+            # row-index đã gây lỗi trước đây).
+            deleted_rows.append(row_i)
+            print(f"[sync] ĐÃ XOÁ chủ đề {topic_key[:8]} khỏi DB ({n} document) "
+                  f"và khỏi Sheet. KHÔNG hoàn tác được.")
+            writes += 1
+            continue
 
         if ps.read_raw(topic_key, db_path=db_path) is None:
             # Cầu nối tạm: topic MỚI từ review_to_sheet.py, chưa có trong store.
+            # (Ca DELETE đã `continue` ở trên nên không lọt xuống đây — không
+            # nạp vào store thứ người vừa bảo xoá.)
             try:
                 score_val = int(float(_cell(row, i_score) or 0))
             except ValueError:
@@ -245,38 +449,138 @@ def ingest_context_from_sheet(board: SheetsBoard, *, db_path=None) -> int:
                 "source": source_url, "tickers": tickers,
                 "group": _cell(row, i_grp), "topic": _cell(row, i_top),
                 "score": score_val, "hot_pct": hot_val,
+                # Giữ NGUYÊN Timestamp review_to_sheet.py đã ghi lúc crawl —
+                # đây là "ngày tin vào hệ thống", ghi 1 lần rồi bất biến.
+                "timestamp": _cell(row, i_ts),
             }, db_path=db_path)
             writes += 1
-            new_execute = sheet_execute or bootstrap_execute
             ps.write_gate_status(topic_key, gate1=sheet_gate1,
-                                 execute=new_execute, notes=sheet_notes or None,
+                                 execute=EXECUTE_WAITING, notes=sheet_notes or None,
                                  output_type=sheet_output_type or None,
                                  db_path=db_path)
             writes += 1
-            if new_execute == "RUN":
+            # Topic MỚI mà đã APPROVE sẵn (vd người duyệt trước lượt ingest
+            # đầu tiên) -> vào hàng đợi ngay, không phải chờ 1 lượt đổi Gate 1.
+            if sheet_gate1 == "APPROVE":
                 qs.enqueue(topic_key, job_type="produce", db_path=db_path)
             continue
 
         gate = ps.read_gate_status(topic_key, db_path=db_path)
+
+        # KHOÁ KHI ĐANG CHẠY (2026-07-28, quyết định Lead): topic có job
+        # 'claimed' -> BỎ QUA mọi thay đổi người vừa gõ (Gate 1, Output Type,
+        # Notes). Job đang chạy cứ chạy hết; nhận thêm yêu cầu chồng lên việc
+        # đang làm dở chỉ đẻ ra trạng thái mâu thuẫn (vừa Running... vừa
+        # Waiting, kết quả của yêu cầu CŨ ghi đè lên yêu cầu MỚI). Người muốn
+        # đổi thì đợi xong rồi đổi — lượt render kế tiếp trả ô về giá trị thật
+        # nên không mất gì ngoài vài giây.
+        if qs.has_running(topic_key, db_path=db_path):
+            continue
+
         updates: dict = {}
-        if sheet_gate1 != gate.get("gate1", "PENDING"):
+        prev_gate1 = gate.get("gate1", "PENDING")
+        if sheet_gate1 != prev_gate1:
             updates["gate1"] = sheet_gate1
         if sheet_notes != gate.get("notes", ""):
             updates["notes"] = sheet_notes
         if sheet_output_type != (gate.get("output_type") or []):
             updates["output_type"] = sheet_output_type
-        if bootstrap_execute and not gate.get("execute"):
-            updates["execute"] = bootstrap_execute
-        # NGOẠI LỆ DUY NHẤT KHÁC (xem docstring module): người đổi NEEDS_HUMAN
-        # -> RUN để yêu cầu thử lại -- KHÔNG đọc mọi giá trị Execute khác.
-        if gate.get("execute") == "NEEDS_HUMAN" and sheet_execute == "RUN":
-            updates["execute"] = "RUN"
+
+        # ENQUEUE = Gate 1 CHUYỂN sang APPROVE (chuyển tiếp, không phải "đang
+        # ở trạng thái APPROVE") — nếu đọc theo trạng thái, mỗi vòng poll sẽ
+        # enqueue lại 1 job cho MỌI dòng đã duyệt. Cũng là đường CHẠY LẠI duy
+        # nhất sau NEEDS_HUMAN/DONE: bỏ APPROVE rồi APPROVE lại.
+        # Execute reset về Waiting CÙNG LÚC để người thấy ngay "đã nhận, đang
+        # xếp hàng" thay vì còn treo trạng thái của lượt chạy trước.
+        # BUG THẬT (Lead báo 2026-07-28): đổi Output Type trên dòng ĐANG
+        # APPROVE thì KHÔNG có chuyển tiếp Gate 1 nào -> không enqueue, Execute
+        # đứng nguyên ở DONE/NEEDS_HUMAN, hệ thống im lặng không chạy lại. Mà
+        # đổi Output Type CHÍNH LÀ một yêu cầu sản xuất mới ("giờ tôi muốn
+        # infographic thay vì article") — phải coi nó là tín hiệu chạy lại
+        # ngang hàng với việc bấm APPROVE.
+        output_type_changed = "output_type" in updates
+        rerun = sheet_gate1 == "APPROVE" and (prev_gate1 != "APPROVE" or output_type_changed)
+
+        # HUỶ YÊU CẦU (2026-07-28): người RÚT lại (APPROVE -> PENDING/REJECT)
+        # hoặc ĐỔI Output Type. Cả hai đều làm job đang xếp hàng trở nên vô
+        # nghĩa — nó sẽ sinh nội dung theo yêu cầu người vừa bỏ. Huỷ job
+        # 'queued'; job 'claimed' cứ chạy hết (xem queue_store.cancel_pending).
+        left_approve = prev_gate1 == "APPROVE" and sheet_gate1 != "APPROVE"
+        if left_approve or output_type_changed:
+            n = qs.cancel_pending(
+                topic_key, job_type="produce", db_path=db_path,
+                reason=("Gate 1 rút khỏi APPROVE" if left_approve else "Output Type đổi"))
+            if n:
+                print(f"[sync] Huỷ {n} job chờ của {topic_key[:8]} "
+                      f"({'rút duyệt' if left_approve else 'đổi Output Type'}).")
+            if left_approve:
+                # Rút duyệt -> đưa cờ về Waiting, KHÔNG giữ DONE/NEEDS_HUMAN cũ
+                # (trạng thái đó nói về lượt chạy của yêu cầu đã bị rút).
+                updates["execute"] = EXECUTE_WAITING
+
+        if rerun:
+            updates["execute"] = EXECUTE_WAITING
+        elif not gate.get("execute"):
+            # Dòng CŨ (trước 2026-07-28) còn Execute rỗng -> điền Waiting cho
+            # đúng từ vựng mới. KHÔNG enqueue: không có chuyển tiếp nào cả.
+            updates["execute"] = EXECUTE_WAITING
+
+        # THỨ TỰ QUAN TRỌNG (bug thật 2026-07-29): enqueue TRƯỚC, ghi
+        # gate_status SAU. Bản cũ ghi trước rồi enqueue — nếu enqueue lỗi hoặc
+        # tiến trình chết ở giữa (đã xảy ra: worker crash vì thiếu cột
+        # request_id), store đã ghi APPROVE nên lần ingest sau KHÔNG còn thấy
+        # "chuyển tiếp" nào để bắt -> topic KẸT VĨNH VIỄN ở Waiting, không job.
+        # Đảo thứ tự thì ca xấu nhất là có job mà store chưa kịp ghi — lần
+        # ingest sau bắt lại transition, `enqueue()` tự dedup nên không nhân đôi.
+        if rerun:
+            qs.enqueue(topic_key, job_type="produce",
+                       request_id=qs.new_request_id(), db_path=db_path)
         if updates:
             ps.write_gate_status(topic_key, db_path=db_path, **updates)
             writes += 1
-            if updates.get("execute") == "RUN":
-                qs.enqueue(topic_key, job_type="produce", db_path=db_path)
+
+    # Xoá TỪ DƯỚI LÊN: xoá dòng trên trước sẽ làm mọi chỉ số dưới nó dịch lên
+    # 1, các lần xoá sau nhắm sai dòng — lỗi kinh điển khi xoá theo chỉ số.
+    for r in sorted(deleted_rows, reverse=True):
+        try:
+            board.delete_row("CONTEXT", r)
+        except AttributeError:
+            pass          # fake board trong test không có method này
+        except Exception as e:   # noqa: BLE001
+            print(f"[sync] Không xoá được dòng {r} trên Sheet ({e!r}) — "
+                  f"dữ liệu đã xoá khỏi DB, dòng sẽ biến mất ở lượt render sau.")
     return writes
+
+
+def reconcile_pending_requests(*, db_path=None) -> int:
+    """LƯỚI AN TOÀN: enqueue lại topic ĐÃ DUYỆT mà không có job nào.
+
+    Bắt ca "chuyển tiếp bị mất": store ghi gate1=APPROVE xong thì tiến trình
+    chết trước khi enqueue (gặp thật 2026-07-29 — worker crash vì DB thiếu cột).
+    Sau đó KHÔNG lần ingest nào cứu được, vì cơ chế enqueue dựa trên CHUYỂN
+    TIẾP mà chuyển tiếp đó đã bị tiêu thụ. Topic nằm im ở Waiting mãi mãi.
+
+    Điều kiện enqueue lại — phải đủ CẢ BA, nếu không sẽ dựng lại việc đã xong:
+      gate1=APPROVE  +  execute ở trạng thái CHỜ  +  KHÔNG có job queued/claimed.
+    Chạy xong thì execute thành DONE/FAILED/NEEDS_HUMAN nên không lặp lại.
+
+    CHỈ đọc/ghi store, KHÔNG gọi Sheets API -> gọi mỗi vòng poll vẫn rẻ."""
+    waiting = {"Waiting", "", "RUN"}
+    n = 0
+    for topic_key in ds.list_topics(layer="gate_status", db_path=db_path):
+        gate = ps.read_gate_status(topic_key, db_path=db_path)
+        if gate.get("gate1") != "APPROVE":
+            continue
+        if (gate.get("execute") or "") not in waiting:
+            continue
+        if qs.find_pending(topic_key, job_type="produce", db_path=db_path):
+            continue
+        qs.enqueue(topic_key, job_type="produce",
+                   request_id=qs.new_request_id(), db_path=db_path)
+        print(f"[sync] Khôi phục yêu cầu bị mất cho {topic_key[:8]} "
+              f"(đã duyệt nhưng không có job nào).")
+        n += 1
+    return n
 
 
 def ingest_content_from_sheet(board: SheetsBoard, *, db_path=None) -> int:
@@ -307,8 +611,9 @@ def ingest_content_from_sheet(board: SheetsBoard, *, db_path=None) -> int:
         sheet_posting = _cell(row, i_posting)
 
         status = ps.read_content_status(topic_key, type_, db_path=db_path)
+        prev_gate2 = status.get("gate2", "PENDING")
         updates: dict = {}
-        if sheet_gate2 != status.get("gate2", "PENDING"):
+        if sheet_gate2 != prev_gate2:
             updates["gate2"] = sheet_gate2
         if sheet_social != status.get("social_link", ""):
             updates["social_link"] = sheet_social
@@ -316,6 +621,28 @@ def ingest_content_from_sheet(board: SheetsBoard, *, db_path=None) -> int:
             updates["gate3"] = sheet_gate3
         if sheet_posting != status.get("posting_status", ""):
             updates["posting_status"] = sheet_posting
+
+        # GATE 2 -> hàng đợi (2026-07-28, yêu cầu Lead "Scheduler phải kiểm tra
+        # được cả 3 trạng thái"). CÙNG CƠ CHẾ Gate 1: bắt CHUYỂN TIẾP sang
+        # APPROVE, không phải trạng thái (đọc trạng thái = enqueue lại mỗi vòng
+        # poll). Job `render_assets` -> queue_worker gọi
+        # render_production_assets.run() (tự idempotent: bỏ qua dòng đã có
+        # AssetPath), mở đường tới Gate 3.
+        #
+        # GATE 3 CỐ Ý KHÔNG có nhánh nào ở đây: theo quyết định Lead nó VẪN
+        # mặc định PENDING chờ hệ thống hoàn thiện — ingest chỉ ĐỌC (dòng trên)
+        # để store phản ánh đúng cái người bấm, KHÔNG máy nào ghi Gate 3
+        # (INVARIANT cũ, xem docstring content_row()).
+        if sheet_gate2 == "APPROVE" and prev_gate2 != "APPROVE":
+            qs.enqueue(topic_key, job_type="render_assets",
+                       request_id=qs.new_request_id(), db_path=db_path)
+        elif prev_gate2 == "APPROVE" and sheet_gate2 != "APPROVE":
+            # Rút duyệt Gate 2 -> huỷ job render đang chờ. Quan trọng hơn Gate 1
+            # vì render TỐN TIỀN THẬT (ảnh gpt-image-2, hoặc cả lượt dựng video).
+            n = qs.cancel_pending(topic_key, job_type="render_assets", db_path=db_path,
+                                  reason="Gate 2 rút khỏi APPROVE")
+            if n:
+                print(f"[sync] Huỷ {n} job render của {topic_key[:8]} (rút duyệt Gate 2).")
         if updates:
             ps.write_content_status(topic_key, type_, db_path=db_path, **updates)
             writes += 1

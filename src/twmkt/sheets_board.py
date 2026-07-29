@@ -234,7 +234,59 @@ _GATE3_KEY = GATE3_COL.lower()
 # đổi vị trí cột (chỉ append CUỐI, xem quy tắc "không chen giữa" ở
 # CONTENT_HEADER phía dưới) rẻ nếu sai.
 OUTPUT_TYPE_COL = "Output Type"
+# Giá trị hợp lệ cột Output Type — 5 loại CƠ SỞ. Ô trên Sheet là MULTI-SELECT
+# do Lead tự bật bằng tay qua UI Sheets (2026-07-28): Google Sheets API v4
+# KHÔNG tạo được "dropdown chip nhiều lựa chọn" qua batchUpdate, chỉ bật được
+# thủ công. Người chọn >= 1 loại, hoặc AUTO.
+#
+# ⚠️ CODE KHÔNG ĐƯỢC GHI setDataValidation LÊN CỘT NÀY NỮA — xem _tab_requests().
+# Mỗi lần `ensure_tabs(force=True)` ghi validation đè lên là XOÁ SẠCH cấu hình
+# multi-select Lead vừa dựng tay, và không có cách nào dựng lại bằng API.
+#
+# AUTO ≠ chọn cả 3: AUTO là "router TỰ đánh giá rồi quyết"; chọn tường minh là
+# "người YÊU CẦU tuyến đó, router chỉ được từ chối kèm lý do".
 OUTPUT_TYPE_VALUES = ("Article", "Long-Article", "Infographic", "Video", "AUTO")
+
+# --- Cột Execute = CỜ TRẠNG THÁI XỬ LÝ, MÁY-SỞ-HỮU HOÀN TOÀN (2026-07-28,
+# quyết định Lead) ------------------------------------------------------------
+# ĐỔI Ý NGHĨA so với bản cũ: trước đây Execute vừa là cờ trạng thái vừa là NÚT
+# BẤM (người gõ "RUN" để yêu cầu chạy/chạy lại). Nay nó CHỈ PHẢN ÁNH tiến trình
+# máy — người chỉ XEM, không sửa (dropdown đã gỡ + Protected Range, xem
+# SheetsBoard.protect_execute_column()). Cổng điều khiển DUY NHẤT của người là
+# cột "Duyệt Context" (Gate 1).
+#
+# Máy trạng thái:
+#   Waiting      mặc định mọi dòng mới (KHÔNG còn để rỗng — rỗng trông như "hệ
+#                thống chưa thấy dòng này", gây hiểu nhầm khi chờ lâu).
+#   Running...   worker VỪA claim job và bắt đầu xử lý (queue_worker.py ghi
+#                NGAY sau claim_next() rồi render Sheet, để người thấy tiến
+#                trình thay vì im lặng tới lúc xong).
+#   DONE         run() sinh xong nội dung.
+#   FAILED       lỗi TẠM THỜI (hạ tầng gọi LLM) — tự thử lại ở lượt sau.
+#   NEEDS_HUMAN  guardrail reject — cần người xem lại.
+#
+# CHẠY LẠI sau NEEDS_HUMAN: người KHÔNG còn gõ Execute="RUN" như trước (cột đã
+# read-only). Cách mới: đổi Duyệt Context khỏi APPROVE rồi APPROVE lại — chuyển
+# tiếp đó reset Execute về Waiting và enqueue job mới (xem
+# store/sync_service.py::ingest_context_from_sheet). Một cổng điều khiển, một ý
+# nghĩa — thay vì 2 cột cùng ra lệnh được như trước.
+#
+# GIỮ CHÍNH TẢ "NEEDS_HUMAN" (không đổi thành "NEED_HUMAN"): token này dùng ở
+# 96 chỗ xuyên agents/writer.py::WriterOutcome, brief, production, store... —
+# đổi 1 chữ cái không thêm giá trị nào mà rủi ro sót cao. Nêu rõ ở đây để lần
+# sau không ai tưởng là sót.
+EXECUTE_WAITING = "Waiting"
+EXECUTE_RUNNING = "Running..."
+EXECUTE_DONE = "DONE"
+EXECUTE_FAILED = "FAILED"
+EXECUTE_NEEDS_HUMAN = "NEEDS_HUMAN"
+EXECUTE_VALUES = (EXECUTE_WAITING, EXECUTE_RUNNING, EXECUTE_DONE,
+                  EXECUTE_FAILED, EXECUTE_NEEDS_HUMAN)
+# Trạng thái CHỜ ĐƯỢC XỬ LÝ (enqueue được). "" = dữ liệu CŨ trước 2026-07-28
+# (Execute từng để rỗng làm mặc định); "RUN" = từ vựng CŨ đã bỏ — cả hai giữ
+# lại làm ALIAS ĐỌC để dòng cũ trên Sheet/store khác máy không bị kẹt vĩnh viễn,
+# KHÔNG BAO GIỜ ghi mới 2 giá trị này.
+EXECUTE_PENDING_STATES = frozenset({EXECUTE_WAITING, EXECUTE_FAILED, "", "RUN"})
 
 CONTEXT_HEADER = ["Timestamp", "Hot%", "Score", "Group", "Topic", "Context", "Hook",
                   "Source", GATE1_COL, OUTPUT_TYPE_COL, "Execute", "tickers", "Notes", "TopicKey"]
@@ -311,7 +363,11 @@ CONTENT_HEADER = ["Timestamp", "Context", "Type", "Status", "Output", "Notes",
 # NGƯỜI bấm vào, nên phải HIỂN THỊ, không còn ẩn theo nhóm máy-sở-hữu). Máy vẫn
 # là bên GHI giá trị cột này (người không tự gõ tay), chỉ khác là không ẩn nữa.
 _MACHINE_OWNED_COLS: dict[str, tuple[str, ...]] = {
-    "CONTEXT": ("topickey",),
+    # "hook" ẩn từ 2026-07-28 (yêu cầu Lead): nội dung LẶP LẠI cột Context ở
+    # cùng tab, chiếm chỗ mà không thêm thông tin cho người duyệt Gate 1. CHỈ
+    # ẩn khỏi giao diện — giá trị VẪN ghi/đọc bình thường (hook đi vào store
+    # rồi xuống Composer), `hiddenByUser` không đụng tới dữ liệu.
+    "CONTEXT": ("topickey", "hook"),
     "CONTENT": ("topickey", "facts"),
 }
 
@@ -320,6 +376,26 @@ _MACHINE_OWNED_COLS: dict[str, tuple[str, ...]] = {
 # protect_asset_path_column(); mô tả dùng làm khoá idempotent (tránh tạo
 # trùng protection nếu chạy script nhiều lần).
 _ASSET_PATH_PROTECTION_DESC = "AssetPath - MÁY-GHI, khoá sửa tay (Sheet UI cleanup Phase 6b)"
+_EXECUTE_PROTECTION_DESC = "Execute - CỜ TRẠNG THÁI MÁY-GHI, người chỉ xem (2026-07-28)"
+# Cột MÁY-GHI trên CONTENT, người chỉ xem (2026-07-28, yêu cầu Lead). Type suy
+# từ Output Type người chọn; Status là kết quả xử lý. Cả hai do render dựng lại
+# từ store mỗi lượt nên người sửa tay chỉ tạo ra chênh lệch tạm thời rồi bị ghi
+# đè — khoá lại để khỏi hiểu nhầm là sửa được.
+# --- CỔNG 3 (Duyệt Public) — ngữ nghĩa CHỐT 2026-07-29, CHƯA IMPLEMENT ------
+# Thứ tự cột phản ánh đúng luồng: Social Link -> Duyệt Public -> Posting Status.
+#   `Social Link`    (TRƯỚC Gate 3, NGƯỜI điền): link KÊNH sẽ đăng nội dung này
+#                    (Facebook/TikTok/Threads/YouTube...). Là ĐẦU VÀO của quyết
+#                    định duyệt, không phải kết quả.
+#   `Duyệt Public`   (Gate 3, NGƯỜI bấm): cho phép đăng nội dung đã sản xuất
+#                    lên nền tảng ở Social Link.
+#   `Posting Status` (SAU Gate 3, MÁY ghi): POSTING... -> DONE | FAILED.
+# KHÂU ĐĂNG CHƯA XÂY (chờ các line sản xuất đạt chất lượng cơ bản — quyết định
+# Lead). Hiện Gate 3 duyệt xong KHÔNG dẫn tới hành động nào; đó là ĐÚNG THIẾT
+# KẾ ở giai đoạn này, không phải thiếu sót.
+_CONTENT_READONLY_COLS = {
+    "type": "Type - MÁY-GHI (suy từ Output Type), người chỉ xem (2026-07-28)",
+    "status": "Status - KẾT QUẢ XỬ LÝ do máy ghi, người chỉ xem (2026-07-28)",
+}
 
 # 8 tab dựng lần đầu (tên : header). Thứ tự = thứ tự tab hiển thị. ResearchReview/
 # ContentReview đã GỘP vào CONTEXT.GATE1_COL / CONTENT.GATE2_COL -> xoá khỏi
@@ -354,7 +430,7 @@ _LEGACY_TABS = {"Sheet1", "ResearchReview", "ContentReview"}
 # TOÀN nhất, giống default context_row() tự đặt) — KHÔNG khôi phục được lựa
 # chọn APPROVE/REJECT thật đã mất (phải sửa tay nếu gặp lại, như phiên này).
 _MIGRATE_DEFAULTS: dict[str, dict[str, str]] = {
-    "CONTEXT": {"Execute": "", "TopicKey": "", GATE1_COL: "PENDING"},
+    "CONTEXT": {"Execute": EXECUTE_WAITING, "TopicKey": "", GATE1_COL: "PENDING"},
     "CONTENT": {GATE2_COL: "PENDING", "TopicKey": "",
                "Facts": "", "AssetPath": "", "Social Link": "",
                GATE3_COL: "PENDING", "Posting Status": ""},
@@ -575,7 +651,7 @@ def _source_cell(source_url: str, other_sources: list[str] | None) -> str:
 def context_row(*, title: str, hook_line: str, source_url: str, score: int, hot_pct: float,
                 topic: str = "", group: str = "", other_sources: list[str] | None = None,
                 tickers: list[str] | None = None, status: str = "PENDING",
-                execute: str = "", topic_key: str = "", ts: str | None = None,
+                execute: str = EXECUTE_WAITING, topic_key: str = "", ts: str | None = None,
                 notes: str = "", output_type: list[str] | None = None) -> list[str]:
     """Một hàng CONTEXT ĐÚNG thứ tự CONTEXT_HEADER (Timestamp đầu tiên).
 
@@ -1160,7 +1236,10 @@ _C_BORDER = "#D9D9D9"      # xám khung
 _C_APPROVE = "#D9EAD3"     # xanh lá nhạt
 _C_PENDING = "#FFF2CC"     # vàng nhạt
 _C_REJECT = "#F4CCCC"      # đỏ nhạt
-_C_RUN = "#CFE2F3"         # xanh dương nhạt — Execute=RUN (đang chờ sản xuất)
+_C_RUN = "#CFE2F3"         # xanh dương nhạt — Execute="Running..." (worker đang xử lý)
+_C_WAITING = "#EFEFEF"     # xám nhạt — Execute="Waiting" (đã thấy, chưa tới lượt)
+_C_FAILED = "#FCE5CD"      # cam nhạt — Execute=FAILED (lỗi tạm, tự thử lại)
+_C_DELETE = "#E06666"      # đỏ ĐẬM — Gate 1=DELETE, thao tác KHÔNG hoàn tác được
 _C_SCORE_MIN = "#FFFFFF"
 _C_SCORE_MID = "#B6D7A8"
 _C_SCORE_MAX = "#38761D"
@@ -1324,32 +1403,45 @@ def _tab_requests(t: TabMeta) -> list[dict]:
         out.append(_set_validation(sid, 1, fmt_rows, c,
                                    {"condition": {"type": "BOOLEAN"}, "showCustomUi": True}))
     if t.name == "CONTEXT" and _GATE1_KEY in low:  # -> dropdown quy trình duyệt (cổng 1)
+        # "DELETE" (2026-07-29, quyết định Lead) — XOÁ HẲN chủ đề khỏi DB lẫn
+        # Sheet. CHỈ có ở Gate 1: đây là cổng "chủ đề này có đáng làm không",
+        # nơi duy nhất hợp lý để loại bỏ hoàn toàn. Gate 2/3 nói về SẢN PHẨM
+        # của chủ đề đã nhận, xoá ở đó không có nghĩa gì.
+        # KHÔNG HOÀN TÁC ĐƯỢC — muốn giữ lịch sử thì dùng REJECT.
         c = low.index(_GATE1_KEY)
         out.append(_set_validation(sid, 1, fmt_rows, c,
-                                   _one_of_list(["PENDING", "APPROVE", "REJECT"])))
-    if t.name == "CONTEXT" and "output type" in low:  # -> dropdown loại nội dung (Bước 4)
-        # BUG (2026-07-27, Lead phát hiện): cột này CHƯA TỪNG có nhánh ở đây —
-        # ô Sheet đang hiển thị dropdown SÓT LẠI của cột Execute (4 giá trị cũ,
-        # trùng vị trí cột trước khi Output Type được chèn vào giữa Duyệt
-        # Context/Execute — insert bằng ghi lại header, KHÔNG phải true "insert
-        # column", nên validation cũ theo CHỈ SỐ cột không tự dịch chuyển).
-        # setDataValidation GHI ĐÈ đúng chỉ số cột "output type" HIỆN TẠI (tra
-        # theo TÊN, không phải chỉ số cứng) -> tự sửa đúng ô, không cần dọn tay.
-        # `strict: False` (trong _one_of_list) vẫn cho gõ tay nhiều giá trị
-        # phân tách dấu phẩy (vd "Article, Video") vì Sheets API KHÔNG hỗ trợ
-        # dropdown multi-select (chip) qua batchUpdate (chỉ có qua UI thủ công,
-        # xem ghi chú OUTPUT_TYPE_VALUES) -- đây là giới hạn của Google Sheets
-        # API, không phải thiếu sót ở đây.
-        c = low.index("output type")
-        out.append(_set_validation(sid, 1, fmt_rows, c, _one_of_list(list(OUTPUT_TYPE_VALUES))))
-    if t.name == "CONTEXT" and "execute" in low:  # -> dropdown cờ thực thi sản xuất
+                                   _one_of_list(["PENDING", "APPROVE", "REJECT", "DELETE"])))
+    # Output Type: CỐ Ý KHÔNG ghi setDataValidation (2026-07-28).
+    # Ô này là MULTI-SELECT do Lead bật tay qua UI Sheets — API v4 không tạo
+    # được kiểu ô đó, nên mọi lần ghi validation từ code đều HẠ CẤP nó về
+    # dropdown 1-lựa-chọn và xoá mất cấu hình tay. Giá trị hợp lệ vẫn được
+    # kiểm ở tầng xử lý (_allowed_output_types), không cần chặn ở Sheet.
+    if t.name == "CONTEXT" and "execute" in low:
+        # 2026-07-28 (quyết định Lead): Execute là cờ TRẠNG THÁI MÁY-GHI, người
+        # CHỈ XEM -> GỠ HẲN dropdown (dropdown mời người bấm, mà bấm vào đây
+        # giờ không có tác dụng gì ngoài việc làm sai lệch hiển thị: lượt
+        # render kế tiếp ghi đè lại từ store). Gửi setDataValidation KHÔNG kèm
+        # "rule" = XOÁ validation đang có -> dropdown cũ (RUN/DONE/FAILED/
+        # NEEDS_HUMAN) tự biến mất trên Sheet thật, không cần dọn tay.
+        # Khoá ghi thật nằm ở protect_execute_column() (Protected Range), đây
+        # chỉ là lớp gợi ý thị giác.
         c = low.index("execute")
-        out.append(_set_validation(sid, 1, fmt_rows, c,
-                                   _one_of_list(["RUN", "DONE", "FAILED", "NEEDS_HUMAN"])))
-    if t.name == "CONTENT" and "status" in low:  # -> dropdown (kết quả sản xuất, tất định — KHÁC Gate, không đổi tên)
+        out.append({"setDataValidation": {"range": _grid_range(sid, 1, fmt_rows, c, c + 1)}})
+    if t.name == "CONTENT" and "status" in low:
+        # 2026-07-28 (yêu cầu Lead): Status là KẾT QUẢ XỬ LÝ do máy ghi, người
+        # CHỈ XEM -> GỠ dropdown (gửi setDataValidation không kèm "rule" = xoá
+        # validation cũ). Cùng lý do đã làm với Execute: dropdown mời người bấm,
+        # mà bấm vào đây không có tác dụng gì ngoài làm sai lệch hiển thị tới
+        # lượt render kế tiếp. Khoá ghi thật ở Protected Range, xem
+        # protect_readonly_columns().
         c = low.index("status")
-        out.append(_set_validation(sid, 1, fmt_rows, c,
-                                   _one_of_list(["PENDING", "RUNNING", "DONE", "ERROR", "SKIPPED"])))
+        out.append({"setDataValidation": {"range": _grid_range(sid, 1, fmt_rows, c, c + 1)}})
+    if t.name == "CONTENT" and "type" in low:
+        # Type do Output Type người chọn quyết định (1 loại = 1 dòng) — máy
+        # sinh, người chỉ xem. Chưa từng có dropdown; thêm nhánh XOÁ để dọn nếu
+        # có validation sót từ lần chèn cột trước đây.
+        c = low.index("type")
+        out.append({"setDataValidation": {"range": _grid_range(sid, 1, fmt_rows, c, c + 1)}})
     if t.name == "CONTENT" and _GATE2_KEY in low:  # -> dropdown quy trình duyệt (cổng 2)
         c = low.index(_GATE2_KEY)
         out.append(_set_validation(sid, 1, fmt_rows, c,
@@ -1358,10 +1450,20 @@ def _tab_requests(t: TabMeta) -> list[dict]:
         c = low.index(_GATE3_KEY)
         out.append(_set_validation(sid, 1, fmt_rows, c,
                                    _one_of_list(["PENDING", "APPROVE", "REJECT"])))
-    if t.name == "CONTENT" and "posting status" in low:  # Sheet UI cleanup Phase 6 -> dropdown trạng thái đăng (người điền tay)
+    if t.name == "CONTENT" and "posting status" in low:
+        # TRẠNG THÁI ĐĂNG — CỜ MÁY-GHI của khâu publish (2026-07-29, chốt ngữ
+        # nghĩa với Lead). Bộ giá trị khớp nếp Execute (Running.../DONE/FAILED):
+        #   POSTING...  đang đẩy lên nền tảng
+        #   DONE        đã đăng thành công
+        #   FAILED      đăng lỗi, cần xem lại
+        # KHÂU PUBLISH CHƯA XÂY — không code nào ghi cột này lúc này; giữ
+        # dropdown để người vận hành ghi tay trong giai đoạn chuyển tiếp, và
+        # để bộ giá trị đã CHỐT SẴN khi implement (khỏi đổi schema lần nữa).
+        # Giá trị tiếng Việt cũ ("Đã đăng"/"Lỗi"/"Đang chờ") giữ lại làm alias
+        # đọc cho dữ liệu cũ — `strict: False` nên không chặn.
         c = low.index("posting status")
         out.append(_set_validation(sid, 1, fmt_rows, c,
-                                   _one_of_list(["Đã đăng", "Lỗi", "Đang chờ"])))
+                                   _one_of_list(["POSTING...", "DONE", "FAILED"])))
 
     # 8) Conditional formatting cho CONTEXT/CONTENT (xóa rule cũ trước -> idempotent).
     if t.name in ("CONTEXT", "CONTENT"):
@@ -1373,12 +1475,20 @@ def _tab_requests(t: TabMeta) -> list[dict]:
             out.append(_text_eq_rule(sid, c, 1, fmt_rows, "APPROVE", _C_APPROVE))
             out.append(_text_eq_rule(sid, c, 1, fmt_rows, "PENDING", _C_PENDING))
             out.append(_text_eq_rule(sid, c, 1, fmt_rows, "REJECT", _C_REJECT))
+            out.append(_text_eq_rule(sid, c, 1, fmt_rows, "DELETE", _C_DELETE))
         if "execute" in low:
+            # 1 màu cho MỖI trạng thái của máy trạng thái Execute (xem
+            # EXECUTE_VALUES): xám=chờ, xanh dương=đang chạy, xanh lá=xong,
+            # cam=lỗi tạm tự thử lại, đỏ=cần người. "RUN" giữ rule riêng cho
+            # dòng CŨ còn từ vựng cũ (xem EXECUTE_PENDING_STATES) — không thì
+            # ô đó trắng trơn, trông như chưa có trạng thái.
             c = low.index("execute")
+            out.append(_text_eq_rule(sid, c, 1, fmt_rows, EXECUTE_WAITING, _C_WAITING))
+            out.append(_text_eq_rule(sid, c, 1, fmt_rows, EXECUTE_RUNNING, _C_RUN))
             out.append(_text_eq_rule(sid, c, 1, fmt_rows, "RUN", _C_RUN))
-            out.append(_text_eq_rule(sid, c, 1, fmt_rows, "DONE", _C_APPROVE))
-            out.append(_text_eq_rule(sid, c, 1, fmt_rows, "FAILED", _C_PENDING))       # vàng — tái chạy được
-            out.append(_text_eq_rule(sid, c, 1, fmt_rows, "NEEDS_HUMAN", _C_REJECT))   # đỏ — chờ người
+            out.append(_text_eq_rule(sid, c, 1, fmt_rows, EXECUTE_DONE, _C_APPROVE))
+            out.append(_text_eq_rule(sid, c, 1, fmt_rows, EXECUTE_FAILED, _C_FAILED))
+            out.append(_text_eq_rule(sid, c, 1, fmt_rows, EXECUTE_NEEDS_HUMAN, _C_REJECT))
         if "score" in low:
             c = low.index("score")
             out.append(_score_scale_rule(sid, c, 1, fmt_rows))
@@ -1976,8 +2086,15 @@ class SheetsBoard:
 
     def sync_approve_execute_flags(self) -> int:
         """MỌI dòng CONTEXT có Duyệt Context=APPROVE và Execute RỖNG -> tự đặt
-        Execute=RUN (chuẩn bị cho produce_from_sheet.py xử lý). Dòng đã RUN/DONE
-        giữ nguyên (idempotent, không đụng lại). Trả số dòng vừa đổi."""
+        Execute="Waiting" (đã thấy, chờ worker tới lượt). Dòng đã có trạng thái
+        giữ nguyên (idempotent). Trả số dòng vừa đổi.
+
+        2026-07-28: ghi "Waiting" thay "RUN" — Execute không còn là nút bấm
+        yêu cầu chạy, chỉ là cờ trạng thái (xem EXECUTE_VALUES). Việc enqueue
+        THẬT nay do `store/sync_service.py::ingest_context_from_sheet()` làm
+        (đọc Gate 1 -> đẩy hàng đợi); hàm này chỉ còn phục vụ đường LEGACY
+        `review_to_sheet.py`/`produce_from_sheet.run_draft()` (Sheet-only,
+        không qua store) — giữ để 2 đường đó không hiển thị ô trống."""
         ws = self._tab("CONTEXT")
         rows = ws.get_all_values()
         if not rows:
@@ -1987,17 +2104,17 @@ class SheetsBoard:
             return 0
         i_st, i_ex = header.index(_GATE1_KEY), header.index("execute")
 
-        to_set: list[int] = []   # số dòng 1-based (2..N) cần đặt RUN
+        to_set: list[int] = []   # số dòng 1-based (2..N) cần đặt Waiting
         for row_i, r in enumerate(rows[1:], start=2):
             st = r[i_st].strip().upper() if i_st < len(r) else ""
-            ex = r[i_ex].strip().upper() if i_ex < len(r) else ""
+            ex = r[i_ex].strip() if i_ex < len(r) else ""
             if st == "APPROVE" and not ex:
                 to_set.append(row_i)
         if not to_set:
             return 0
         col_letter = _col_a1(i_ex + 1)
-        ws.batch_update([{"range": f"{col_letter}{r}", "values": [["RUN"]]} for r in to_set],
-                        value_input_option="RAW")
+        ws.batch_update([{"range": f"{col_letter}{r}", "values": [[EXECUTE_WAITING]]}
+                         for r in to_set], value_input_option="RAW")
         return len(to_set)
 
     def mark_execute_done(self, rows: list[int]) -> None:
@@ -2075,6 +2192,15 @@ class SheetsBoard:
         except Exception:  # pragma: no cover - tab chưa tồn tại
             return list(default or [])
         return priority_groups_from_rows(rows, default=default)
+
+    def delete_row(self, tab_name: str, row: int) -> None:
+        """Xoá HẲN 1 dòng (1-based, tính cả header) khỏi tab — dùng cho Gate 1
+        = DELETE (2026-07-29): người bấm xong thấy dòng biến mất NGAY, không
+        phải chờ lượt render kế tiếp."""
+        ws = self._tab(tab_name)
+        self._spreadsheet().batch_update({"requests": [{"deleteDimension": {
+            "range": {"sheetId": ws.id, "dimension": "ROWS",
+                      "startIndex": row - 1, "endIndex": row}}}]})
 
     def sort_context_by_hot(self) -> None:
         """REGROUP theo NGÀY (cột Timestamp, DD/MM/YYYY) rồi Hot% GIẢM DẦN
@@ -2329,6 +2455,91 @@ class SheetsBoard:
         req = {"addProtectedRange": {"protectedRange": {
             "range": {"sheetId": sid, "startColumnIndex": col, "endColumnIndex": col + 1},
             "description": _ASSET_PATH_PROTECTION_DESC,
+            "warningOnly": False,
+            "editors": {"users": [sa_email]},
+        }}}
+        return self._spreadsheet().batch_update({"requests": [req]})
+
+    def protect_readonly_columns(self) -> dict:
+        """Khoá các cột MÁY-GHI trên CONTENT (Type, Status) — 2026-07-28.
+
+        CÙNG KHUÔN protect_execute_column()/protect_asset_path_column(), gộp 2
+        cột vào 1 lượt batchUpdate. LƯU Ý GIỐNG HỆT 2 hàm kia: chủ sở hữu Sheet
+        VẪN sửa được dù có Protected Range — Google không cho khoá owner ra
+        khỏi file của chính họ. Với Lead đây là lớp NHẮC, khoá tuyệt đối chỉ
+        đúng với tài khoản cộng tác viên.
+
+        Idempotent theo `description`. Trả {"created": [...]} tên cột vừa khoá."""
+        ws = self._tab("CONTENT")
+        header = [h.strip().lower() for h in ws.row_values(1)]
+        sid = ws.id
+        meta = self._spreadsheet().fetch_sheet_metadata(params={
+            "fields": "sheets(properties(sheetId),"
+                      "protectedRanges(protectedRangeId,range,description))"})
+        existing_desc = set()
+        for sh in meta.get("sheets", []):
+            if sh.get("properties", {}).get("sheetId") != sid:
+                continue
+            for pr in sh.get("protectedRanges", []):
+                existing_desc.add(pr.get("description"))
+
+        sa_email = self._service_account_email()
+        reqs, created = [], []
+        for col_key, desc in _CONTENT_READONLY_COLS.items():
+            if col_key not in header or desc in existing_desc:
+                continue
+            c = header.index(col_key)
+            reqs.append({"addProtectedRange": {"protectedRange": {
+                "range": {"sheetId": sid, "startColumnIndex": c, "endColumnIndex": c + 1},
+                "description": desc, "warningOnly": False,
+                "editors": {"users": [sa_email]},
+            }}})
+            created.append(col_key)
+        if not reqs:
+            return {"created": []}
+        self._spreadsheet().batch_update({"requests": reqs})
+        return {"created": created}
+
+    def protect_execute_column(self) -> dict:
+        """Khoá cột Execute (CONTEXT) khỏi sửa tay — 2026-07-28, quyết định
+        Lead: Execute là CỜ TRẠNG THÁI XỬ LÝ do máy ghi, người CHỈ XEM (xem
+        EXECUTE_VALUES). CÙNG KHUÔN `protect_asset_path_column()` — chỉ khác
+        tab/cột/description, KHÔNG phát minh cơ chế mới.
+
+        `warningOnly=False` + `editors.users=[service account]`: người dùng
+        thường bị CHẶN THẬT khi gõ vào cột này. LƯU Ý CÓ THẬT — chủ sở hữu
+        Sheet (Lead) VẪN sửa được dù có Protected Range: Google Sheets không
+        cho phép khoá owner ra khỏi file của chính họ. Vậy nên với Lead đây là
+        lớp NHẮC (cảnh báo khi lỡ tay), không phải khoá tuyệt đối; khoá tuyệt
+        đối chỉ đúng với tài khoản cộng tác viên. Không có cách nào chặt hơn
+        qua Sheets API — nêu ra để không ai tưởng đã tuyệt đối.
+
+        Idempotent (khớp `_EXECUTE_PROTECTION_DESC` -> bỏ qua). Trả {} nếu tab
+        CONTEXT thiếu cột Execute."""
+        ws = self._tab("CONTEXT")
+        header = [h.strip().lower() for h in ws.row_values(1)]
+        if "execute" not in header:
+            return {}
+        col = header.index("execute")
+        sid = ws.id
+
+        meta = self._spreadsheet().fetch_sheet_metadata(params={
+            "fields": "sheets(properties(sheetId),"
+                      "protectedRanges(protectedRangeId,range,description))"})
+        for s in meta.get("sheets", []):
+            if s.get("properties", {}).get("sheetId") != sid:
+                continue
+            for pr in s.get("protectedRanges", []):
+                r = pr.get("range", {})
+                if (r.get("sheetId") == sid and r.get("startColumnIndex") == col
+                        and r.get("endColumnIndex") == col + 1
+                        and pr.get("description") == _EXECUTE_PROTECTION_DESC):
+                    return {"already_protected": True, "protectedRangeId": pr["protectedRangeId"]}
+
+        sa_email = self._service_account_email()
+        req = {"addProtectedRange": {"protectedRange": {
+            "range": {"sheetId": sid, "startColumnIndex": col, "endColumnIndex": col + 1},
+            "description": _EXECUTE_PROTECTION_DESC,
             "warningOnly": False,
             "editors": {"users": [sa_email]},
         }}}

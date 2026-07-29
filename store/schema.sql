@@ -115,15 +115,25 @@ CREATE TABLE IF NOT EXISTS execution_queue (
     -- done | failed. release_stale_claims() đưa claimed quá hạn (worker chết
     -- giữa chừng -- rủi ro C8 đã ghi nhận ở VPS_MIGRATION_BACKLOG.md) VỀ LẠI
     -- queued (thử lại) hoặc failed hẳn (vượt max_attempts).
+    -- 'cancelled' THÊM 2026-07-28: người rút yêu cầu (bỏ APPROVE, đổi Output
+    -- Type) trước khi worker kịp claim -> job KHÔNG được chạy nữa. KHÁC
+    -- 'failed' (đã chạy và hỏng) — gộp 2 thứ này lại là mất khả năng phân biệt
+    -- "hệ thống lỗi" với "người đổi ý", đúng thứ cần khi truy vết sau này.
     status        TEXT NOT NULL DEFAULT 'queued'
-                  CHECK (status IN ('queued', 'claimed', 'done', 'failed')),
+                  CHECK (status IN ('queued', 'claimed', 'done', 'failed', 'cancelled')),
     requested_at  TEXT NOT NULL,
     claimed_at    TEXT,
     claimed_by    TEXT,
     finished_at   TEXT,
     attempt_count INTEGER NOT NULL DEFAULT 0,
     error         TEXT,
-    payload_json  TEXT NOT NULL DEFAULT '{}'
+    payload_json  TEXT NOT NULL DEFAULT '{}',
+    -- REQUEST ID (2026-07-28) — định danh 1 YÊU CẦU của người, khác `id` (=
+    -- Queue ID, định danh 1 lượt dispatch). 1 request có thể sinh nhiều job
+    -- (produce rồi render_assets). Đổi Output Type = HUỶ request cũ + tạo
+    -- request MỚI: nhờ vậy phân biệt được "job của yêu cầu đã bị rút" với
+    -- "job của yêu cầu hiện hành", thứ mà chỉ topic_key không nói được.
+    request_id    TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_queue_status_id ON execution_queue (status, id);

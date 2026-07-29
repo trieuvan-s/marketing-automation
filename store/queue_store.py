@@ -31,16 +31,19 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-_VALID_STATUSES = frozenset({"queued", "claimed", "done", "failed"})
+_VALID_STATUSES = frozenset({"queued", "claimed", "done", "failed", "cancelled"})
 
 
 def _default_db_path() -> Path:
-    """Trùng logic `document_store._default_db_path()` (cùng ENV
-    `DOCUMENT_STORE_PATH`, cùng file DB) -- lặp lại 2 dòng ở đây thay vì
-    import hàm private xuyên module, tránh phụ thuộc vào tên có gạch dưới
-    của module khác."""
-    raw = os.environ.get("DOCUMENT_STORE_PATH", "store/document_store.db")
-    return Path(raw)
+    """CÙNG file DB với `document_store` — 2026-07-28 gọi THẲNG hàm của nó
+    thay vì chép lại logic. Trước đây chép 2 dòng "cho khỏi phụ thuộc tên có
+    gạch dưới", nhưng khi document_store đổi mặc định sang `data_root`, bản
+    chép ở đây KHÔNG đổi theo -> hàng đợi và kho tài liệu trỏ 2 file KHÁC
+    NHAU, im lặng, không lỗi. Đó chính là loại bug mà "1 nguồn sự thật" sinh
+    ra để chặn — chấp nhận phụ thuộc tên private trong CÙNG package đổi lấy
+    việc không bao giờ lệch nhau nữa."""
+    from .document_store import _default_db_path as _ds_default
+    return _ds_default()
 
 
 def _now() -> str:
@@ -76,7 +79,7 @@ def find_pending(topic_key: str, *, job_type: str = "produce",
 
 
 def enqueue(topic_key: str, *, job_type: str = "produce", payload: dict | None = None,
-           db_path: str | Path | None = None) -> int:
+           request_id: str | None = None, db_path: str | Path | None = None) -> int:
     """Thêm 1 job MỚI, trạng thái 'queued'. CHẶN double-enqueue: nếu
     topic_key+job_type ĐÃ có job 'queued'/'claimed', KHÔNG chèn thêm -- trả
     id job đã có (idempotent, để Gate1 đổi qua lại nhiều lần hay
@@ -97,9 +100,9 @@ def enqueue(topic_key: str, *, job_type: str = "produce", payload: dict | None =
                 conn.execute("COMMIT")
                 return existing["id"]
             cur = conn.execute(
-                "INSERT INTO execution_queue (topic_key, job_type, status, requested_at, payload_json) "
-                "VALUES (?, ?, 'queued', ?, ?)",
-                (topic_key, job_type, _now(), payload_json),
+                "INSERT INTO execution_queue (topic_key, job_type, status, requested_at, "
+                "payload_json, request_id) VALUES (?, ?, 'queued', ?, ?, ?)",
+                (topic_key, job_type, _now(), payload_json, request_id),
             )
             job_id = cur.lastrowid
             conn.execute("COMMIT")
@@ -212,3 +215,54 @@ def list_queue(*, status: str | None = None, db_path: str | Path | None = None) 
         else:
             rows = conn.execute("SELECT * FROM execution_queue ORDER BY id").fetchall()
     return [dict(r) for r in rows]
+
+
+def new_request_id() -> str:
+    """Định danh 1 YÊU CẦU của người. uuid4 chứ không phải hash nội dung: hai
+    lần người bấm APPROVE cho CÙNG topic + CÙNG Output Type vẫn là HAI yêu cầu
+    khác nhau (lần 2 là "chạy lại"), hash sẽ gộp nhầm chúng làm một."""
+    import uuid
+    return uuid.uuid4().hex
+
+
+def cancel_pending(topic_key: str, *, job_type: str | None = None, reason: str = "",
+                   db_path: str | Path | None = None) -> int:
+    """Huỷ job CHƯA CHẠY ('queued') của topic — trả số job vừa huỷ.
+
+    CỐ Ý KHÔNG đụng job 'claimed' (quyết định Lead 2026-07-28): job đang chạy
+    cứ để chạy hết. Giết giữa chừng 1 lượt gọi LLM hay render video là nguồn
+    bug rất khó truy (tiến trình con mồ côi, file ghi dở, GPU treo), đổi lại
+    chỉ tiết kiệm được ít phút. Kết quả của job đó nếu không dùng thì người
+    cho chạy lại — rẻ hơn nhiều so với việc code huỷ đúng.
+
+    KHÔNG đụng done/failed/cancelled: đó là lịch sử, không phải việc đang chờ."""
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if job_type is not None:
+                cur = conn.execute(
+                    "UPDATE execution_queue SET status = 'cancelled', finished_at = ?, "
+                    "error = ? WHERE topic_key = ? AND job_type = ? AND status = 'queued'",
+                    (_now(), reason or "người rút yêu cầu", topic_key, job_type))
+            else:
+                cur = conn.execute(
+                    "UPDATE execution_queue SET status = 'cancelled', finished_at = ?, "
+                    "error = ? WHERE topic_key = ? AND status = 'queued'",
+                    (_now(), reason or "người rút yêu cầu", topic_key))
+            n = cur.rowcount
+            conn.execute("COMMIT")
+            return n
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+
+
+def has_running(topic_key: str, *, db_path: str | Path | None = None) -> bool:
+    """Topic có job ĐANG CHẠY ('claimed') không — dùng để KHOÁ thao tác người
+    trong lúc hệ thống xử lý (xem sync_service: bỏ qua thay đổi Gate/Output
+    Type khi đang chạy, tránh sinh yêu cầu chồng lên việc đang làm dở)."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM execution_queue WHERE topic_key = ? AND status = 'claimed' LIMIT 1",
+            (topic_key,)).fetchone()
+    return row is not None

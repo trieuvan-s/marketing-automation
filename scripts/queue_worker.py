@@ -41,9 +41,11 @@ ensure_utf8_stdio()
 
 import system_power_on  # noqa: E402 -- tái dùng acquire_lock()/release_lock()
 import produce_from_sheet  # noqa: E402
+import render_production_assets  # noqa: E402 -- job "render_assets" (Gate 2)
 from twmkt.config import data_path, load_settings  # noqa: E402
-from twmkt.sheets_board import SheetsBoard  # noqa: E402
+from twmkt.sheets_board import EXECUTE_FAILED, EXECUTE_RUNNING, SheetsBoard  # noqa: E402
 
+from store import pipeline_store as ps  # noqa: E402
 from store import queue_store as qs  # noqa: E402
 from store import sync_service as ss  # noqa: E402
 
@@ -67,6 +69,27 @@ def _open_board(settings) -> SheetsBoard:
     return SheetsBoard(spreadsheet_id=sheet_id, creds_path=creds)
 
 
+def _sync_sheet(board) -> None:
+    """INGEST TRƯỚC, RENDER SAU — LUÔN LUÔN, không bao giờ render trần.
+
+    BUG THẬT (2026-07-28, bắt được ở lượt e2e đầu tiên — Lead duyệt 5 chủ đề,
+    hệ thống chỉ nhận 1, 4 lượt duyệt BỊ XOÁ SẠCH): `render_*_to_sheet()` dựng
+    lại TOÀN BỘ tab từ store, kể cả các cột NGƯỜI-SỞ-HỮU (Duyệt Context/Notes/
+    Output Type). Một lượt `run()` chạy hàng phút (gọi LLM); người duyệt thêm
+    chủ đề TRONG quãng đó; xong việc, worker render từ store — store chưa biết
+    những lượt duyệt mới nên ghi đè PENDING lên chúng. Thao tác người biến mất
+    KHÔNG một tiếng báo.
+
+    Ingest ngay trước mỗi lần render thu hẹp cửa sổ mất mát từ "cả lượt chạy
+    job" (phút) xuống "giữa 2 lệnh gọi API liền nhau" (giây). CỬA SỔ NÀY VẪN
+    CÒN — đóng hẳn cần render CHỈ các cột máy-sở-hữu thay vì clear+ghi cả tab,
+    xem ghi chú trong docs/VPS_MIGRATION_BACKLOG.md."""
+    ss.ingest_context_from_sheet(board)
+    ss.ingest_content_from_sheet(board)
+    ss.render_context_to_sheet(board)
+    ss.render_content_to_sheet(board)
+
+
 def run_once(*, settings, worker_id: str, board=None) -> bool:
     """1 vòng: (0) NẾU có `board` — ingest Sheet trước (bắt thao tác người vừa
     duyệt Gate1/Gate2/Gate3, ĐÚNG chỗ `store/sync_service.py::ingest_context_
@@ -85,6 +108,9 @@ def run_once(*, settings, worker_id: str, board=None) -> bool:
     if board is not None:
         ss.ingest_context_from_sheet(board)
         ss.ingest_content_from_sheet(board)
+    # Lưới an toàn cho "chuyển tiếp bị mất" — chỉ đọc store, không tốn quota
+    # Sheets. Xem docstring reconcile_pending_requests().
+    ss.reconcile_pending_requests()
 
     lease_timeout_s = float(settings.get("queue.lease_timeout_s", 600))
     max_attempts = int(settings.get("queue.max_attempts", 3))
@@ -92,25 +118,52 @@ def run_once(*, settings, worker_id: str, board=None) -> bool:
     if released:
         print(f"[queue-worker] Giải phóng {released} job kẹt (claim quá hạn lease).")
 
-    job = qs.claim_next(worker_id, job_type="produce")
+    # KHÔNG lọc job_type: worker phục vụ CẢ 2 cổng (2026-07-28) — "produce"
+    # (Gate 1 duyệt Context -> sinh nội dung) và "render_assets" (Gate 2 duyệt
+    # Content -> render ảnh, mở đường tới Gate 3). Lọc cứng "produce" như bản
+    # cũ sẽ khiến job Gate 2 nằm lại hàng đợi VĨNH VIỄN, không ai xử lý.
+    job = qs.claim_next(worker_id)
     if job is None:
         return False
 
-    print(f"[queue-worker] Nhận job #{job['id']} topic_key={job['topic_key']!r}")
+    job_type = job.get("job_type") or "produce"
+    print(f"[queue-worker] Nhận job #{job['id']} [{job_type}] topic_key={job['topic_key']!r}")
+    if job_type == "produce":
+        # Cờ "Running..." ghi NGAY sau claim, TRƯỚC khi gọi run() (một lượt
+        # run() thật mất hàng chục giây tới vài phút vì gọi LLM) -- và render
+        # lên Sheet luôn, để người duyệt thấy "đang chạy" thay vì nhìn ô đứng
+        # im tưởng hệ thống không nhận. Đây là lý do CHÍNH của cờ Running...
+        # (2026-07-28, yêu cầu Lead): phản hồi thị giác cho quãng chờ dài.
+        # KHÔNG áp cho render_assets: Execute là cờ của tuyến CONTEXT/Gate 1,
+        # tiến trình Gate 2 phản ánh qua cột AssetPath, không phải cột này.
+        ps.mark_execute(job["topic_key"], EXECUTE_RUNNING)
+        if board is not None:
+            _sync_sheet(board)
+
     try:
-        produce_from_sheet.run(topic_keys=[job["topic_key"]], limit=1)
+        if job_type == "render_assets":
+            # run() tự quét CONTENT tìm dòng Gate2=APPROVE chưa có AssetPath và
+            # tự idempotent -> KHÔNG cần lọc theo topic_key ở đây; topic_key
+            # trên job chỉ để truy vết "ai kích hoạt lượt render này".
+            render_production_assets.run()
+        else:
+            produce_from_sheet.run(topic_keys=[job["topic_key"]], limit=1)
         qs.mark_done(job["id"])
         print(f"[queue-worker] Job #{job['id']} DONE (dispatch) — xem gate_status.execute "
              f"trên Sheet cho kết quả NGHIỆP VỤ thật (DONE/FAILED/NEEDS_HUMAN).")
     except Exception as e:   # noqa: BLE001 -- lưới an toàn crash hạ tầng, KHÁC outcome nghiệp vụ
         qs.mark_failed(job["id"], str(e))
+        # run() crash TRƯỚC khi kịp tự ghi outcome -> Execute còn kẹt ở
+        # "Running..." vĩnh viễn nếu không hạ ở đây. FAILED (không phải
+        # NEEDS_HUMAN) vì crash hạ tầng là lỗi TẠM, lượt sau thử lại được.
+        if job_type == "produce":
+            ps.mark_execute(job["topic_key"], EXECUTE_FAILED)
         print(f"[queue-worker] Job #{job['id']} FAILED (crash hạ tầng, không phải NEEDS_HUMAN "
              f"nghiệp vụ — cái đó run() tự bắt gọn): {e!r}")
 
     if board is not None:
-        ss.render_context_to_sheet(board)
-        ss.render_content_to_sheet(board)
-        print(f"[queue-worker] Đã render lại CONTEXT/CONTENT trên Sheet (job #{job['id']}).")
+        _sync_sheet(board)
+        print(f"[queue-worker] Đã đồng bộ lại CONTEXT/CONTENT trên Sheet (job #{job['id']}).")
     return True
 
 

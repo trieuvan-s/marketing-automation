@@ -43,24 +43,68 @@ _LAYERS_REQUIRE_CONTENT_TYPE = frozenset({"content_output", "content_status"})
 
 
 def _default_db_path() -> Path:
-    """Đường dẫn DB đọc từ ENV `DOCUMENT_STORE_PATH` -- KHÔNG hardcode,
-    cùng bài học A5 (đường dẫn hardcode `aigen-fva-capital` gãy khi đổi
-    máy -- xem docs/VPS_MIGRATION_BACKLOG.md A5). Mặc định
-    "store/document_store.db" TƯƠNG ĐỐI theo CWD lúc chạy nếu ENV không
-    set -- chỉ hợp lý cho dev/test cục bộ, triển khai thật PHẢI set ENV
-    tường minh."""
-    raw = os.environ.get("DOCUMENT_STORE_PATH", "store/document_store.db")
-    return Path(raw)
+    """Đường dẫn DB: ENV `DOCUMENT_STORE_PATH` (ưu tiên, để test/CI trỏ chỗ
+    khác) -> `storage.data_root` trong settings.yaml -> cuối cùng mới là
+    "store/document_store.db" tương đối CWD.
+
+    2026-07-28 (quyết định Lead, khớp thiết kế đã chốt "1 DB duy nhất trên
+    VPS"): mặc định TƯƠNG ĐỐI CWD là bẫy thật, không phải lý thuyết — chạy
+    worker từ thư mục khác là mở NHẦM một DB rỗng khác mà không có lỗi nào
+    báo, hệ thống chỉ im lặng coi như "chưa có dữ liệu". Đã gặp: máy này
+    không tìm thấy DB của agent-A ở đâu cả. Nay DB nằm CÙNG CHỖ với mọi dữ
+    liệu khác (`data_root`, ngoài repo) — cùng nếp `config.data_path()`.
+
+    Import `twmkt.config` đặt TRONG hàm, không phải đầu module: store/ là
+    tầng dưới, phải chạy được cả khi không có settings.yaml (test cục bộ,
+    backfill đứng riêng) -- thiếu config thì lùi về mặc định cũ, không nổ."""
+    raw = os.environ.get("DOCUMENT_STORE_PATH")
+    if raw:
+        return Path(raw)
+    try:
+        from twmkt.config import data_path
+        return Path(data_path("document_store.db"))
+    except Exception:   # noqa: BLE001 -- thiếu settings.yaml/PYTHONPATH -> mặc định cũ
+        return Path("store/document_store.db")
 
 
 def init_db(db_path: str | Path | None = None) -> None:
-    """Tạo file DB + bảng (nếu chưa có) -- idempotent, gọi lại nhiều lần
-    an toàn (schema.sql dùng `CREATE TABLE IF NOT EXISTS`)."""
+    """Tạo file DB + bảng (nếu chưa có) + CHẠY MIGRATION -- idempotent.
+
+    ⚠️ VÌ SAO CẦN MIGRATION RIÊNG (bug thật 2026-07-29): schema.sql dùng
+    `CREATE TABLE IF NOT EXISTS`, nên với DB ĐÃ TỒN TẠI thì việc thêm cột vào
+    file schema KHÔNG có tác dụng gì -- bảng cũ giữ nguyên, code mới ghi cột
+    mới là `OperationalError: no such column`. Gặp thật khi thêm
+    `execution_queue.request_id`: worker chết ngay vòng poll đầu. Trên VPS ai
+    cũng có DB cũ nên đây là ca THƯỜNG, không phải ngoại lệ."""
     path = Path(db_path) if db_path is not None else _default_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     schema_sql = _SCHEMA_PATH.read_text(encoding="utf-8")
     with sqlite3.connect(str(path)) as conn:
         conn.executescript(schema_sql)
+        _migrate(conn)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Nâng cấp bảng ĐÃ CÓ cho khớp schema.sql hiện tại.
+
+    `execution_queue` (2026-07-29): thêm `request_id` + cho phép status
+    'cancelled'. SQLite KHÔNG sửa được CHECK constraint bằng ALTER, nên phải
+    DỰNG LẠI BẢNG (tạo mới -> chép dữ liệu -> đổi tên). Chép cả dữ liệu cũ:
+    lịch sử job là thứ để truy vết, không được vứt khi nâng cấp."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(execution_queue)")}
+    if not cols or "request_id" in cols:
+        return   # bảng chưa tồn tại (schema vừa tạo đúng) hoặc đã nâng cấp rồi
+
+    conn.execute("ALTER TABLE execution_queue RENAME TO _execution_queue_old")
+    # Tạo lại từ ĐÚNG schema.sql (một nguồn sự thật) rồi chép sang.
+    conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+    conn.execute(
+        "INSERT INTO execution_queue (id, topic_key, job_type, status, requested_at, "
+        "claimed_at, claimed_by, finished_at, attempt_count, error, payload_json) "
+        "SELECT id, topic_key, job_type, status, requested_at, claimed_at, claimed_by, "
+        "finished_at, attempt_count, error, payload_json FROM _execution_queue_old")
+    conn.execute("DROP TABLE _execution_queue_old")
+    print("[store] Đã nâng cấp execution_queue: thêm request_id + status 'cancelled'.")
 
 
 @contextmanager
@@ -201,3 +245,27 @@ def list_topics(layer: str | None = None, *, db_path: str | Path | None = None) 
                 "SELECT DISTINCT topic_key FROM documents ORDER BY topic_key"
             ).fetchall()
     return [r["topic_key"] for r in rows]
+
+
+def delete_topic(topic_key: str, *, db_path: str | Path | None = None) -> int:
+    """XOÁ HẲN mọi document của 1 topic_key. Trả số dòng đã xoá.
+
+    ⚠️ NGOẠI LỆ TƯỜNG MINH CỦA NGUYÊN TẮC APPEND-ONLY (2026-07-29, quyết định
+    Lead: Gate 1 = "DELETE" -> xoá hoàn toàn khỏi DB lẫn Sheet). Đây là hàm
+    xoá DUY NHẤT của module này, và cố ý đặt tên dài + docstring cảnh báo để
+    không ai dùng nhầm cho mục đích khác.
+
+    VÌ SAO CHẤP NHẬN PHÁ NGUYÊN TẮC: append-only sinh ra để chặn việc MÁY tự
+    ghi đè/xoá dữ liệu người (sự cố `migrate_rows()` từng xoá rỗng Gate 1 — xem
+    docstring module). Ở đây NGƯỜI chủ động ra lệnh xoá đúng 1 chủ đề mình
+    chọn, không phải máy tự quyết — khác hẳn về bản chất.
+
+    KHÔNG THỂ HOÀN TÁC. Người vận hành muốn giữ lịch sử thì đừng dùng DELETE,
+    dùng REJECT (giữ dòng, đánh dấu loại)."""
+    if not (topic_key or "").strip():
+        raise ValueError("topic_key rỗng -- KHÔNG được phép xoá.")
+    with _connect(db_path) as conn:
+        cur = conn.execute("DELETE FROM documents WHERE topic_key = ?", (topic_key,))
+        conn.execute("DELETE FROM execution_queue WHERE topic_key = ?", (topic_key,))
+        conn.commit()
+        return cur.rowcount
