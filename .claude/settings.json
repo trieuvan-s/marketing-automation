@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(python tests/test_pipeline.py)",
-      "Bash(python scripts/crawl_one.py *)"
+      "Bash(python scripts/crawl_one.py *)",
+      "Bash(.venv/Scripts/python.exe *)"
     ]
   }
 }

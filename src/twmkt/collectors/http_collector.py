@@ -24,6 +24,7 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from urllib.parse import urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 
@@ -145,6 +146,69 @@ def extract_article(
 
 def _collapse_ws(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
+
+
+_PUBLISHED_META_RE = re.compile(
+    r'<meta[^>]+(?:property|name|itemprop)\s*=\s*["\']'
+    r'(?:article:published_time|datePublished|pubdate|publishdate|DC\.date\.issued)'
+    r'["\'][^>]*\bcontent\s*=\s*["\']([^"\']+)["\']',
+    re.IGNORECASE)
+# Thứ tự đảo (content= đứng TRƯỚC property=) — nhiều CMS xuất kiểu này.
+_PUBLISHED_META_RE_REV = re.compile(
+    r'<meta[^>]+\bcontent\s*=\s*["\']([^"\']+)["\'][^>]*(?:property|name|itemprop)\s*=\s*["\']'
+    r'(?:article:published_time|datePublished|pubdate|publishdate|DC\.date\.issued)["\']',
+    re.IGNORECASE)
+_PUBLISHED_JSONLD_RE = re.compile(r'"datePublished"\s*:\s*"([^"]+)"', re.IGNORECASE)
+_PUBLISHED_TIME_TAG_RE = re.compile(r'<time[^>]+\bdatetime\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
+
+
+def extract_published_at(html: str) -> "datetime | None":
+    """Ngày ĐĂNG của bài, trích từ HTML — `None` nếu trang không khai.
+
+    2026-07-28 (yêu cầu Lead): trước bản này nhánh HTML KHÔNG có ngày đăng nào
+    cả (`fetched_at` = lúc crawl), nên mọi bài cũ trên trang chuyên mục đều
+    trông như "tin hôm nay" và lọt vào mẻ crawl — Lead bắt được thật: bài
+    "Nhập siêu 13,8 tỷ USD" đăng 12/06 nằm trong mẻ 28/07.
+
+    Thử theo THỨ TỰ ĐỘ TIN CẬY GIẢM DẦN, lấy cái đầu tiên parse được:
+      1. `<meta property="article:published_time">` và họ hàng — chuẩn
+         OpenGraph/schema.org, các báo VN (CafeF/Vietstock/CafeBiz) đều có.
+      2. JSON-LD `"datePublished"` — schema.org nhúng trong <script>.
+      3. `<time datetime="...">` — kém tin nhất (có thể là ngày BÌNH LUẬN hay
+         bài liên quan trong sidebar), chỉ dùng khi 2 cách trên câm.
+
+    Regex thay vì BeautifulSoup CÓ CHỦ ĐÍCH: hàm này chạy trên MỌI trang crawl,
+    trong khi 3 mẫu trên đều nằm ở <head> dạng cố định — không đáng dựng cả cây
+    DOM. Sai sót tệ nhất là trả None (bài bị coi như không rõ ngày), KHÔNG phải
+    trả ngày sai."""
+    for rx in (_PUBLISHED_META_RE, _PUBLISHED_META_RE_REV,
+               _PUBLISHED_JSONLD_RE, _PUBLISHED_TIME_TAG_RE):
+        m = rx.search(html or "")
+        if not m:
+            continue
+        dt = parse_iso_datetime(m.group(1))
+        if dt is not None:
+            return dt
+    return None
+
+
+def parse_iso_datetime(raw: str) -> "datetime | None":
+    """Parse chuỗi ngày ISO-8601 (dạng các CMS hay xuất) -> datetime CÓ TZ.
+
+    Chấp nhận hậu tố "Z" (fromisoformat của Python <3.11 không nhận). Chuỗi
+    KHÔNG có tzinfo -> gán UTC: thà lệch tối đa 1 múi giờ còn hơn ném ra
+    datetime "naive" rồi nổ khi so sánh với `datetime.now(timezone.utc)` ở bộ
+    lọc — đó là lỗi runtime kinh điển của code ngày giờ Python."""
+    s = (raw or "").strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
 def extract_canonical_url(html: str, base_url: str) -> str | None:
@@ -338,6 +402,7 @@ class HttpFirstCollector(Collector):
             title=title or source.name,
             markdown=body,
             source_type=source.source_type,
+            published_at=extract_published_at(html),
         )
 
     # --- Hạ tầng mạng (có retry + backoff) ----------------------------------

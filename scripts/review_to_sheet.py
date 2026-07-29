@@ -47,6 +47,8 @@ from twmkt._encoding import ensure_utf8_stdio  # noqa: E402
 ensure_utf8_stdio()
 
 from twmkt import factory  # noqa: E402
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
 from twmkt.agents.hook import HookAgent, _try_json  # noqa: E402
 from twmkt.config import load_settings  # noqa: E402
 from twmkt.curation import normalize  # noqa: E402
@@ -55,7 +57,63 @@ from twmkt.curation.keys import assign_topic_key  # noqa: E402
 from twmkt.curation.enrich import (  # noqa: E402
     classify, cluster_by_event, groups_from_settings, hotness_pct, marketing_score,
 )
-from twmkt.models import ResearchBrief, Source  # noqa: E402
+from twmkt.models import CleanDocument, ResearchBrief, Source  # noqa: E402
+
+
+def _ddmmyyyy(dt) -> str | None:
+    """datetime -> "DD/MM/YYYY" theo múi giờ vận hành; None -> None (để
+    context_row() tự lùi về hôm nay)."""
+    if dt is None:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        dt = dt.astimezone(ZoneInfo("Asia/Ho_Chi_Minh"))
+    except Exception:   # noqa: BLE001 -- thiếu tzdata -> giữ nguyên tz gốc
+        pass
+    return dt.strftime("%d/%m/%Y")
+
+
+def filter_by_freshness(docs: list[CleanDocument], *, settings) -> tuple[list[CleanDocument], dict]:
+    """Giữ lại bài ĐĂNG trong `crawl.max_age_hours` giờ gần nhất.
+
+    2026-07-28 (yêu cầu Lead): trước bản này KHÔNG có bộ lọc ngày nào — mẻ
+    crawl 28/07 lẫn cả bài đăng 12/06 và chiều 27/07, vì trang chuyên mục liệt
+    kê cả tin cũ còn `fetched_at` thì luôn là "bây giờ".
+
+    CA "KHÔNG RÕ NGÀY" (`published_at is None`) là quyết định thật, không phải
+    chi tiết phụ — nguồn không khai ngày, ta KHÔNG biết bài cũ hay mới:
+      - `crawl.keep_undated: true` (MẶC ĐỊNH) -> GIỮ. Thà lọt vài bài cũ còn
+        hơn ÂM THẦM đánh rơi tin nóng chỉ vì CMS thiếu thẻ meta. Người còn 1
+        cổng duyệt Gate 1 phía sau để loại; bài bị bộ lọc ăn mất thì KHÔNG ai
+        thấy nữa.
+      - đặt `false` khi muốn siết, chấp nhận đánh đổi ngược lại.
+
+    `max_age_hours: 0` -> TẮT lọc hoàn toàn (giữ đường thoát khi cần crawl bù
+    dữ liệu cũ). Trả (danh sách đã lọc, thống kê để in/log)."""
+    max_age_h = float(settings.get("crawl.max_age_hours", 0) or 0)
+    if max_age_h <= 0:
+        return docs, {"filtered": False, "kept": len(docs), "too_old": 0, "undated": 0}
+
+    keep_undated = bool(settings.get("crawl.keep_undated", True))
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_h)
+    kept: list[CleanDocument] = []
+    too_old = undated = 0
+    for d in docs:
+        if d.published_at is None:
+            undated += 1
+            if keep_undated:
+                kept.append(d)
+            continue
+        pub = d.published_at
+        if pub.tzinfo is None:          # nguồn trả naive -> coi như UTC, xem parse_iso_datetime
+            pub = pub.replace(tzinfo=timezone.utc)
+        if pub >= cutoff:
+            kept.append(d)
+        else:
+            too_old += 1
+    return kept, {"filtered": True, "kept": len(kept), "too_old": too_old,
+                  "undated": undated, "max_age_hours": max_age_h,
+                  "keep_undated": keep_undated}
 from twmkt.sheets_board import CONTEXT_HEADER, SheetsBoard, context_row  # noqa: E402
 from twmkt.utils.telegram_notifier import make_notifier  # noqa: E402
 
@@ -194,6 +252,7 @@ def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False
     # LƯỢT trên TOÀN BỘ ứng viên, rồi gộp SỰ KIỆN chéo nguồn — GIỮ báo Priority
     # cao (cluster_by_event, item = dict), url báo khác gộp vào ô Source. --
     clean = normalize(raw_docs, curation)
+    clean, freshness = filter_by_freshness(clean, settings=settings)
     by_url = {c.url: c for c in clean}
     items = [
         {"title": c.title, "url": c.url, "publisher": c.source,   # publisher/priority nội bộ
@@ -250,7 +309,14 @@ def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False
         scored_rows.append((hot, context_row(
             title=c.title, hook_line=hook.headlines[0], source_url=c.url, score=score,
             hot_pct=hot, topic=topic, group=group, other_sources=other_urls,
-            tickers=c.tickers, topic_key=assign_topic_key("", url=c.canonical_url or c.url))))
+            tickers=c.tickers, topic_key=assign_topic_key("", url=c.canonical_url or c.url),
+            # Timestamp CONTEXT = NGÀY ĐĂNG BÀI (2026-07-29, quyết định Lead),
+            # KHÔNG phải ngày crawl. Trước đây không truyền `ts` -> lấy hôm
+            # nay, nên bài đăng 27/07 crawl ngày 29/07 hiện 29/07 và không
+            # cách nào biết bài thật sự đăng hôm nào. `published_at` đã trích
+            # sẵn ở collectors (xem http_collector.extract_published_at).
+            # None (nguồn không khai ngày) -> lùi về hôm nay, KHÔNG bịa.
+            ts=_ddmmyyyy(c.published_at))))
 
     scored_rows.sort(key=lambda x: x[0], reverse=True)   # thứ tự chèn (thứ tự cuối do sort_context_by_hot)
     # UPSERT theo TopicKey (Fix (a)): dòng ĐÃ CÓ giữ nguyên (không đụng Status/
@@ -259,6 +325,7 @@ def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False
     new_rows = board.upsert_context_rows([row for _, row in scored_rows])
     written = len(new_rows)
     board.sort_context_by_hot()
+    board.band_context_by_day()   # 2026-07-23: tô nền xen kẽ theo khối ngày (yêu cầu Lead)
 
     # PHASE 4.6: mỗi dòng CONTEXT thật sự MỚI (không phải TopicKey trùng bị bỏ
     # qua, Fix (a)) -> báo Telegram kèm link bài viết (Source = url gốc, có thể
@@ -272,7 +339,7 @@ def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False
     totals = {
         "crawled": len(raw_docs), "kept": len(clean), "clusters": len(clusters),
         "stored": stored, "written": written, "full_fetch_failed": full_fetch_failed,
-        "llm": usage, "use_llm": use_llm,
+        "llm": usage, "use_llm": use_llm, "freshness": freshness,
     }
     board.log("INFO", f"TỔNG: crawled {totals['crawled']} / kept {totals['kept']} / "
                       f"cụm(gộp sự kiện chéo nguồn) {totals['clusters']} / stored {totals['stored']} / "
@@ -301,6 +368,13 @@ def _print_summary(per_source: list[dict], totals: dict) -> None:
     print("---------- Tổng (sau lọc + gộp sự kiện chéo nguồn, giữ báo Priority cao) ----------")
     print(f"crawled {totals['crawled']} | kept(sau normalize) {totals['kept']} | "
           f"cụm duy nhất {totals['clusters']} | full-fetch lỗi {totals['full_fetch_failed']}")
+    fr = totals.get("freshness") or {}
+    if fr.get("filtered"):
+        print(f"lọc ngày đăng (<= {fr['max_age_hours']:.0f}h): loại {fr['too_old']} bài CŨ | "
+              f"{fr['undated']} bài KHÔNG rõ ngày -> "
+              f"{'GIỮ' if fr['keep_undated'] else 'LOẠI'} (crawl.keep_undated)")
+    else:
+        print("lọc ngày đăng: TẮT (crawl.max_age_hours=0)")
     print(f"stored {totals['stored']} | CONTEXT +{totals['written']} dòng mới "
           f"(TopicKey đã có trong CONTEXT giữ nguyên, không đụng)")
     u = totals.get("llm", {})

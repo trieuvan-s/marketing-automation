@@ -4,7 +4,9 @@
 nên không đốt token cho chủ đề bị loại. Mỗi định dạng = 1 agent chuyên biệt, output
 JSON theo SCHEMA cố định (xem docs/production_agents_design.md):
   • AnalysisWriterAgent  — bài phân tích (LLM). Schema: title/sapo/sections/disclaimer/sources.
-  • VideoScriptAgent     — kịch bản video ~60s (LLM). Schema: title/duration_sec/scenes/cta/disclaimer.
+  • VideoScriptAgent     — kịch bản video ~60s (LLM). Schema: CONTENT.Output video
+    (schema_version/title/scenes[{role,visual_kind,payload,narration}]/source/
+    disclaimer/facts — xem docs/CONTENT_OUTPUT_SCHEMA.md, hợp đồng CHÉO REPO).
   • InfographicSpecAgent — spec JSON (TẤT ĐỊNH, $0 — theo CLAUDE.md: infographic ở
     Tầng 0/free). Số liệu đọc THẲNG từ ProductionBrief.facts[] (Phase 4.10 — trước
     đó trích thô bằng regex trên evidence, không qua LLM nên không thể bịa).
@@ -65,7 +67,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -73,11 +75,24 @@ from ._jsonparse import try_json_object
 from ._numeric import has_approx_word, parse_magnitude_token
 from ..config import load_brand, load_settings
 from ..guardrails import compliance
+from ..media_factory.numbers import find_spelled_number_phrases
+from ..media_factory.spec import DEFERRED_VISUAL_KINDS, VISUAL_KINDS
 from ..models import ContentDraft, ContentFormat, Fact
 from .base import Agent, LLMClient
 from .voice import assemble_voice
 
 _FALLBACK_DISCLAIMER = "Nội dung mang tính thông tin, không phải khuyến nghị đầu tư."
+
+# CONTENT.Output (video) — hợp đồng CHÉO REPO có version, xem
+# docs/CONTENT_OUTPUT_SCHEMA.md (NGUỒN SỰ THẬT DUY NHẤT cho shape JSON dưới
+# đây). Đổi shape PHẢI bump version này + đồng bộ tài liệu ở CẢ HAI repo.
+_CONTENT_OUTPUT_SCHEMA_VERSION = 1
+
+# 9 visual_kind IN-SCOPE (10 canonical trừ "avatar" DEFERRED — chờ HeyGen, xem
+# media_factory/spec.py) — MỘT NGUỒN cho cả prompt LLM lẫn validate parse ở
+# đây, KHÔNG tự chép lại danh sách rời rạc (tránh trôi giữa 2 nơi).
+_IN_SCOPE_VISUAL_KINDS = VISUAL_KINDS - DEFERRED_VISUAL_KINDS
+_VIDEO_SCENE_ROLES = ("hook", "body", "outro")
 
 
 def _default_cta(brand: dict | None = None) -> str:
@@ -103,6 +118,26 @@ def _default_disclaimer(brand: dict | None = None) -> str:
     return str(footer.get("disclaimer") or "").strip() or _FALLBACK_DISCLAIMER
 
 
+def _verbatim_disclaimer(candidate: str) -> str:
+    """E' (2026-07-24, theo chỉ đạo Lead) — đối chiếu NGUYÊN VĂN `candidate`
+    (LLM viết, hoặc đã là default) với bản chuẩn `_default_disclaimer()`
+    (config/brand.yaml: footer.disclaimer). Lệch dù 1 ký tự -> GHI ĐÈ bằng bản
+    chuẩn TẠI CHỖ (KHÔNG nối thêm bản thứ 2) + CẢNH BÁO rõ (in cả 2 chuỗi, để
+    truy vết bản LLM viết là gì). Lý do bắt buộc: disclaimer là dòng miễn trừ
+    trách nhiệm PHÁP LÝ (nội dung chứng khoán công bố công khai) — prompt yêu
+    cầu LLM viết "đúng nguyên văn" nhưng KHÔNG có gì ép được LLM tuân thủ;
+    guardrail cũ (guardrails/compliance.py) chỉ kiểm CÓ MẶT disclaimer, KHÔNG
+    kiểm ĐÚNG CHỮ -> bản LLM tự diễn giải (không rỗng) từng lọt xuống production
+    mà không ai biết. Khớp NGUYÊN VĂN (kể cả rỗng -> default) là NO-OP, không
+    cảnh báo."""
+    canonical = _default_disclaimer()
+    if candidate.strip() == canonical.strip():
+        return canonical
+    print(f"[CẢNH BÁO] Disclaimer LLM viết khác bản chuẩn -> GHI ĐÈ (không nối thêm). "
+         f"LLM viết: {candidate!r} | Bản chuẩn: {canonical!r}")
+    return canonical
+
+
 # ACTIVE_TASK — Tích hợp CONTENT_WRITER_RULES: đọc prompts/content_writer_
 # rules.md TẠI THỜI ĐIỂM GỌI (không cache import-time, CÙNG NẾP với agents/
 # voice.assemble_voice đọc docs/voice_examples.md mỗi lần gọi) — sửa rule
@@ -112,7 +147,13 @@ def _default_disclaimer(brand: dict | None = None) -> str:
 # lại/tóm tắt (file rules là NGUỒN CHUẨN). §1 (quyết định model)/§6-§9
 # (checklist/reject-conditions/meta) KHÔNG nhúng ở đây — đó là input cho
 # validator (guardrails/) và bước tự-review, không phải nội dung DẠY VĂN.
-_CONTENT_WRITER_RULES_SECTION_RE = re.compile(r"(?m)^# (\d+)\. ")
+# Cắt mục theo heading ĐÁNH SỐ CẤP 1. Chấp nhận `# N. ` LẪN `## N. ` vì 2 file
+# rule dùng 2 quy ước khác nhau (content_writer_rules.md dùng `#`,
+# longform_content_writing_rules.md dùng `##`) — KHÔNG nới thì file longform
+# khớp 0 mục và loader trả "" ÂM THẦM (rule không bao giờ được áp, không ai biết).
+# `\. ` (dấu chấm + KHOẢNG TRẮNG) giữ nguyên nên mục con `## 2.1.`/`### 2.1.`
+# VẪN KHÔNG khớp — xem test_content_writer_rules_section_re_*.
+_CONTENT_WRITER_RULES_SECTION_RE = re.compile(r"(?m)^#{1,2} (\d+)\. ")
 
 
 def _load_content_writer_rules(*, sections: tuple[str, ...], settings=None) -> str:
@@ -127,7 +168,87 @@ def _load_content_writer_rules(*, sections: tuple[str, ...], settings=None) -> s
     if not path.exists():
         print(f"[CẢNH BÁO] không thấy {path} -> bỏ qua CONTENT_WRITER_RULES (rỗng).")
         return ""
+    return _load_content_writer_rules_from_text(path.read_text(encoding="utf-8"), sections)
+
+
+# BƯỚC 1 (rules v2.1, 2026-07-22) — v2.1 là RULES MẶC ĐỊNH cho Composer, áp
+# MỌI loại content_type. A (content_writer_rules.md, rule cũ) và C (rules_c_
+# unified_longform.md, hợp nhất longform — kết quả thí nghiệm A/B/C) GIỮ làm
+# DỰ PHÒNG, chọn qua `writer.rules_profile` ("v21" mặc định | "A" | "C") —
+# KHÔNG XOÁ. Hàm này KHÔNG đụng `_load_content_writer_rules` ở trên (giữ
+# nguyên — ~10 test gọi trực tiếp, phụ thuộc đọc THẲNG content_writer_rules.md
+# qua `writer.content_rules_path`) — chỉ ĐỊNH TUYẾN profile rồi gọi lại hàm cũ
+# HOẶC logic trích riêng cho v2.1 (numbering khác hẳn, xem dưới).
+_LEGACY_SECTIONS_BY_TYPE = {"article": ("2", "3"), "video": ("2", "4"), "infographic": ("2", "5")}
+
+# v2.1 core dùng CHUNG mọi loại: §1 mục tiêu, §2 thứ tự ưu tiên, §3 ranh giới
+# bắt buộc, §4 cấu trúc vừa đủ, §5 không gian sáng tạo, §6 chất lượng lập luận/
+# văn phong. KHÔNG gồm §7 (theo loại — trích RIÊNG dưới), §8 (validation —
+# tài liệu cho VALIDATOR, không phải Composer), §9/§10 (checklist/nguyên tắc
+# cuối, giống §6-9 content_writer_rules.md CŨ cũng không nhúng — input cho
+# guardrail/self-review, không phải "dạy văn").
+_V21_CORE_SECTIONS = ("1", "2", "3", "4", "5", "6")
+_V21_PRODUCT_SUBSECTION = {"article": "7.1", "video": "7.2", "infographic": "7.3"}
+_V21_SUBSECTION_RE_CACHE: dict[str, re.Pattern] = {}
+
+
+def _v21_subsection_re(num: str) -> re.Pattern:
+    if num not in _V21_SUBSECTION_RE_CACHE:
+        _V21_SUBSECTION_RE_CACHE[num] = re.compile(
+            r"(?m)^### " + re.escape(num) + r"\. .*?(?=\n### \d|\n## \d|\Z)", re.S)
+    return _V21_SUBSECTION_RE_CACHE[num]
+
+
+def _load_composer_rules(content_type: str, *, settings=None) -> str:
+    """Điểm ĐỊNH TUYẾN DUY NHẤT rules cho 3 Composer (Analysis/Video/Infographic)
+    — chọn v2.1 (mặc định)/A/C theo `writer.rules_profile`, trích ĐÚNG phần
+    `content_type` ("article"|"video"|"infographic"). File thiếu/lỗi -> ""
+    (LÙI MƯỢT, cùng nếp `_load_content_writer_rules`).
+
+    `writer.content_rules_path` (override tường minh, DÙNG BỞI TEST CŨ để trỏ
+    file tạm) LUÔN THẮNG — đi thẳng qua `_load_content_writer_rules` KHÔNG đổi,
+    giữ nguyên hành vi hiện có, không phá test cũ.
+
+    profile "C" (hợp nhất longform) CHỈ có nội dung cho "article" (thí nghiệm
+    A/B/C không phủ video/infographic) -> LÙI VỀ "A" cho 2 loại kia (quyết định
+    thực dụng, không phải lỗi — C chưa từng được thiết kế cho video/infographic)."""
+    settings = settings or load_settings()
+    if str(settings.get("writer.content_rules_path", "")).strip():
+        return _load_content_writer_rules(sections=_LEGACY_SECTIONS_BY_TYPE[content_type], settings=settings)
+
+    profile = str(settings.get("writer.rules_profile", "v21")).strip() or "v21"
+    if profile == "C" and content_type != "article":
+        profile = "A"   # C không có mục video/infographic -> lùi về A
+
+    if profile == "A":
+        return _load_content_writer_rules(sections=_LEGACY_SECTIONS_BY_TYPE[content_type], settings=settings)
+
+    if profile == "C":
+        path = Path(settings.get("writer.rules_c_path", "prompts/rules_c_unified_longform.md"))
+        if not path.exists():
+            print(f"[CẢNH BÁO] không thấy {path} -> bỏ qua rules profile C (rỗng).")
+            return ""
+        return path.read_text(encoding="utf-8").strip()   # C không tách content_type -> dùng NGUYÊN VĂN
+
+    # v21 (mặc định) — trích core (§1-6) + đúng sub-section §7.N theo content_type.
+    path = Path(settings.get("writer.rules_v21_path", "prompts/content_composer_rules_v2_1.md"))
+    if not path.exists():
+        print(f"[CẢNH BÁO] không thấy {path} -> bỏ qua rules v2.1 (rỗng).")
+        return ""
     text = path.read_text(encoding="utf-8")
+    core = _load_content_writer_rules_from_text(text, _V21_CORE_SECTIONS)
+    sub_num = _V21_PRODUCT_SUBSECTION[content_type]
+    m = _v21_subsection_re(sub_num).search(text)
+    # rstrip dấu "---" (hr phân cách trước mục kế) lẫn vào cuối do lookahead chỉ
+    # dừng Ở HEADING kế, không loại dòng hr đứng giữa.
+    product = re.sub(r"\n+---\s*\Z", "", m.group(0).rstrip()) if m else ""
+    return "\n\n".join(b for b in (core, product) if b)
+
+
+def _load_content_writer_rules_from_text(text: str, sections: tuple[str, ...]) -> str:
+    """Lõi trích-mục DÙNG CHUNG (tách khỏi `_load_content_writer_rules` để tái
+    dùng trên văn bản đã đọc sẵn — v2.1 cần đọc 1 LẦN rồi trích 2 lượt: core +
+    sub-section, đọc đĩa 2 lần là lãng phí không cần thiết)."""
     matches = list(_CONTENT_WRITER_RULES_SECTION_RE.finditer(text))
     blocks: list[str] = []
     for i, m in enumerate(matches):
@@ -353,7 +474,7 @@ class AnalysisWriterAgent(Agent):
         # đường LEGACY này — xem agents/writer.py cho đường MỚI có router thật).
         voice = assemble_voice(None)
         extra = f"\n\n---\n\nVOICE-LOCK (giọng văn bắt buộc):\n{voice}" if voice else ""
-        rules = _load_content_writer_rules(sections=("2", "3"))
+        rules = _load_composer_rules("article")
         if rules:
             extra += f"\n\n---\n\nCONTENT_WRITER_RULES (bắt buộc, nguồn chuẩn):\n{rules}"
         data = try_json_object(self._ask(build_analysis_prompt(brief), extra_system=extra))
@@ -386,7 +507,7 @@ def analysis_fields_from_data(data: dict | None, brief: ProductionBrief):
             {"heading": str(s.get("heading", "")).strip(), "content": str(s.get("content", "")).strip()}
             for s in (data.get("sections") or []) if isinstance(s, dict)
         ]
-        disclaimer = str(data.get("disclaimer") or _default_disclaimer()).strip()
+        disclaimer = _verbatim_disclaimer(str(data.get("disclaimer") or _default_disclaimer()).strip())
         sources = [str(u).strip() for u in (data.get("sources") or []) if str(u).strip()]
         if sections:
             return title, sapo, sections, disclaimer, sources
@@ -451,9 +572,60 @@ class VideoScriptAgent(Agent):
         f'Kết bằng disclaimer: PHẢI dùng ĐÚNG NGUYÊN VĂN "{_default_disclaimer()}" '
         "(KHÔNG viết lại/diễn giải/thêm bớt chữ nào — đây là câu miễn trừ trách nhiệm "
         "CHUẨN, đã duyệt). KHÔNG bịa số, KHÔNG hô hào mua.\n"
-        'Trả về DUY NHẤT JSON: {"title": str, "duration_sec": int, '
-        '"scenes": [{"t": str, "voiceover": str, "on_screen_text": str, "visual_hint": str}], '
-        '"cta": str, "disclaimer": str}.'
+        'Trả về DUY NHẤT JSON: {"schema_version": 1, "title": str, "scenes": '
+        '[{"role": "hook"|"body"|"outro", "visual_kind": "title"|"stat"|"statement"|'
+        '"list"|"comparison"|"quote"|"ticker"|"news"|"outro", "payload": object, '
+        '"narration": str}], "source": str, "disclaimer": str}. scenes[0].role="hook", '
+        'scene cuối role="outro" (payload outro gồm CTA, KHÔNG có field "cta" rời cấp top). '
+        'payload theo visual_kind: title:{"headline":str,"subheadline":str?}; '
+        'stat:{"label":str,"value":str,"note":str?}; statement:{"hero":str,"desc":str}; '
+        'list:{"title":str,"items":[{"title":str,"desc":str,"tag":str?}]}; '
+        'comparison:{"left":{"label":str,"bullets":[str],"stat":str?},'
+        '"right":{"label":str,"bullets":[str],"stat":str?}}; '
+        'quote:{"quote":str,"attribution":str?}; '
+        'ticker:{"items":[{"symbol":str,"value":str}]}; '
+        'news:{"headline":str,"source":str}; '
+        'outro:{"brand_name":str,"tagline":str?,"cta":str}.'
+        # V1 (2026-07-19) — HỢP ĐỒNG ĐỊNH DẠNG. Phải GIỐNG HỆT khối cùng tên ở
+        # `prompts/video.v1.md` (file .md là bản NẠP THẬT khi có; chuỗi này là
+        # fallback khi thiếu file — lệch nhau = 2 hành vi khác nhau tuỳ máy).
+        # Lý do tồn tại: Opus từng tự viết "năm hai nghìn không trăm hai mươi
+        # lăm" vào narration, vi phạm `docs/CONTENT_OUTPUT_SCHEMA.md` (narration
+        # giữ nguyên số) — prompt cũ KHÔNG có dòng nào nói về định dạng số.
+        "\n\n---\n\n"
+        "ĐỊNH DẠNG ĐẦU RA — VĂN VIẾT THƯỜNG (quy tắc CỨNG, đọc kỹ TRƯỚC KHI viết)\n\n"
+        "CONTENT.Output là VĂN BẢN ĐỌC BẰNG MẮT (người biên tập duyệt, hệ thống khác\n"
+        "đọc lại) — KHÔNG phải bản ghi âm. Viết mọi con số, mã, ký hiệu, tên riêng Y\n"
+        "HỆT cách viết trong một bài báo tài chính bình thường.\n\n"
+        "TUYỆT ĐỐI KHÔNG viết số thành chữ. TUYỆT ĐỐI KHÔNG phiên âm mã/viết tắt.\n"
+        "Lý do: một tầng TỰ ĐỘNG phía sau (KHÔNG phải bạn) chuyển số→chữ và mã→phiên\n"
+        "âm để sinh giọng đọc TTS. Bạn làm thay = nội dung bị xử lý HAI LẦN = sai.\n"
+        "Việc của bạn là giữ nguyên dạng viết.\n\n"
+        "Áp dụng cho CẢ `narration` LẪN mọi field chữ trong `payload`.\n\n"
+        "| Loại | VIẾT THẾ NÀY | KHÔNG BAO GIỜ viết |\n"
+        "|---|---|---|\n"
+        "| Năm | 2025 · thời kỳ 2021-2030 · tầm nhìn 2050 | hai nghìn không trăm hai mươi lăm |\n"
+        "| Ngày | 14/7 · ngày 14/7/2026 | ngày mười bốn tháng Bảy |\n"
+        "| Quý | Q2/2026 · quý 2/2026 | quý hai năm hai nghìn hai mươi sáu |\n"
+        "| Tỷ lệ | 4,98% · giảm 4,98% · 1-1,4%/năm | bốn phẩy chín tám phần trăm |\n"
+        "| Tiền | 9,34 tỷ đồng · 66.800 đồng · 1.396 triệu tấn | chín phẩy ba bốn tỷ đồng |\n"
+        "| Số đếm | 3 khu công nghiệp · 15 cảng biển loại I | ba khu công nghiệp |\n"
+        "| Mã chứng khoán | HVN · FPT · VNM · HPG | hát vê en · ép pê tê |\n"
+        "| Viết tắt, chỉ số | VN-Index · GDP · CPI · LNG · Teu | vê en in-đéc · giê đê pê |\n"
+        "| Tên riêng | Vietnam Airlines · Hòa Phát · Hòn Khoai | (giữ nguyên, không dịch) |\n\n"
+        "GIỮ NGUYÊN VĂN dạng số như trong evidence: dấu phẩy là THẬP PHÂN (4,98), dấu\n"
+        "chấm là PHÂN CÁCH NGHÌN (66.800). KHÔNG đổi 66.800 thành 66800 hay 66,800.\n\n"
+        "NGOẠI LỆ DUY NHẤT — số dùng như TỪ NGỮ THÔNG THƯỜNG, không mang dữ liệu:\n"
+        '"một trong những", "hai mặt của vấn đề", "vài phiên gần đây", "hàng loạt" —\n'
+        "viết chữ bình thường. Bảng trên áp cho MỌI số MANG GIÁ TRỊ: lượng, tiền, tỷ\n"
+        "lệ, ngày/tháng/quý/năm, thứ hạng, mã số.\n\n"
+        "GHI ĐÈ §4.5 CONTENT_WRITER_RULES: luật \"voice-over cấm dùng mã chứng khoán/\n"
+        "viết tắt\" KHÔNG áp cho `narration` của schema JSON này. `narration` là VĂN\n"
+        "VIẾT, không phải lời đọc — giữ nguyên mã (HVN, VN-Index). Tầng voice phía sau\n"
+        "lo phần đọc.\n\n"
+        "TỰ KIỂM TRƯỚC KHI TRẢ JSON: quét lại từng `narration` và từng field `payload`\n"
+        "— nếu thấy BẤT KỲ con số MANG DỮ LIỆU nào đang viết bằng chữ (không/một/hai/\n"
+        "ba/mười/mươi/trăm/nghìn/triệu/tỷ/phẩy), sửa về dạng chữ số rồi mới trả kết quả."
     )
 
     def run(self, brief: ProductionBrief, decision=None) -> ContentDraft:
@@ -467,12 +639,12 @@ class VideoScriptAgent(Agent):
         voice = assemble_voice(decision)
         extra = (f"\n\n---\n\nVOICE-LOCK (giọng văn bắt buộc):\n{voice}" if voice else "")
         extra += _VIDEO_TTS_GUIDANCE
-        rules = _load_content_writer_rules(sections=("2", "4"))
+        rules = _load_composer_rules("video")
         if rules:
             extra += f"\n\n---\n\nCONTENT_WRITER_RULES (bắt buộc, nguồn chuẩn):\n{rules}"
         data = try_json_object(self._ask(build_video_prompt(brief), extra_system=extra))
-        title, duration, scenes, cta, disclaimer = video_fields_from_data(data, brief)
-        body = render_video(title, duration, scenes, cta, disclaimer, brief)
+        title, scenes, disclaimer = video_fields_from_data(data, brief)
+        body = render_video(title, scenes, disclaimer, brief)
         return ContentDraft(fmt=ContentFormat.VIDEO_SCRIPT, title=title, body=body,
                             brief_topic=brief.topic)
 
@@ -487,48 +659,163 @@ def build_video_prompt(brief: ProductionBrief) -> str:
     )
 
 
+def _normalize_video_scene(sc: dict, *, role_default: str) -> dict:
+    """1 phần tử scenes[] LLM trả -> {role, visual_kind, payload, narration} đã
+    validate NHẸ (role/visual_kind lạ -> default an toàn; `payload` không phải
+    LLM cũng KHÔNG trust là dict). Validate CHI TIẾT hơn theo từng visual_kind
+    (payload đúng field) là việc của scene-builder/guardrail-2 phía
+    aigen-pipeline (xem docs/ARCHITECTURE_MODULES.md) — ở đây chỉ đảm bảo
+    SHAPE ngoài đúng để JSON hợp lệ, không đụng nội dung LLM viết."""
+    role = str(sc.get("role", "")).strip().lower()
+    if role not in _VIDEO_SCENE_ROLES:
+        role = role_default
+    visual_kind = str(sc.get("visual_kind", "")).strip().lower()
+    if visual_kind not in _IN_SCOPE_VISUAL_KINDS:
+        visual_kind = "statement"
+    payload = sc.get("payload") if isinstance(sc.get("payload"), dict) else {}
+    narration = str(sc.get("narration", "")).strip()
+    return {"role": role, "visual_kind": visual_kind, "payload": payload, "narration": narration}
+
+
+def _ensure_outro_scene(sc: dict, brief: ProductionBrief) -> dict:
+    """Ép cảnh CUỐI đúng bất biến schema (scenes[last].role == visual_kind ==
+    "outro", xem docs/CONTENT_OUTPUT_SCHEMA.md) + payload có "brand_name"/"cta"
+    (brand-driven, KHÔNG hard-code — _default_cta()/_BRAND_NAME) khi LLM/đường
+    lùi mượt bỏ sót. aigen-pipeline scene-builder DỰA VÀO bất biến này, không
+    tự lùi mượt được phía đó — PHẢI đảm bảo TẠI ĐÂY."""
+    payload = dict(sc.get("payload") or {})
+    if not str(payload.get("brand_name") or "").strip():
+        payload["brand_name"] = _BRAND_NAME
+    if not str(payload.get("cta") or "").strip():
+        payload["cta"] = _default_cta()
+    narration = str(sc.get("narration") or "").strip() or payload["cta"]
+    return {"role": "outro", "visual_kind": "outro", "payload": payload, "narration": narration}
+
+
+class SpelledNumberContractError(ValueError):
+    """CONTENT.Output vi phạm hợp đồng "narration giữ số dạng CHỮ SỐ" — Composer
+    viết số bằng chữ (VIỆC 0.3). CỨNG NGAY (luật chống-bịa), KHÔNG self-review
+    mềm: bắt ở ĐẦU NGUỒN thay vì để tầng voice/guardrail-2 phía aigen đoán mò."""
+
+
+def _assert_scenes_narration_use_digits(scenes: list[dict]) -> None:
+    """VALIDATOR TẤT ĐỊNH (VIỆC 0.3): quét `narration` mọi cảnh, phát hiện SỐ
+    VIẾT BẰNG CHỮ tiếng Việt (vd "hai nghìn không trăm hai mươi lăm", "mười ba
+    phẩy tám tỷ", "năm phần trăm") -> raise SpelledNumberContractError nêu RÕ
+    cảnh nào + chuỗi nào. KHÔNG dựa vào việc Opus nghe lời prompt. Chỉ áp cho
+    narration do LLM sinh (đường Composer), KHÔNG áp cho fallback tất định (đi
+    qua evidence nguồn có thể chứa số-chữ tự nhiên — xem video_fields_from_data)."""
+    problems: list[str] = []
+    for i, sc in enumerate(scenes):
+        for phrase in find_spelled_number_phrases(str(sc.get("narration", ""))):
+            problems.append(f'scene[{i}].narration: "{phrase}"')
+    if problems:
+        raise SpelledNumberContractError(
+            "narration chứa SỐ VIẾT BẰNG CHỮ (hợp đồng CONTENT.Output: giữ dạng "
+            "CHỮ SỐ, tầng voice tất định phía sau lo phần đọc) — "
+            + "; ".join(problems))
+
+
+_VIDEO_SCENE_FLOOR = 3   # KHỚP aigen scene-builder (scenes[] must have 3-12 elements)
+
+
+class InsufficientScenesError(ValueError):
+    """BƯỚC 3 (rules v2.1, 2026-07-22) — Composer (LLM thật, KHÔNG phải fallback
+    tất định) chỉ dựng được ÍT HƠN sàn scene renderer đòi (aigen scene-builder:
+    3-12, cần hook+ít nhất 1 body+outro để dựng video có nghĩa). Sàn này là
+    RÀNG BUỘC RENDERER (video 1-2 cảnh không dựng được), KHÁC BẢN CHẤT với field
+    tuỳ chọn thiếu (§8.2) — GIỮ NGUYÊN, không nới.
+
+    NHƯNG tuyệt đối KHÔNG được ép Composer BỊA cảnh cho đủ số (§3.1: "không suy
+    đoán để lấp... đủ số cảnh"; §8.3.4: "giảm mật độ hoặc bỏ block thay vì yêu
+    cầu Composer bịa thêm") — độn cảnh rỗng/lặp ý sẽ tạo video vô nghĩa, tệ hơn
+    hẳn việc KHÔNG có video. Thay vào đó: THROW sớm, TẠI Content Factory (Python)
+    — không để nguồn nghèo âm thầm trôi thành CONTENT.Output x lỗi kỹ thuật khó
+    hiểu (`scenes[] must have 3-12 elements`) tận phía aigen, có thể nhiều ngày
+    sau qua webhook. `produce_from_sheet.run()` bắt lỗi này RIÊNG (không chung
+    với SpelledNumberContractError), ghi NEEDS_HUMAN kèm đề xuất chuyển loại
+    nội dung (infographic/article) — nguồn nghèo scene KHÔNG có nghĩa nguồn
+    nghèo SỐ LIỆU, infographic/article vẫn có thể sản xuất được bình thường."""
+
+
 def video_fields_from_data(data: dict | None, brief: ProductionBrief):
+    """JSON LLM (hoặc None/rỗng) -> (title, scenes, disclaimer) khớp
+    ContentOutputVideo (docs/CONTENT_OUTPUT_SCHEMA.md) — `schema_version`/
+    `source`/`facts` KHÔNG lấy từ đây (tất định, gắn ở render_video()), cùng
+    nếp InfographicSpecAgent (source luôn domain_of(brief.url), KHÔNG tin LLM
+    tự bịa domain). `cta` (dạng cũ) KHÔNG còn ở đây — nằm trong
+    payload của scene cuối (visual_kind="outro"), xem _ensure_outro_scene."""
     if data:
         title = str(data.get("title") or brief.hook or brief.title).strip()
-        duration = int(data.get("duration_sec") or 60)
+        raw_scenes = [sc for sc in (data.get("scenes") or []) if isinstance(sc, dict)]
+        n = len(raw_scenes)
         scenes = [
-            {"t": str(sc.get("t", "")).strip(), "voiceover": str(sc.get("voiceover", "")).strip(),
-             "on_screen_text": str(sc.get("on_screen_text", "")).strip(),
-             "visual_hint": str(sc.get("visual_hint", "")).strip()}
-            for sc in (data.get("scenes") or []) if isinstance(sc, dict)
+            _normalize_video_scene(sc, role_default=("hook" if i == 0 else "outro" if i == n - 1 else "body"))
+            for i, sc in enumerate(raw_scenes)
         ]
-        cta = str(data.get("cta") or _default_cta()).strip()
         disclaimer = str(data.get("disclaimer") or _default_disclaimer()).strip()
         if scenes:
-            return title, duration, scenes, cta, disclaimer
-    # LÙI MƯỢT: kịch bản tất định 3-4 cảnh từ dữ kiện đã duyệt.
+            scenes[0]["role"] = "hook"
+            scenes[-1] = _ensure_outro_scene(scenes[-1], brief)
+            # VIỆC 0.3 — CONTRACT CHECK tất định trên OUTPUT COMPOSER (chỉ đường
+            # LLM này, KHÔNG áp fallback bên dưới): số bằng chữ -> THROW ngay.
+            _assert_scenes_narration_use_digits(scenes)
+            # BƯỚC 3 (rules v2.1) — sàn scene RENDERER, xem InsufficientScenesError.
+            # Đặt SAU digit-check có chủ đích: lỗi ĐỊNH DẠNG (voice_text hỏng) là
+            # vấn đề TOÀN VẸN dữ liệu, ưu tiên lộ ra trước lỗi SỐ LƯỢNG (khả thi
+            # video) — cũng giữ nguyên hành vi test_video_narration_contract_
+            # rejects_spelled_out_numbers (2 scene, cố ý test riêng digit-check).
+            if len(scenes) < _VIDEO_SCENE_FLOOR:
+                raise InsufficientScenesError(
+                    f"Nguồn chỉ đủ dựng {len(scenes)} cảnh (cần tối thiểu "
+                    f"{_VIDEO_SCENE_FLOOR} để video có hook+thân+outro) — KHÔNG bịa "
+                    f"cảnh đệm cho đủ số. Đề xuất chuyển loại nội dung sang "
+                    f"infographic/article cho chủ đề này (nguồn nghèo SCENE video, "
+                    f"KHÔNG có nghĩa nghèo SỐ LIỆU — 2 loại kia dùng chung facts[]).")
+            return title, scenes, disclaimer
+    # LÙI MƯỢT: kịch bản tất định 4 cảnh (>= 1 "hook" + 1 "outro") từ dữ kiện
+    # đã duyệt (KHÔNG cần Opus) — GIỮ nguyên nội dung/thứ tự ý tưởng đường cũ
+    # (hook -> tiêu đề -> bối cảnh (nếu có) -> mã liên quan -> CTA), chỉ đổi
+    # VỎ ĐỰNG sang scene có kiểu.
     title = brief.hook or brief.title
     scenes = [
-        {"t": "0-3s", "voiceover": brief.hook or brief.title, "on_screen_text": brief.title, "visual_hint": ""},
-        {"t": "3-30s", "voiceover": brief.title, "on_screen_text": "", "visual_hint": ""},
+        {"role": "hook", "visual_kind": "statement",
+         "payload": {"hero": brief.hook or brief.title, "desc": brief.title},
+         "narration": brief.hook or brief.title},
+        {"role": "body", "visual_kind": "statement",
+         "payload": {"hero": brief.title, "desc": _soft_truncate(brief.evidence, 200)},
+         "narration": brief.title},
     ]
     if brief.background:
-        scenes.append({"t": "30-45s", "voiceover": _soft_truncate(brief.background, 200),
-                       "on_screen_text": "", "visual_hint": ""})
-    scenes.append({"t": "45-55s", "voiceover": f"Hàm ý cho nhà đầu tư với {_tickers_line(brief)}.",
-                   "on_screen_text": "", "visual_hint": ""})
-    return title, 60, scenes, _default_cta(), _default_disclaimer()
+        scenes.append({"role": "body", "visual_kind": "statement",
+                       "payload": {"hero": "Bối cảnh mở rộng", "desc": _soft_truncate(brief.background, 200)},
+                       "narration": _soft_truncate(brief.background, 200)})
+    scenes.append({"role": "body", "visual_kind": "stat",
+                   "payload": {"label": "Mã liên quan", "value": _tickers_line(brief)},
+                   "narration": f"Hàm ý cho nhà đầu tư với {_tickers_line(brief)}."})
+    scenes.append(_ensure_outro_scene({}, brief))
+    return title, scenes, _default_disclaimer()
 
 
-def render_video(title, duration, scenes, cta, disclaimer, brief: ProductionBrief) -> str:
-    body = [f"HOOK: {title}", f"(~{duration}s)", ""]
-    for sc in scenes:
-        body.append(f"[{sc['t']}] {sc['voiceover']}")
-        if sc["on_screen_text"]:
-            body.append(f"  On-screen: {sc['on_screen_text']}")
-        if sc["visual_hint"]:
-            body.append(f"  Hình ảnh: {sc['visual_hint']}")
-    dom = domain_of(brief.url)
-    body += ["", f"[CTA] {cta}"]
-    if dom:
-        body.append(f"Nguồn: {dom}")
-    body += ["", disclaimer]
-    return "\n".join(body)
+def render_video(title, scenes, disclaimer, brief: ProductionBrief) -> str:
+    """Serialize ContentOutputVideo (schema_version=1, xem docs/CONTENT_OUTPUT_
+    SCHEMA.md) -> JSON string = `ContentDraft.body` mới (thay hẳn văn xuôi có
+    đánh dấu cũ `[t] voiceover / On-screen: / Hình ảnh: / [CTA] / Nguồn:`).
+    `source` TẤT ĐỊNH từ domain_of(brief.url) (giống dòng "Nguồn:" cũ, KHÔNG
+    tin LLM tự bịa domain — cùng nếp InfographicSpecAgent.infographic_spec_
+    from_data). `facts` pass-through NGUYÊN VĂN brief.facts (đã verify sẵn ở
+    Brief/agents.brief.py, KHÔNG LLM sinh lại) — nguồn cho guardrail-2 phía
+    aigen-pipeline (facts[] là hợp đồng chéo repo, xem docs/ARCHITECTURE_
+    MODULES.md)."""
+    output = {
+        "schema_version": _CONTENT_OUTPUT_SCHEMA_VERSION,
+        "title": title,
+        "scenes": scenes,
+        "source": domain_of(brief.url),
+        "disclaimer": disclaimer,
+        "facts": [asdict(f) for f in brief.facts],
+    }
+    return json.dumps(output, ensure_ascii=False, indent=2)
 
 
 # PHASE 4.10: kind ưu tiên "đáng lên hình nhất" khi chọn stat emphasis=true —
@@ -599,9 +886,18 @@ _INFOGRAPHIC_COMPOSER_SYSTEM = (
     "bị chặn NHẦM dù không phải bịa.\n"
     "- title KHÁC subtitle: title = tiêu đề GỌN; subtitle = 1 CÂU GÓC NHÌN "
     "(KHÔNG được lặp lại y hệt title).\n"
-    "- render_hint (TÁCH RIÊNG khỏi 8 trường data, chỉ là gợi ý style MỀM): "
+    "- render_hint (TÁCH RIÊNG khỏi 8 trường data): "
     "{\"theme\": \"dark|light\", \"palette\": tên bảng màu ngắn, \"ratio\": "
-    "\"4:5|1:1|16:9\"} — tự chọn theo cảm giác nội dung bài.\n"
+    "\"9:16|4:5|1:1\"}.\n"
+    "  theme/palette là gợi ý MỀM. `ratio` thì KHÔNG — nó quyết định ảnh THẬT "
+    "được sinh ra, và hệ thống CHỈ sinh ĐÚNG 1 ảnh theo tỷ lệ bạn chọn (không "
+    "sinh cả 3 để đỡ lãng phí). Chọn theo LƯỢNG THÔNG TIN bạn vừa viết ra:\n"
+    "    · \"9:16\" — DÀI, nhiều mục: tổng (hero+market) từ 7 mục trở lên, "
+    "hoặc highlights dài. Khung dọc Story/Reels/TikTok.\n"
+    "    · \"4:5\"  — TRUNG BÌNH: tổng 4-6 mục. Khung feed Facebook/Instagram.\n"
+    "    · \"1:1\"  — NGẮN, 1-3 con số nổi bật, ít chữ. Khung vuông.\n"
+    "  Đếm số mục THẬT trong hero/market/highlights rồi mới chọn — nhồi 10 mục "
+    "vào khung 1:1 sẽ ra ảnh chữ nhỏ không đọc nổi.\n"
     "- TUYỆT ĐỐI KHÔNG bịa số ngoài facts[] được cung cấp — MỌI số trong spec "
     "PHẢI xuất phát từ 1 fact đã cho.\n"
     + _NUMBER_DISCIPLINE +
@@ -613,6 +909,10 @@ _INFOGRAPHIC_COMPOSER_SYSTEM = (
     "KHÔNG markdown, KHÔNG lời dẫn."
 )
 
+# Tập ĐÓNG tỷ lệ ảnh infographic — phải KHỚP đúng những gì renderer dựng được
+# (render/ai_full.py + scripts/render_production_assets.py). Sửa ở ĐÂY thì sửa
+# LUÔN cả 2 chỗ đó, có test khoá (test_valid_ratios_match_renderer_support).
+VALID_RATIOS: tuple[str, ...] = ("9:16", "4:5", "1:1")
 _DEFAULT_RENDER_HINT = {"theme": "dark", "palette": "navy-gold", "ratio": "4:5"}
 
 
@@ -691,8 +991,21 @@ def _parse_priority(raw) -> dict:
 
 
 def _parse_render_hint(raw) -> dict:
+    """Chuẩn hoá render_hint. `ratio` đi qua TẬP ĐÓNG (VALID_RATIOS) — khác
+    theme/palette vốn là gợi ý style tự do.
+
+    2026-07-28: `ratio` giờ QUYẾT ĐỊNH ảnh nào được sinh (chỉ 1 ảnh thay vì cả
+    3 — xem scripts/render_production_assets.py), nên giá trị lạ không còn vô
+    hại như thời nó chỉ là gợi ý style. LỖI ĐÃ CÓ THẬT trong prompt: mời
+    Composer chọn "16:9" trong khi renderer chỉ có 9:16/4:5/1:1 — Composer trả
+    đúng như được mời thì renderer lại không có tỷ lệ đó. Giá trị ngoài tập ->
+    LÙI VỀ mặc định (không raise): đây là lớp trình bày, hỏng tỷ lệ không đáng
+    đánh rơi cả nội dung đã sinh."""
     raw = raw if isinstance(raw, dict) else {}
-    return {k: str(raw.get(k) or v).strip() for k, v in _DEFAULT_RENDER_HINT.items()}
+    out = {k: str(raw.get(k) or v).strip() for k, v in _DEFAULT_RENDER_HINT.items()}
+    if out["ratio"] not in VALID_RATIOS:
+        out["ratio"] = _DEFAULT_RENDER_HINT["ratio"]
+    return out
 
 
 def _stat_from_fact(f: Fact) -> dict:
@@ -816,7 +1129,7 @@ class InfographicSpecAgent(Agent):
         if not brief.facts:
             spec = _empty_infographic_spec(brief)
         else:
-            rules = _load_content_writer_rules(sections=("2", "5"))
+            rules = _load_composer_rules("infographic")
             extra = (f"\n\n---\n\nCONTENT_WRITER_RULES (bắt buộc, nguồn chuẩn):\n{rules}"
                     if rules else "")
             data = try_json_object(self._ask(build_infographic_composer_prompt(brief, decision),

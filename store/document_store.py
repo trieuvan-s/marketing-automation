@@ -1,0 +1,271 @@
+"""SQLite Document Store (docs/VPS_MIGRATION_BACKLOG.md A6/A7) -- nền cho
+"Sheet CHỈ LÀ UI/view; mọi dữ liệu (evidence, facts, output mọi format,
+trạng thái từng Gate, asset path, lịch sử) neo TopicKey trong store".
+
+APPEND-ONLY: module này KHÔNG có hàm update/delete nào -- mỗi lần ghi luôn
+là 1 version MỚI (xem `write_document()`). Lý do ghi vào đây (không chỉ
+comment SQL): sự cố `migrate_rows()` từng XOÁ RỖNG dữ liệu Gate 1 thật trên
+Sheet khi đổi tên cột (xem docs/VPS_MIGRATION_BACKLOG.md "QUY TẮC VÀNG KHI
+ĐỘNG VÀO SHEET") -- thiết kế append-only loại bỏ hẳn khả năng tái diễn ở
+tầng store này, vì không tồn tại thao tác nào có thể xoá/ghi đè.
+
+Quyền ghi tách bạch ENFORCE Ở SCHEMA (CHECK constraint trong schema.sql),
+KHÔNG dựa kỷ luật code Python -- ghi sai layer cho written_by sẽ luôn raise
+`sqlite3.IntegrityError` dù code gọi có kiểm tra trước hay không.
+
+P2 STORE-AS-TRUTH (2026-07-23, nhánh `feature/store-as-truth`) -- ĐÃ NỐI vào
+pipeline thật: `scripts/produce_from_sheet.py` giờ đọc/ghi module này làm
+NGUỒN SỰ THẬT DUY NHẤT, KHÔNG còn đọc/ghi Sheet trực tiếp. Sheet là VIEW
+thuần, cập nhật qua `store/sync_service.py` (2 chiều store<->Sheet) -- xem
+docs/VPS_MIGRATION_BACKLOG.md mục P2. Quyết định A6 cũ ("LÀM SAU khi luồng
+thông") coi như ĐÃ THOẢ -- dữ liệu cũ trên Sheet trước mốc này KHÔNG có ý
+nghĩa (đang test), được Lead xác nhận CLEAR SẠCH thay vì backfill/dual-write.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+
+_SCHEMA_PATH = Path(__file__).parent / "schema.sql"
+
+_VALID_LAYERS = frozenset({
+    "raw", "brief", "content_output", "infographic", "video",
+    "gate_status", "content_status", "log",
+})
+_VALID_WRITERS = frozenset({"ma", "aigen"})
+# content_type BẮT BUỘC cho layer nào (P2 store-as-truth -- content_status
+# CÙNG NẾP content_output, xem schema.sql).
+_LAYERS_REQUIRE_CONTENT_TYPE = frozenset({"content_output", "content_status"})
+
+
+def _default_db_path() -> Path:
+    """Đường dẫn DB: ENV `DOCUMENT_STORE_PATH` (ưu tiên, để test/CI trỏ chỗ
+    khác) -> `storage.data_root` trong settings.yaml -> cuối cùng mới là
+    "store/document_store.db" tương đối CWD.
+
+    2026-07-28 (quyết định Lead, khớp thiết kế đã chốt "1 DB duy nhất trên
+    VPS"): mặc định TƯƠNG ĐỐI CWD là bẫy thật, không phải lý thuyết — chạy
+    worker từ thư mục khác là mở NHẦM một DB rỗng khác mà không có lỗi nào
+    báo, hệ thống chỉ im lặng coi như "chưa có dữ liệu". Đã gặp: máy này
+    không tìm thấy DB của agent-A ở đâu cả. Nay DB nằm CÙNG CHỖ với mọi dữ
+    liệu khác (`data_root`, ngoài repo) — cùng nếp `config.data_path()`.
+
+    Import `twmkt.config` đặt TRONG hàm, không phải đầu module: store/ là
+    tầng dưới, phải chạy được cả khi không có settings.yaml (test cục bộ,
+    backfill đứng riêng) -- thiếu config thì lùi về mặc định cũ, không nổ."""
+    raw = os.environ.get("DOCUMENT_STORE_PATH")
+    if raw:
+        return Path(raw)
+    try:
+        from twmkt.config import data_path
+        return Path(data_path("document_store.db"))
+    except Exception:   # noqa: BLE001 -- thiếu settings.yaml/PYTHONPATH -> mặc định cũ
+        return Path("store/document_store.db")
+
+
+def init_db(db_path: str | Path | None = None) -> None:
+    """Tạo file DB + bảng (nếu chưa có) + CHẠY MIGRATION -- idempotent.
+
+    ⚠️ VÌ SAO CẦN MIGRATION RIÊNG (bug thật 2026-07-29): schema.sql dùng
+    `CREATE TABLE IF NOT EXISTS`, nên với DB ĐÃ TỒN TẠI thì việc thêm cột vào
+    file schema KHÔNG có tác dụng gì -- bảng cũ giữ nguyên, code mới ghi cột
+    mới là `OperationalError: no such column`. Gặp thật khi thêm
+    `execution_queue.request_id`: worker chết ngay vòng poll đầu. Trên VPS ai
+    cũng có DB cũ nên đây là ca THƯỜNG, không phải ngoại lệ."""
+    path = Path(db_path) if db_path is not None else _default_db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    schema_sql = _SCHEMA_PATH.read_text(encoding="utf-8")
+    with sqlite3.connect(str(path)) as conn:
+        conn.executescript(schema_sql)
+        _migrate(conn)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Nâng cấp bảng ĐÃ CÓ cho khớp schema.sql hiện tại.
+
+    `execution_queue` (2026-07-29): thêm `request_id` + cho phép status
+    'cancelled'. SQLite KHÔNG sửa được CHECK constraint bằng ALTER, nên phải
+    DỰNG LẠI BẢNG (tạo mới -> chép dữ liệu -> đổi tên). Chép cả dữ liệu cũ:
+    lịch sử job là thứ để truy vết, không được vứt khi nâng cấp."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(execution_queue)")}
+    if not cols or "request_id" in cols:
+        return   # bảng chưa tồn tại (schema vừa tạo đúng) hoặc đã nâng cấp rồi
+
+    conn.execute("ALTER TABLE execution_queue RENAME TO _execution_queue_old")
+    # Tạo lại từ ĐÚNG schema.sql (một nguồn sự thật) rồi chép sang.
+    conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+    conn.execute(
+        "INSERT INTO execution_queue (id, topic_key, job_type, status, requested_at, "
+        "claimed_at, claimed_by, finished_at, attempt_count, error, payload_json) "
+        "SELECT id, topic_key, job_type, status, requested_at, claimed_at, claimed_by, "
+        "finished_at, attempt_count, error, payload_json FROM _execution_queue_old")
+    conn.execute("DROP TABLE _execution_queue_old")
+    print("[store] Đã nâng cấp execution_queue: thêm request_id + status 'cancelled'.")
+
+
+@contextmanager
+def _connect(db_path: str | Path | None = None):
+    path = Path(db_path) if db_path is not None else _default_db_path()
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def write_document(
+    topic_key: str,
+    layer: str,
+    payload: dict,
+    written_by: str,
+    *,
+    content_type: str = "",
+    db_path: str | Path | None = None,
+) -> int:
+    """Ghi 1 bản MỚI (APPEND-ONLY, không ghi đè) -> trả version vừa ghi
+    (bắt đầu từ 1, tự tăng theo `topic_key`+`layer`+`content_type`).
+
+    `content_type` (BUG 1, phát hiện qua backfill --dry-run trên Sheet thật
+    2026-07-19): 1 topic_key có thể có NHIỀU content_type trong layer
+    'content_output' (vd article/infographic/video CÙNG 1 chủ đề, xác nhận
+    thật trên Sheet -- KHÔNG phải giả thuyết). Bỏ qua tham số này (mặc định
+    "") -> mọi content_type cùng topic_key+layer bị coi là version của CÙNG
+    1 tài liệu, "chôn" mất các content_type khác khi đọc lại. BẮT BUỘC
+    truyền `content_type` thật (khớp CONTENT.Type trên Sheet -- xem BUG 2:
+    "article"/"infographic"/"video", ĐÃ xác nhận đối chiếu ký tự-với-ký tự
+    với dữ liệu thật) khi `layer="content_output"` -- raise `ValueError`
+    SỚM nếu thiếu, không âm thầm nhận "" rồi gây bug y hệt BUG 1 lần nữa.
+    Layer khác (raw/brief/infographic/video) không có đa loại -- để mặc
+    định "" là đúng, không cần truyền.
+
+    `payload` PHẢI JSON-serializable -- lỗi serialize raise `TypeError` từ
+    `json.dumps()`, không tự bắt/nuốt ở đây. `layer`/`written_by` sai giá
+    trị -> `ValueError` (kiểm SỚM, thông báo rõ, tránh round-trip DB vô
+    ích). `written_by` ghi SAI layer cho phép của nó (theo CHECK constraint
+    trong schema.sql, vd 'aigen' ghi 'content_output') -> để SQLite tự
+    raise `sqlite3.IntegrityError`, KHÔNG tự kiểm tra lại logic đó ở Python
+    (schema là nguồn sự thật DUY NHẤT cho quyền ghi, tránh 2 nơi có thể
+    lệch nhau).
+
+    Race hiếm (2 tiến trình ghi CÙNG topic_key+layer+content_type cùng lúc,
+    cả 2 cùng tính ra 1 version): UNIQUE(topic_key, layer, content_type,
+    version) trong schema.sql là lưới an toàn cuối -- 1 trong 2 sẽ nhận
+    `sqlite3.IntegrityError` thay vì âm thầm ghi đè, đúng tinh thần
+    append-only. Ở nấc này (VPS 1 nguồn ghi/layer theo thiết kế A6) race
+    này không nên xảy ra trong vận hành bình thường."""
+    if not topic_key:
+        raise ValueError(
+            "topic_key rỗng/None -- KHÔNG được phép (P2 store-as-truth: schema chỉ có "
+            "NOT NULL, KHÔNG chặn chuỗi rỗng '' -- xác nhận thực nghiệm 2026-07-23, "
+            "write_document('', ...) từng ghi thành công trước sửa này). Đây là guard "
+            "DUY NHẤT chặn 'document mồ côi' (INVARIANT Lớp 5 Phase 2 cũ trên Sheet, nay "
+            "chuyển xuống tầng store thay vì tầng pipeline)."
+        )
+    if layer not in _VALID_LAYERS:
+        raise ValueError(f"layer không hợp lệ: {layer!r} (phải trong {sorted(_VALID_LAYERS)})")
+    if written_by not in _VALID_WRITERS:
+        raise ValueError(f"written_by không hợp lệ: {written_by!r} (phải trong {sorted(_VALID_WRITERS)})")
+    if layer in _LAYERS_REQUIRE_CONTENT_TYPE and not content_type:
+        raise ValueError(
+            f"layer={layer!r} BẮT BUỘC content_type (vd 'article'/'infographic'/'video') "
+            "-- 1 topic_key có thể có nhiều content_type, thiếu tham số này sẽ tái diễn BUG 1 "
+            "(content_type khác nhau bị coi là version của cùng 1 tài liệu, chôn mất nhau)."
+        )
+
+    payload_json = json.dumps(payload, ensure_ascii=False)
+    created_at = datetime.now(timezone.utc).isoformat()
+
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            "SELECT COALESCE(MAX(version), 0) FROM documents "
+            "WHERE topic_key = ? AND layer = ? AND content_type = ?",
+            (topic_key, layer, content_type),
+        )
+        next_version = cur.fetchone()[0] + 1
+        conn.execute(
+            "INSERT INTO documents (topic_key, layer, content_type, version, payload_json, created_at, written_by) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (topic_key, layer, content_type, next_version, payload_json, created_at, written_by),
+        )
+        conn.commit()
+        return next_version
+
+
+def read_latest(
+    topic_key: str, layer: str, content_type: str, *, db_path: str | Path | None = None
+) -> dict | None:
+    """Bản MỚI NHẤT (version cao nhất) của ĐÚNG `content_type` -- `None`
+    nếu chưa từng ghi. `content_type` BẮT BUỘC (không mặc định) kể từ BUG 1
+    -- truyền `""` cho layer không có đa loại (raw/brief/infographic/video),
+    truyền giá trị thật ('article'/'infographic'/'video') cho
+    layer='content_output'. Không có tham số này thì không có cách nào phân
+    biệt "muốn đọc bản nào trong số nhiều content_type cùng topic_key"."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM documents "
+            "WHERE topic_key = ? AND layer = ? AND content_type = ? "
+            "ORDER BY version DESC LIMIT 1",
+            (topic_key, layer, content_type),
+        ).fetchone()
+    return json.loads(row["payload_json"]) if row else None
+
+
+def read_history(
+    topic_key: str, layer: str, content_type: str, *, db_path: str | Path | None = None
+) -> list[tuple[int, dict, str]]:
+    """Toàn bộ lịch sử (version, payload, created_at) của ĐÚNG `content_type`,
+    sắp XUÔI theo version (1, 2, 3, ...) -- danh sách rỗng nếu chưa từng ghi
+    (KHÔNG raise). `content_type` BẮT BUỘC, cùng lý do `read_latest()`."""
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT version, payload_json, created_at FROM documents "
+            "WHERE topic_key = ? AND layer = ? AND content_type = ? ORDER BY version ASC",
+            (topic_key, layer, content_type),
+        ).fetchall()
+    return [(r["version"], json.loads(r["payload_json"]), r["created_at"]) for r in rows]
+
+
+def list_topics(layer: str | None = None, *, db_path: str | Path | None = None) -> list[str]:
+    """`topic_key` DISTINCT, sắp xếp theo bảng chữ cái -- lọc theo `layer`
+    nếu truyền, không thì trả mọi topic_key có ít nhất 1 bản ghi ở BẤT KỲ
+    layer nào."""
+    with _connect(db_path) as conn:
+        if layer is not None:
+            rows = conn.execute(
+                "SELECT DISTINCT topic_key FROM documents WHERE layer = ? ORDER BY topic_key",
+                (layer,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT DISTINCT topic_key FROM documents ORDER BY topic_key"
+            ).fetchall()
+    return [r["topic_key"] for r in rows]
+
+
+def delete_topic(topic_key: str, *, db_path: str | Path | None = None) -> int:
+    """XOÁ HẲN mọi document của 1 topic_key. Trả số dòng đã xoá.
+
+    ⚠️ NGOẠI LỆ TƯỜNG MINH CỦA NGUYÊN TẮC APPEND-ONLY (2026-07-29, quyết định
+    Lead: Gate 1 = "DELETE" -> xoá hoàn toàn khỏi DB lẫn Sheet). Đây là hàm
+    xoá DUY NHẤT của module này, và cố ý đặt tên dài + docstring cảnh báo để
+    không ai dùng nhầm cho mục đích khác.
+
+    VÌ SAO CHẤP NHẬN PHÁ NGUYÊN TẮC: append-only sinh ra để chặn việc MÁY tự
+    ghi đè/xoá dữ liệu người (sự cố `migrate_rows()` từng xoá rỗng Gate 1 — xem
+    docstring module). Ở đây NGƯỜI chủ động ra lệnh xoá đúng 1 chủ đề mình
+    chọn, không phải máy tự quyết — khác hẳn về bản chất.
+
+    KHÔNG THỂ HOÀN TÁC. Người vận hành muốn giữ lịch sử thì đừng dùng DELETE,
+    dùng REJECT (giữ dòng, đánh dấu loại)."""
+    if not (topic_key or "").strip():
+        raise ValueError("topic_key rỗng -- KHÔNG được phép xoá.")
+    with _connect(db_path) as conn:
+        cur = conn.execute("DELETE FROM documents WHERE topic_key = ?", (topic_key,))
+        conn.execute("DELETE FROM execution_queue WHERE topic_key = ?", (topic_key,))
+        conn.commit()
+        return cur.rowcount

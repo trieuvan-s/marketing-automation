@@ -293,7 +293,22 @@ Voice-over phải giống lời nói tự nhiên:
 - Không lặp cấu trúc đối lập liên tục.
 - Dùng từ quen thuộc trước, giải thích thuật ngữ sau.
 
-Voice-over CẤM dùng mã chứng khoán, mã viết tắt, ký hiệu đọc-từng-chữ (JOS, HVN, KCN, VN-Index...). Phải dùng dạng đầy đủ hoặc tên đọc được. On-screen (4.6) thì NGƯỢC LẠI — được phép dùng mã/viết tắt vì mắt đọc, không phải tai nghe.
+**CẬP NHẬT 2026-07-19 — luật cũ đã BỎ.** Trước đây mục này cấm dùng mã chứng
+khoán và từ viết tắt trong voice-over, bắt thay bằng tên đọc được. Luật đó viết
+khi voice-over CHÍNH LÀ text đưa thẳng vào TTS. Kiến trúc hiện tại KHÔNG còn vậy:
+Composer sinh `narration` (VĂN VIẾT), rồi một tầng TẤT ĐỊNH riêng
+(`aigen/src/production-spec/voice/`) mới chuyển số→chữ và mã→phiên âm để sinh
+TTS — xem `docs/ARCHITECTURE_MODULES.md`.
+
+**Luật hiện hành:** `narration` GIỮ NGUYÊN mã chứng khoán, viết tắt, chỉ số và số
+liệu đúng dạng chữ số (HVN, VN-Index, 4,98%, Q2/2026) — y như on-screen. Đây là
+văn bản để ĐỌC BẰNG MẮT và để hệ thống khác đọc lại, không phải lời đọc. Chi tiết
+đầy đủ + bảng ĐÚNG/SAI: khối "ĐỊNH DẠNG ĐẦU RA — VĂN VIẾT THƯỜNG" trong
+`prompts/video.v1.md`.
+
+Mã không có trong từ điển phiên âm sẽ bị `alias-guardrail` chặn và báo rõ mã
+thiếu — ĐÚNG THIẾT KẾ (thà dừng còn hơn đoán sai cách đọc), không phải lỗi cần
+né bằng cách viết tên đầy đủ trong `narration`.
 
 ## 4.6. On-screen
 

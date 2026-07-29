@@ -30,7 +30,13 @@ class SourceType(str, Enum):
 class ContentFormat(str, Enum):
     ARTICLE = "article"
     INFOGRAPHIC = "infographic"   # sinh ra SPEC (JSON), không phải ảnh
-    VIDEO_SCRIPT = "video_script"
+    # SỬA 2026-07-19/20 (BUG 2, phát hiện độc lập qua store/backfill_from_sheet.py
+    # --dry-run TRÊN Sheet thật, xác nhận lại qua C7): giá trị CŨ "video_script"
+    # KHÔNG khớp dữ liệu Type thật trên CONTENT (Sheet ghi "video", xác nhận qua
+    # đọc trực tiếp 9 dòng CONTENT production) -- Sheet là nguồn sự thật ở giai
+    # đoạn backfill, sửa ENUM theo Sheet, KHÔNG sửa Sheet. Tên member giữ
+    # `VIDEO_SCRIPT` (định danh Python), chỉ .value đổi.
+    VIDEO_SCRIPT = "video"
     NEWSLETTER = "newsletter"
 
 
@@ -80,6 +86,14 @@ class RawDocument:
     # http_collector.extract_canonical_url), "" nếu không có/không qua kiểm
     # định. Nơi cần danh tính bài (vd TopicKey) tự chọn `canonical_url or url`.
     canonical_url: str = ""
+    # 2026-07-28 — NGÀY ĐĂNG THẬT của bài, TÁCH KHỎI `fetched_at` (thời điểm
+    # TA lấy về). Trước đây rss_collector nhét pubDate vào `fetched_at` cho
+    # tiện, còn html_collector để `now()` — nên KHÔNG có cách nào phân biệt
+    # "bài đăng hôm nay" với "bài cũ vừa crawl", và lượt crawl nào cũng lẫn
+    # bài cũ (Lead phát hiện thật: bài "Nhập siêu 13,8 tỷ USD" đăng 12/06 lọt
+    # vào mẻ 28/07). None = không xác định được ngày đăng (nguồn không khai) —
+    # KHÁC "đăng lâu rồi", nên bộ lọc phải quyết định riêng cho ca None.
+    published_at: datetime | None = None
 
     @property
     def content_hash(self) -> str:
@@ -100,6 +114,7 @@ class CleanDocument:
     fetched_at: datetime = field(default_factory=_now)
     category_hint: str = ""   # kế thừa từ RawDocument.category_hint (xem curation/normalize.py)
     canonical_url: str = ""   # kế thừa từ RawDocument.canonical_url (xem RawDocument docstring)
+    published_at: datetime | None = None   # kế thừa từ RawDocument.published_at (xem docstring ở đó)
 
 
 @dataclass

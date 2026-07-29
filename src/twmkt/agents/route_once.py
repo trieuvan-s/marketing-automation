@@ -3,7 +3,7 @@
 Vấn đề (báo cáo Phase 4.7): ClaudeCodeLLM (`claude -p`) không expose tham số
 sampling nên temperature=0.0 ở run_route() là no-op — gọi router 2 LẦN cho
 CÙNG evidence có thể ra 2 quyết định KHÁC NHAU (đo thực tế: 0/3 khớp trên 3
-chủ đề thử ở Phase 4.7). Nếu nhiều content-type (article/video_script/
+chủ đề thử ở Phase 4.7). Nếu nhiều content-type (article/video/
 infographic) của CÙNG 1 chủ đề tự gọi run_route() riêng lẻ, nguy cơ LỆCH
 KHUNG giữa các loại content của cùng chủ đề là CÓ THẬT, không phải giả thuyết.
 

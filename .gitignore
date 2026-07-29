@@ -3,6 +3,13 @@ __pycache__/
 .venv/
 venv/
 env/
+
+# P2 store-as-truth: DB SQLite cục bộ (dev/test) — KHÔNG commit, xem
+# store/document_store.py::_default_db_path() (ENV DOCUMENT_STORE_PATH,
+# mặc định "store/document_store.db" tương đối CWD nếu chưa set).
+*.db
+*.sqlite
+*.sqlite3
 .env
 *.egg-info/
 build/
@@ -13,9 +20,11 @@ dist/
 .vscode/
 
 # Phase DATA-ROOT: dữ liệu runtime (documents/output/state/logs/ab) chuyển
-# sang storage.data_root NGOÀI repo (mặc định ../marketing-automation-database,
-# xem config/settings.yaml + src/twmkt/config.data_path()) — không còn thư mục
-# storage/ trong repo nên KHÔNG cần rule gitignore riêng cho nó nữa.
+# sang storage.data_root NGOÀI repo (mặc định
+# ../marketing-database/marketing-automation — thư mục CON riêng của repo
+# này dưới DB dùng chung với aigen-pipeline, xem config/settings.yaml +
+# src/twmkt/config.data_path()) — không còn thư mục storage/ trong repo nên
+# KHÔNG cần rule gitignore riêng cho nó nữa.
 
 # Bí mật — KHÔNG commit khóa service account / token
 secrets/
@@ -24,6 +33,8 @@ secrets/
 !.vscode/*.json
 !.claude/*.json
 !tsconfig*.json
+# ...trừ settings.local.json — cấu hình quyền CÁ NHÂN theo máy, không commit
+.claude/settings.local.json
 # Golden set (Phase 3 A/B) — THƯỚC ĐO facts người liệt kê tay, PHẢI ở trong git
 # (khác tests/golden/_raw/*.txt — dữ liệu vận hành, .txt không bị *.json chặn).
 !tests/golden/*.json
@@ -35,3 +46,8 @@ reports/*
 !reports/TEST_RESULT.md
 !reports/phase2_verify/
 !reports/phase2_verify/**
+
+# Kiểm tra hồi quy PHA 2 (chuẩn hoá Composer video) — bằng chứng cho Lead
+# duyệt, PHẢI ở trong git (không phải report tạm dùng-rồi-bỏ)
+!reports/regression_video_prompt/
+!reports/regression_video_prompt/**

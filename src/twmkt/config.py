@@ -169,8 +169,19 @@ def default_user_agent(*, version: str = "0.2", contact: str = "") -> str:
 # "storage/..." rải rác (factory.py, file_store.py, produce_from_sheet.py,
 # system_power_on.py...) -> dữ liệu nằm LẪN trong repo (rủi ro commit nhầm, khó tách
 # khi deploy VPS). Từ đây, TẤT CẢ đường dẫn dữ liệu PHẢI đi qua data_path().
+#
+# THƯ MỤC DÙNG CHUNG (2026-07-21, xem docs/VPS_MIGRATION_BACKLOG.md A2): trên
+# VPS, marketing-automation VÀ aigen-pipeline (2 repo riêng) cùng ghi vào 1
+# thư mục cha sibling "marketing-database" -- KHÔNG ghi thẳng vào gốc thư mục
+# đó, mỗi repo có thư mục CON riêng theo TÊN REPO của mình (repo này ghi vào
+# marketing-database/marketing-automation/, aigen-pipeline ghi vào
+# marketing-database/aigen-pipeline/) để KHÔNG ghi đè/lẫn dữ liệu 2 bên.
 # =====================================================================
-_DEFAULT_DATA_ROOT = "../marketing-automation-database"
+# KHO CHUNG 2 repo (2026-07-21): `marketing-database/` dùng chung, mỗi repo ghi
+# vào thư mục con MANG TÊN REPO (marketing-automation/ · aigen-pipeline/) —
+# không ghi đè, không lẫn lộn. Tên trung lập có chủ đích (tên cũ
+# "marketing-automation-database" gây hiểu nhầm là kho riêng của repo này).
+_DEFAULT_DATA_ROOT = "../marketing-database/marketing-automation"
 
 
 def data_root(settings: Settings | None = None) -> Path:
@@ -179,7 +190,8 @@ def data_root(settings: Settings | None = None) -> Path:
     trong repo này — os.environ.get(...) or settings.get(...), KHÔNG dùng cú
     pháp ${VAR} trong YAML vì đó là quy ước dành riêng cho BÍ MẬT, xem docstring
     module), không có thì đọc `storage.data_root` trong settings.yaml (mặc
-    định "../marketing-automation-database" — NGOÀI repo). Đường dẫn TƯƠNG ĐỐI
+    định "../marketing-database/marketing-automation" — NGOÀI repo, thư mục con
+    MANG TÊN REPO trong kho chung 2 repo). Đường dẫn TƯƠNG ĐỐI
     tính theo THƯ MỤC LÀM VIỆC lúc chạy — cùng quy ước với load_settings() tự
     tìm config/settings.yaml theo CWD (mọi script trong repo LUÔN được chạy từ
     repo root, xem README/CLAUDE.md)."""

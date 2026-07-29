@@ -124,6 +124,10 @@ class RssCollector(Collector):
                 markdown=it.summary,
                 source_type=source.source_type,
                 fetched_at=it.published_at or datetime.now(timezone.utc),
+                # 2026-07-28: ngày đăng đi vào ĐÚNG field của nó. `fetched_at`
+                # giữ nguyên cách điền cũ (tương thích ngược mọi caller đang
+                # đọc nó) nhưng KHÔNG còn là chỗ duy nhất mang thông tin này.
+                published_at=it.published_at,
                 category_hint=it.category,
             )
             for it in items

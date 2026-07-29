@@ -18,3 +18,9 @@ python-dotenv>=1.0
 # Bước 2 — HTTP-first collector (thuần Python, chạy cả trên 3.14)
 httpx>=0.27
 beautifulsoup4>=4.12
+
+# Infographic Hybrid — render_mode="ai_full" (MẶC ĐỊNH) đóng dấu brand LÊN
+# TRÊN ảnh AI qua render/brand_stamp.py (Pillow compositing). PHÁT HIỆN
+# 2026-07-22 (agent-B, lúc rebase feature/infographic-hybrid): brand_stamp.py
+# đã import PIL nhưng thiếu khai báo Ở ĐÂY — thêm cho khớp code thật.
+pillow>=10.0

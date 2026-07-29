@@ -7,7 +7,12 @@ YÊU CẦU CÔ ĐỌNG:
 - related: TÊN thực thể thật liên quan trực tiếp (địa danh/dự án/công ty/mã CK/chính sách) — LẤY TỪ facts[] có [entity]/[entity_list] (xem nhãn [shape:salience] đầu mỗi dòng fact), GHÉP tên NGUYÊN VĂN. TUYỆT ĐỐI KHÔNG tự bịa thêm tên nào KHÔNG có trong facts[] — dòng nào trong 'related' không khớp facts[] SẼ BỊ GUARDRAIL LẦN 2 CHẶN (xem media_factory/spec.py). CHỈ LẤY entity/entity_list có salience="subject" — TUYỆT ĐỐI KHÔNG lấy salience="context" (Content Factory Phase 2b — lỗi THẬT đã gặp: related bị lấp bởi tên hội thảo/hiệp hội/viện nghiên cứu thay vì tên cảng/dự án thật). facts[] không có entity/entity_list salience=subject nào -> để related rỗng [], KHÔNG lùi về mã CK/tên context khi không chắc chắn.
 - priority: {"primary": [...nhãn/tên quan trọng nhất...], "secondary": [...], "minor": [...]} — "primary" CHỈ được chứa nhãn (label) đã dùng ở hero/market VÀ/HOẶC tên thực thể salience="subject" đã đưa vào related (KHÔNG bao giờ salience="context") — "secondary"/"minor" có thể chứa nhãn context (hội thảo/hiệp hội...) nếu cần, dựa trên mức độ phục vụ luận điểm chính (khung bài đã cho). MỌI mục trong "primary" LẤY TỪ hero/market PHẢI LẶP LẠI NGUYÊN VĂN chuỗi label đã dùng ở đó — TUYỆT ĐỐI KHÔNG viết tắt/diễn giải lại (vd đã dùng label "Khu công nghiệp" ở market thì priority.primary PHẢI ghi lại đúng "Khu công nghiệp", KHÔNG được rút gọn thành "KCN") — guardrail lần 2 so khớp CHUỖI, viết tắt sẽ bị chặn NHẦM dù không phải bịa.
 - title KHÁC subtitle: title = tiêu đề GỌN; subtitle = 1 CÂU GÓC NHÌN (KHÔNG được lặp lại y hệt title).
-- render_hint (TÁCH RIÊNG khỏi 8 trường data, chỉ là gợi ý style MỀM): {"theme": "dark|light", "palette": tên bảng màu ngắn, "ratio": "4:5|1:1|16:9"} — tự chọn theo cảm giác nội dung bài.
+- render_hint (TÁCH RIÊNG khỏi 8 trường data): {"theme": "dark|light", "palette": tên bảng màu ngắn, "ratio": "9:16|4:5|1:1"}.
+  theme/palette là gợi ý MỀM. `ratio` thì KHÔNG — nó quyết định ảnh THẬT được sinh ra, và hệ thống CHỈ sinh ĐÚNG 1 ảnh theo tỷ lệ bạn chọn (không sinh cả 3 để đỡ lãng phí). Chọn theo LƯỢNG THÔNG TIN bạn vừa viết ra:
+    · "9:16" — DÀI, nhiều mục: tổng (hero+market) từ 7 mục trở lên, hoặc highlights dài. Khung dọc Story/Reels/TikTok.
+    · "4:5"  — TRUNG BÌNH: tổng 4-6 mục. Khung feed Facebook/Instagram.
+    · "1:1"  — NGẮN, 1-3 con số nổi bật, ít chữ. Khung vuông.
+  Đếm số mục THẬT trong hero/market/highlights rồi mới chọn — nhồi 10 mục vào khung 1:1 sẽ ra ảnh chữ nhỏ không đọc nổi.
 - TUYỆT ĐỐI KHÔNG bịa số ngoài facts[] được cung cấp — MỌI số trong spec PHẢI xuất phát từ 1 fact đã cho.
 
 KỶ LUẬT SỐ (BẮT BUỘC, Phase 4.13 — giảm NEEDS_HUMAN oan do tự chế số):
