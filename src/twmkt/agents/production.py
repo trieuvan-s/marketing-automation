@@ -886,9 +886,18 @@ _INFOGRAPHIC_COMPOSER_SYSTEM = (
     "bị chặn NHẦM dù không phải bịa.\n"
     "- title KHÁC subtitle: title = tiêu đề GỌN; subtitle = 1 CÂU GÓC NHÌN "
     "(KHÔNG được lặp lại y hệt title).\n"
-    "- render_hint (TÁCH RIÊNG khỏi 8 trường data, chỉ là gợi ý style MỀM): "
+    "- render_hint (TÁCH RIÊNG khỏi 8 trường data): "
     "{\"theme\": \"dark|light\", \"palette\": tên bảng màu ngắn, \"ratio\": "
-    "\"4:5|1:1|16:9\"} — tự chọn theo cảm giác nội dung bài.\n"
+    "\"9:16|4:5|1:1\"}.\n"
+    "  theme/palette là gợi ý MỀM. `ratio` thì KHÔNG — nó quyết định ảnh THẬT "
+    "được sinh ra, và hệ thống CHỈ sinh ĐÚNG 1 ảnh theo tỷ lệ bạn chọn (không "
+    "sinh cả 3 để đỡ lãng phí). Chọn theo LƯỢNG THÔNG TIN bạn vừa viết ra:\n"
+    "    · \"9:16\" — DÀI, nhiều mục: tổng (hero+market) từ 7 mục trở lên, "
+    "hoặc highlights dài. Khung dọc Story/Reels/TikTok.\n"
+    "    · \"4:5\"  — TRUNG BÌNH: tổng 4-6 mục. Khung feed Facebook/Instagram.\n"
+    "    · \"1:1\"  — NGẮN, 1-3 con số nổi bật, ít chữ. Khung vuông.\n"
+    "  Đếm số mục THẬT trong hero/market/highlights rồi mới chọn — nhồi 10 mục "
+    "vào khung 1:1 sẽ ra ảnh chữ nhỏ không đọc nổi.\n"
     "- TUYỆT ĐỐI KHÔNG bịa số ngoài facts[] được cung cấp — MỌI số trong spec "
     "PHẢI xuất phát từ 1 fact đã cho.\n"
     + _NUMBER_DISCIPLINE +
@@ -900,6 +909,10 @@ _INFOGRAPHIC_COMPOSER_SYSTEM = (
     "KHÔNG markdown, KHÔNG lời dẫn."
 )
 
+# Tập ĐÓNG tỷ lệ ảnh infographic — phải KHỚP đúng những gì renderer dựng được
+# (render/ai_full.py + scripts/render_production_assets.py). Sửa ở ĐÂY thì sửa
+# LUÔN cả 2 chỗ đó, có test khoá (test_valid_ratios_match_renderer_support).
+VALID_RATIOS: tuple[str, ...] = ("9:16", "4:5", "1:1")
 _DEFAULT_RENDER_HINT = {"theme": "dark", "palette": "navy-gold", "ratio": "4:5"}
 
 
@@ -978,8 +991,21 @@ def _parse_priority(raw) -> dict:
 
 
 def _parse_render_hint(raw) -> dict:
+    """Chuẩn hoá render_hint. `ratio` đi qua TẬP ĐÓNG (VALID_RATIOS) — khác
+    theme/palette vốn là gợi ý style tự do.
+
+    2026-07-28: `ratio` giờ QUYẾT ĐỊNH ảnh nào được sinh (chỉ 1 ảnh thay vì cả
+    3 — xem scripts/render_production_assets.py), nên giá trị lạ không còn vô
+    hại như thời nó chỉ là gợi ý style. LỖI ĐÃ CÓ THẬT trong prompt: mời
+    Composer chọn "16:9" trong khi renderer chỉ có 9:16/4:5/1:1 — Composer trả
+    đúng như được mời thì renderer lại không có tỷ lệ đó. Giá trị ngoài tập ->
+    LÙI VỀ mặc định (không raise): đây là lớp trình bày, hỏng tỷ lệ không đáng
+    đánh rơi cả nội dung đã sinh."""
     raw = raw if isinstance(raw, dict) else {}
-    return {k: str(raw.get(k) or v).strip() for k, v in _DEFAULT_RENDER_HINT.items()}
+    out = {k: str(raw.get(k) or v).strip() for k, v in _DEFAULT_RENDER_HINT.items()}
+    if out["ratio"] not in VALID_RATIOS:
+        out["ratio"] = _DEFAULT_RENDER_HINT["ratio"]
+    return out
 
 
 def _stat_from_fact(f: Fact) -> dict:

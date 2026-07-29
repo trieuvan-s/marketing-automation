@@ -117,6 +117,31 @@ class AnthropicLLM(LLMClient):
             return self._fail(f"Gọi Anthropic lỗi ({e!r})", fail_loud=fail_loud)
 
 
+def _cli_error_detail(proc) -> str:
+    """Lý do lỗi THẬT của `claude -p` khi exit != 0.
+
+    2026-07-28 (agent-B, VIỆC CÒN TREO #3 của
+    `tasks/HANDOFF_2026-07-27_agentA_final.md`): với `--output-format json`,
+    CLI in kết quả — KỂ CẢ kết quả lỗi — ra STDOUT rồi mới thoát khác 0, vd
+    hạn mức: `{"is_error": true, "result": "...429... spend limit"}`; STDERR
+    thường RỖNG. Bản cũ chỉ đọc stderr nên log/Telegram báo lỗi trống `''`,
+    khiến cả một phiên e2e không biết mình bị chặn vì hạn mức chứ không phải
+    lỗi code. Thứ tự ưu tiên: `result`/`error` trong JSON stdout -> stdout thô
+    -> stderr. Cắt 200 ký tự CÙNG NẾP các nhánh `_fail()` khác."""
+    out = (proc.stdout or "").strip()
+    if out:
+        try:
+            data = json.loads(out)
+        except json.JSONDecodeError:
+            return out[:200]
+        if isinstance(data, dict):
+            detail = str(data.get("result") or data.get("error") or "").strip()
+            if detail:
+                return detail[:200]
+        return out[:200]
+    return (proc.stderr or "").strip()[:200]
+
+
 class ClaudeCodeLLM(LLMClient):
     """Backend qua CLI `claude -p` (gói Pro/Max/Team hiện có — KHÔNG cần
     ANTHROPIC_API_KEY riêng, KHÔNG billing API). Shell tiến trình con, ghép
@@ -181,7 +206,7 @@ class ClaudeCodeLLM(LLMClient):
         except subprocess.TimeoutExpired:
             return self._fail(f"claude -p timeout sau {self.timeout_s:.0f}s", fail_loud=fail_loud)
         if proc.returncode != 0:
-            return self._fail(f"claude -p lỗi (exit {proc.returncode}): {(proc.stderr or '')[:200]!r}",
+            return self._fail(f"claude -p lỗi (exit {proc.returncode}): {_cli_error_detail(proc)!r}",
                               fail_loud=fail_loud)
         try:
             data = json.loads(proc.stdout)

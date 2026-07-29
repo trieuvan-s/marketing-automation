@@ -25,6 +25,12 @@ from . import document_store as ds
 
 _WRITTEN_BY = "ma"
 
+# Trạng thái Execute mà `list_approved_topics()` coi là CÒN VIỆC PHẢI LÀM.
+# KHÔNG import từ twmkt.sheets_board: store/ là tầng dưới, không phụ thuộc
+# ngược lên tầng Sheet (xem docstring module) -- 5 chuỗi này là HỢP ĐỒNG chung,
+# đổi thì đổi CẢ HAI chỗ (sheets_board.EXECUTE_VALUES là bản định nghĩa).
+_EXECUTE_RUNNABLE = frozenset({"Waiting", "Running...", "FAILED", "RUN", ""})
+
 
 # --- raw (crawl output, topic-level) ----------------------------------------
 
@@ -85,7 +91,12 @@ def list_approved_topics(*, db_path=None) -> list[dict]:
         gate = read_gate_status(topic_key, db_path=db_path)
         if gate.get("gate1") != "APPROVE":
             continue
-        if gate.get("execute") not in ("RUN", "FAILED"):
+        # 2026-07-28: từ vựng Execute mới (sheets_board.EXECUTE_VALUES).
+        # "Waiting"/"Running..." = đang trong lượt xử lý này (worker đã đặt
+        # Running... NGAY trước khi gọi run(), nên run() phải chấp nhận nó,
+        # nếu không sẽ tự lọc mất chính job vừa claim). FAILED = lỗi tạm, thử
+        # lại. "RUN"/"" = từ vựng CŨ, giữ đọc để dòng cũ không kẹt.
+        if gate.get("execute") not in _EXECUTE_RUNNABLE:
             continue
         raw = read_raw(topic_key, db_path=db_path) or {}
         out.append({

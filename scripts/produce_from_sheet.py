@@ -98,6 +98,7 @@ from twmkt.sheets_board import SheetsBoard, content_row, facts_to_json  # noqa: 
 from twmkt.utils.telegram_notifier import make_notifier  # noqa: E402
 
 from store import pipeline_store as ps  # noqa: E402
+from twmkt.sheets_board import _now_ddmmyyyy  # noqa: E402
 
 # store phải giữ NGUYÊN VĂN (Lead xác nhận 2026-07-27, sau khi bug
 # render_production_assets.py lộ ra store cũng chỉ nhận bản cắt) -- KHÔNG còn
@@ -175,6 +176,17 @@ def _write_content(topic_key: str, type_: str, *, status: str, output: str, note
     write_content_status() merge-on-write nên không truyền gate3 = giữ trống)."""
     ps.write_content_output(topic_key, type_, {
         "status": status, "output": output, "notes": notes, "facts": facts_json,
+        # HAI MỐC THỜI GIAN, lưu TÁCH BẠCH (2026-07-29, quyết định Lead) —
+        # DB phải đủ để khôi phục 100% Sheet UI, nên không được để mất mốc nào:
+        #   `timestamp`    = NGÀY XỬ LÝ (sản xuất nội dung này). Là thứ hiển
+        #                    thị ở cột Timestamp tab CONTENT.
+        #   `published_at` = NGÀY ĐĂNG BÀI GỐC, kế thừa từ raw. Trùng
+        #                    `timestamp` khi crawl và xử lý cùng ngày; KHÁC khi
+        #                    người duyệt sản xuất vào ngày sau.
+        # Thiếu `timestamp` thì content_row() lấy now() mỗi lượt render ->
+        # Timestamp mọi dòng nhảy sang hôm nay (bug thật 2026-07-29).
+        "timestamp": _now_ddmmyyyy(),
+        "published_at": (ps.read_raw(topic_key) or {}).get("timestamp", ""),
     })
     ps.write_content_status(topic_key, type_, gate2="PENDING")
 
@@ -414,13 +426,28 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
         allowed_types = _allowed_output_types(item.get("output_type") or [])
         output_type_excluded: set[str] = set()
         if allowed_types is not None:
-            for ch, enabled in list(channels.items()):
-                if enabled and ch not in allowed_types:
+            # KHÔNG lọc theo `enabled` (bug bắt được ở e2e 2026-07-28): bản cũ
+            # chỉ đánh dấu tuyến mà ROUTER đã bật. Tuyến router TỰ TẮT rơi ra
+            # ngoài -> đi tiếp vào nhánh "router skip" và VẪN ghi 1 dòng
+            # SKIPPED. Kết quả: cùng Output Type="Article", infographic không
+            # có dòng còn video lại có — cùng ý định của người, 2 kết cục khác
+            # nhau chỉ vì tầng nào loại trước. Người đã nói KHÔNG cần tuyến đó
+            # thì KHÔNG dòng nào cả, bất kể ai loại.
+            for ch in list(channels):
+                if ch not in allowed_types:
                     output_type_excluded.add(ch)
                     channels[ch] = False
 
         article_outcome = None
         if not write_article:
+            skipped += 1
+        elif "article" in output_type_excluded:
+            # 2026-07-28 (quyết định Lead): tuyến người KHÔNG CHỌN ở Output Type
+            # -> KHÔNG ghi dòng nào cả. Trước đây ghi 1 dòng SKIPPED, khiến tab
+            # CONTENT lúc nào cũng 3 dòng cho mỗi chủ đề dù người chỉ muốn 1 —
+            # 2 dòng kia là nhiễu thuần tuý, người đã tự nói là không cần.
+            # KHÁC HẲN skip do ROUTER (nhánh dưới): ở đó người CÓ yêu cầu tuyến
+            # này, nên vẫn cần 1 dòng giải thích vì sao hệ thống từ chối.
             skipped += 1
         elif not channels.get("article", True):
             reason = _channel_skip_reason("article", decision, output_type_excluded)
@@ -477,6 +504,11 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
             # ứng-sau "facts rỗng -> skip" của Phase 4.12 làm cơ chế CHÍNH.
             ch = ("infographic" if isinstance(agent, InfographicSpecAgent)
                  else "video" if isinstance(agent, VideoScriptAgent) else None)
+            if ch is not None and ch in output_type_excluded:
+                # Người không chọn tuyến này ở Output Type -> KHÔNG ghi dòng
+                # nào (xem nhánh article ở trên cho lý do đầy đủ).
+                skipped += 1
+                continue
             if ch is not None and not channels.get(ch, True):
                 type_key = _CHANNEL_TO_TYPE[ch]
                 if (topic_key, type_key) in seen:
