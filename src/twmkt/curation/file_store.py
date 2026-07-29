@@ -106,10 +106,23 @@ class FileDocumentStore:
 def _ser(d: CleanDocument) -> dict:
     st = d.source_type.value if hasattr(d.source_type, "value") else str(d.source_type)
     at = d.fetched_at.isoformat() if hasattr(d.fetched_at, "isoformat") else str(d.fetched_at)
+    # 2026-07-28: THÊM published_at/category_hint/canonical_url. Trước đó _ser
+    # chỉ giữ 8 trường và ÂM THẦM bỏ rơi 3 trường còn lại của CleanDocument:
+    #  - published_at: mất luôn khả năng truy "bài này đăng ngày nào" sau khi
+    #    crawl xong -> không kiểm được bộ lọc ngày có đúng không (Lead hỏi
+    #    "sao chưa thấy tin 27/07" mà không ai trả lời được từ dữ liệu).
+    #  - canonical_url: NGHIÊM TRỌNG hơn -- đây là đầu vào của TopicKey
+    #    (curation/keys.compute_topic_key ưu tiên `canonical_url or url`). Đọc
+    #    lại document từ đĩa mà thiếu nó -> tính ra TopicKey KHÁC với lượt
+    #    crawl gốc, phá kỷ luật "write-once" của Lớp 5.
+    #  - category_hint: gợi ý Field từ RSS, dùng ở enrich.
+    pub = d.published_at.isoformat() if getattr(d, "published_at", None) is not None else None
     return {
         "source": d.source, "url": d.url, "title": d.title, "markdown": d.markdown,
         "tickers": list(d.tickers), "tags": list(d.tags),
         "source_type": st, "fetched_at": at,
+        "published_at": pub, "category_hint": d.category_hint,
+        "canonical_url": d.canonical_url,
     }
 
 
@@ -119,4 +132,10 @@ def _de(r: dict) -> CleanDocument:
         tickers=r.get("tickers", []), tags=r.get("tags", []),
         source_type=SourceType(r.get("source_type", "news")),
         fetched_at=datetime.fromisoformat(r["fetched_at"]),
+        # `.get()` + None-check: file CŨ (ghi trước 2026-07-28) không có 3 khoá
+        # này -> đọc lại vẫn được, chỉ thiếu thông tin, KHÔNG nổ.
+        published_at=(datetime.fromisoformat(r["published_at"])
+                      if r.get("published_at") else None),
+        category_hint=r.get("category_hint", ""),
+        canonical_url=r.get("canonical_url", ""),
     )
