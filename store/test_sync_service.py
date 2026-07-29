@@ -40,6 +40,15 @@ class _FakeWorksheet:
         for i, row in enumerate(values):
             self._grid[start_row - 1 + i] = [str(c) for c in row]
 
+    def batch_clear(self, ranges: list[str]) -> None:
+        """Fake `batch_clear` — chỉ cần cắt phần ĐUÔI (dòng thừa khi bảng co
+        lại). Parse "A<start>:<col><end>" lấy start, xoá từ đó tới hết."""
+        import re as _re
+        for rng in ranges:
+            m = _re.match(r"A(\d+):", rng)
+            if m:
+                self._grid = self._grid[: int(m.group(1)) - 1]
+
     def set_rows(self, rows: list[list[str]]) -> None:
         """Helper CHỈ dùng trong test -- mô phỏng trạng thái Sheet SẴN CÓ
         (bao gồm header) trước khi gọi hàm sync -- KHÔNG có trong gspread thật."""
@@ -256,7 +265,10 @@ def test_render_content_to_sheet_uses_asset_url_over_local_path(board, db_path):
     ss.render_content_to_sheet(board, db_path=db_path)
     grid = board._tab("CONTENT").get_all_values()
     header, row = grid[0], grid[1]
-    assert row[_header_index(header, "AssetPath")] == "https://drive.google.com/x"
+    # 2026-07-28: có asset_url -> ưu tiên URL (không dùng local path) VÀ bọc
+    # HYPERLINK để người duyệt Gate 3 bấm được, thay vì text thô như trước.
+    assert row[_header_index(header, "AssetPath")] == \
+        '=HYPERLINK("https://drive.google.com/x", "Mở file")'
 
 
 # =============================================================================
@@ -328,7 +340,12 @@ def test_ingest_context_from_sheet_skips_rows_without_topic_key(board, db_path):
     assert ds.list_topics(db_path=db_path) == []
 
 
-def test_ingest_context_from_sheet_execute_needs_human_to_run_exception(board, db_path):
+def test_ingest_context_from_sheet_never_reads_execute_written_by_hand(board, db_path):
+    """2026-07-28 — HỢP ĐỒNG ĐỔI: Execute là cờ MÁY-GHI, read-only với người.
+    Trước đây có "khe hẹp" NEEDS_HUMAN->RUN cho người xin chạy lại; nay KHÔNG
+    còn đọc giá trị Execute từ Sheet ở BẤT KỲ ca nào. Người gõ "RUN" vào ô
+    (dù Protected Range đã chặn, chủ Sheet vẫn gõ được) -> BỎ QUA HOÀN TOÀN,
+    trạng thái thật trong store giữ nguyên NEEDS_HUMAN."""
     ps.write_raw("tk-1", {"context": "Bài 1", "hook": "h", "source": "u1",
                           "tickers": [], "group": "", "topic": ""}, db_path=db_path)
     ps.write_gate_status("tk-1", gate1="APPROVE", execute="NEEDS_HUMAN", db_path=db_path)
@@ -339,8 +356,29 @@ def test_ingest_context_from_sheet_execute_needs_human_to_run_exception(board, d
     ])
 
     n = ss.ingest_context_from_sheet(board, db_path=db_path)
-    assert n == 1
-    assert ps.read_gate_status("tk-1", db_path=db_path)["execute"] == "RUN"
+    assert n == 0
+    assert ps.read_gate_status("tk-1", db_path=db_path)["execute"] == "NEEDS_HUMAN"
+    assert qs.list_queue(db_path=db_path) == []   # không có job nào được tạo
+
+
+def test_ingest_context_reapprove_is_the_retry_path_after_needs_human(board, db_path):
+    """Đường CHẠY LẠI MỚI thay cho khe hẹp NEEDS_HUMAN->RUN đã bỏ: người bỏ
+    APPROVE rồi APPROVE lại trên Gate 1 -> Execute reset về Waiting + job mới
+    vào hàng đợi. Đây là lý do bỏ cột Execute 2 chiều mà KHÔNG mất tính năng."""
+    ps.write_raw("tk-1", {"context": "Bài 1", "hook": "h", "source": "u1",
+                          "tickers": [], "group": "", "topic": ""}, db_path=db_path)
+    ps.write_gate_status("tk-1", gate1="PENDING", execute="NEEDS_HUMAN", db_path=db_path)
+
+    board._tab("CONTEXT").set_rows([
+        CONTEXT_HEADER,
+        ["24/07/2026", "0.0", "0", "", "", "Bài 1", "h", "u1", "APPROVE", "", "NEEDS_HUMAN", "", "", "tk-1"],
+    ])
+
+    ss.ingest_context_from_sheet(board, db_path=db_path)
+    gate = ps.read_gate_status("tk-1", db_path=db_path)
+    assert gate["gate1"] == "APPROVE"
+    assert gate["execute"] == "Waiting"
+    assert [j["topic_key"] for j in qs.list_queue(db_path=db_path)] == ["tk-1"]
 
 
 def test_ingest_context_from_sheet_ignores_execute_run_when_not_needs_human(board, db_path):
@@ -543,13 +581,14 @@ def test_ingest_context_from_sheet_bootstraps_execute_run_for_existing_topic(boa
     assert n == 1
     gate = ps.read_gate_status("tk-1", db_path=db_path)
     assert gate["gate1"] == "APPROVE"
-    assert gate["execute"] == "RUN"
+    assert gate["execute"] == "Waiting"
 
 
 def test_ingest_context_from_sheet_bridges_new_topic_already_approved_bootstraps_run(board, db_path):
     """review_to_sheet.py KHÔNG tự đặt Execute -- topic mới nạp vào store lần
-    đầu mà Sheet đã Gate1=APPROVE (người duyệt rất nhanh) vẫn phải bootstrap
-    Execute=RUN NGAY, không phải chờ 1 lượt ingest thứ 2."""
+    đầu mà Sheet đã Gate1=APPROVE (người duyệt rất nhanh) vẫn phải vào hàng
+    đợi NGAY, không phải chờ 1 lượt ingest thứ 2 (ca này KHÔNG có "chuyển
+    tiếp Gate 1" để bắt, nên là nhánh riêng trong ingest)."""
     board._tab("CONTEXT").set_rows([
         CONTEXT_HEADER,
         ["24/07/2026", "50.0", "5", "", "", "Bài mới đã duyệt ngay", "h",
@@ -558,17 +597,22 @@ def test_ingest_context_from_sheet_bridges_new_topic_already_approved_bootstraps
     ss.ingest_context_from_sheet(board, db_path=db_path)
     gate = ps.read_gate_status("tk-moi-approved", db_path=db_path)
     assert gate["gate1"] == "APPROVE"
-    assert gate["execute"] == "RUN"
+    assert gate["execute"] == "Waiting"
+    assert [j["topic_key"] for j in qs.list_queue(db_path=db_path)] == ["tk-moi-approved"]
 
 
 def test_ingest_context_from_sheet_does_not_bootstrap_when_gate1_still_pending(board, db_path):
+    """Chưa duyệt -> Execute vẫn là "Waiting" (từ 2026-07-28 đây là MẶC ĐỊNH
+    của mọi dòng, không còn để rỗng) nhưng TUYỆT ĐỐI không có job nào — Waiting
+    nghĩa là "hệ thống đã thấy dòng này", KHÔNG phải "sắp chạy dòng này"."""
     board._tab("CONTEXT").set_rows([
         CONTEXT_HEADER,
         ["24/07/2026", "0.0", "0", "", "", "Bài chưa duyệt", "h", "u1", "PENDING", "", "", "", "", "tk-1"],
     ])
     ss.ingest_context_from_sheet(board, db_path=db_path)
     gate = ps.read_gate_status("tk-1", db_path=db_path)
-    assert "execute" not in gate   # KHÔNG bootstrap khi chưa duyệt
+    assert gate["execute"] == "Waiting"
+    assert qs.list_queue(db_path=db_path) == []
 
 
 # =============================================================================
@@ -605,14 +649,16 @@ def test_ingest_context_from_sheet_enqueues_job_for_new_topic_already_approved(b
     assert job is not None and job["status"] == "queued"
 
 
-def test_ingest_context_from_sheet_enqueues_job_on_needs_human_to_run_retry(board, db_path):
+def test_ingest_context_from_sheet_enqueues_job_on_reapprove_retry(board, db_path):
+    """Chạy lại sau NEEDS_HUMAN = Gate 1 chuyển PENDING -> APPROVE (thay khe
+    hẹp NEEDS_HUMAN->RUN đã bỏ khi Execute thành read-only, 2026-07-28)."""
     ps.write_raw("tk-1", {"context": "Bài 1", "hook": "h", "source": "u1",
                           "tickers": [], "group": "", "topic": ""}, db_path=db_path)
-    ps.write_gate_status("tk-1", gate1="APPROVE", execute="NEEDS_HUMAN", db_path=db_path)
+    ps.write_gate_status("tk-1", gate1="PENDING", execute="NEEDS_HUMAN", db_path=db_path)
 
     board._tab("CONTEXT").set_rows([
         CONTEXT_HEADER,
-        ["24/07/2026", "0.0", "0", "", "", "Bài 1", "h", "u1", "APPROVE", "", "RUN", "", "", "tk-1"],
+        ["24/07/2026", "0.0", "0", "", "", "Bài 1", "h", "u1", "APPROVE", "", "NEEDS_HUMAN", "", "", "tk-1"],
     ])
     ss.ingest_context_from_sheet(board, db_path=db_path)
 
@@ -633,19 +679,541 @@ def test_ingest_context_from_sheet_does_not_double_enqueue_across_two_ingest_run
     """Chạy ingest 2 LẦN liên tiếp trên CÙNG trạng thái Sheet (vd sync_all()
     gọi lặp, hay poll ngắn chạy xen giữa lúc worker CHƯA kịp claim job) -- lần
     2 KHÔNG được dồn thêm job trùng cho CÙNG topic_key. Idempotent vì 2 lớp:
-    (a) sync_service tự thấy execute đã "RUN" trong store nên KHÔNG re-trigger
-    transition NEEDS_HUMAN->RUN lần nữa; (b) NẾU có re-trigger (vd Sheet đổi
-    qua lại), enqueue() tự dedup — xem store/test_queue_store.py::
+    (a) enqueue chỉ chạy khi Gate 1 CHUYỂN TIẾP sang APPROVE — lần 2 store đã
+    ghi APPROVE nên không còn chuyển tiếp nào (đây là lý do đọc chuyển-tiếp
+    thay vì đọc trạng-thái: đọc trạng thái sẽ enqueue MỖI VÒNG POLL cho mọi
+    dòng đã duyệt); (b) NẾU có re-trigger (Sheet đổi qua lại), enqueue() tự
+    dedup — xem store/test_queue_store.py::
     test_enqueue_dedupes_when_already_queued_or_claimed."""
     ps.write_raw("tk-1", {"context": "Bài 1", "hook": "h", "source": "u1",
                           "tickers": [], "group": "", "topic": ""}, db_path=db_path)
-    ps.write_gate_status("tk-1", gate1="APPROVE", execute="NEEDS_HUMAN", db_path=db_path)
+    ps.write_gate_status("tk-1", gate1="PENDING", execute="NEEDS_HUMAN", db_path=db_path)
 
     board._tab("CONTEXT").set_rows([
         CONTEXT_HEADER,
-        ["24/07/2026", "0.0", "0", "", "", "Bài 1", "h", "u1", "APPROVE", "", "RUN", "", "", "tk-1"],
+        ["24/07/2026", "0.0", "0", "", "", "Bài 1", "h", "u1", "APPROVE", "", "NEEDS_HUMAN", "", "", "tk-1"],
     ])
     ss.ingest_context_from_sheet(board, db_path=db_path)
     ss.ingest_context_from_sheet(board, db_path=db_path)
 
     assert len(qs.list_queue(db_path=db_path)) == 1
+
+
+# =============================================================================
+# GATE 2 -> hàng đợi (2026-07-28, yêu cầu Lead: "Scheduler phải kiểm tra được
+# cả 3 trạng thái"). Gate 1 -> job "produce"; Gate 2 -> job "render_assets";
+# Gate 3 CỐ Ý không sinh job (vẫn PENDING chờ hệ thống hoàn thiện).
+# =============================================================================
+
+def _content_rows_with_gate2(gate2: str, gate3: str = "PENDING"):
+    return [
+        CONTENT_HEADER,
+        ["24/07/2026", "Bài 1", "infographic", "DONE", "{}", "", gate2, "tk-1", "[]", "",
+         "", gate3, ""],
+    ]
+
+
+def test_ingest_content_enqueues_render_assets_job_on_gate2_approve(board, db_path):
+    ps.write_raw("tk-1", {"context": "Bài 1"}, db_path=db_path)
+    ps.write_content_output("tk-1", "infographic", {"status": "DONE", "output": "{}",
+                                                    "notes": "", "facts": "[]"}, db_path=db_path)
+
+    board._tab("CONTENT").set_rows(_content_rows_with_gate2("APPROVE"))
+    ss.ingest_content_from_sheet(board, db_path=db_path)
+
+    jobs = qs.list_queue(db_path=db_path)
+    assert [(j["topic_key"], j["job_type"]) for j in jobs] == [("tk-1", "render_assets")]
+
+
+def test_ingest_content_does_not_enqueue_when_gate2_still_pending(board, db_path):
+    ps.write_raw("tk-1", {"context": "Bài 1"}, db_path=db_path)
+    ps.write_content_output("tk-1", "infographic", {"status": "DONE", "output": "{}",
+                                                    "notes": "", "facts": "[]"}, db_path=db_path)
+
+    board._tab("CONTENT").set_rows(_content_rows_with_gate2("PENDING"))
+    ss.ingest_content_from_sheet(board, db_path=db_path)
+    assert qs.list_queue(db_path=db_path) == []
+
+
+def test_ingest_content_does_not_double_enqueue_render_assets(board, db_path):
+    """CÙNG lý do Gate 1: bắt CHUYỂN TIẾP, không phải trạng thái -- nếu không,
+    mỗi vòng poll sẽ dồn thêm 1 job render (tốn tiền API ảnh thật)."""
+    ps.write_raw("tk-1", {"context": "Bài 1"}, db_path=db_path)
+    ps.write_content_output("tk-1", "infographic", {"status": "DONE", "output": "{}",
+                                                    "notes": "", "facts": "[]"}, db_path=db_path)
+
+    board._tab("CONTENT").set_rows(_content_rows_with_gate2("APPROVE"))
+    ss.ingest_content_from_sheet(board, db_path=db_path)
+    ss.ingest_content_from_sheet(board, db_path=db_path)
+    ss.ingest_content_from_sheet(board, db_path=db_path)
+
+    assert len(qs.list_queue(db_path=db_path)) == 1
+
+
+def test_ingest_content_gate3_approve_never_enqueues_any_job(board, db_path):
+    """Gate 3 vẫn là cổng NGƯỜI thuần (quyết định Lead: để PENDING chờ hệ
+    thống hoàn thiện) -- người bấm APPROVE ở Gate 3 chỉ được GHI vào store,
+    TUYỆT ĐỐI không kích hoạt tiến trình máy nào."""
+    ps.write_raw("tk-1", {"context": "Bài 1"}, db_path=db_path)
+    ps.write_content_output("tk-1", "infographic", {"status": "DONE", "output": "{}",
+                                                    "notes": "", "facts": "[]"}, db_path=db_path)
+    ps.write_content_status("tk-1", "infographic", gate2="APPROVE", db_path=db_path)
+
+    board._tab("CONTENT").set_rows(_content_rows_with_gate2("APPROVE", gate3="APPROVE"))
+    ss.ingest_content_from_sheet(board, db_path=db_path)
+
+    assert ps.read_content_status("tk-1", "infographic", db_path=db_path)["gate3"] == "APPROVE"
+    assert qs.list_queue(db_path=db_path) == []   # gate2 đã APPROVE từ trước -> không chuyển tiếp
+
+
+# =============================================================================
+# AssetPath — bug bắt được ở lượt e2e thật 2026-07-28: render_production_assets
+# ghi THẲNG ô Sheet, rồi queue_worker gọi render_content_to_sheet() vài giây
+# sau dựng lại tab từ store -> XOÁ SẠCH link vừa ghi. Ảnh render thành công
+# nhưng Gate 3 không có gì để bấm. Nay asset_url ĐI QUA STORE.
+# =============================================================================
+
+def test_render_content_to_sheet_shows_asset_hyperlink_from_store(board, db_path):
+    ps.write_raw("tk-1", {"context": "Bài 1"}, db_path=db_path)
+    ps.write_content_output("tk-1", "infographic", {"status": "DONE", "output": "{}",
+                                                    "notes": "", "facts": "[]"}, db_path=db_path)
+    ps.write_content_status("tk-1", "infographic", gate2="APPROVE",
+                            asset_url="http://127.0.0.1:8800/a/b_9x16.png",
+                            asset_local_path="D:/x/b_9x16.png", db_path=db_path)
+
+    ss.render_content_to_sheet(board, db_path=db_path)
+    grid = board._tab("CONTENT").get_all_values()
+    cell = grid[1][_header_index(grid[0], "AssetPath")]
+    assert cell == '=HYPERLINK("http://127.0.0.1:8800/a/b_9x16.png", "Mở file")'
+
+
+def test_render_content_to_sheet_survives_repeated_render_without_losing_asset(board, db_path):
+    """ĐÚNG kịch bản đã gãy: render lại NHIỀU LẦN (worker làm sau mỗi job)
+    KHÔNG được làm mất AssetPath."""
+    ps.write_raw("tk-1", {"context": "Bài 1"}, db_path=db_path)
+    ps.write_content_output("tk-1", "infographic", {"status": "DONE", "output": "{}",
+                                                    "notes": "", "facts": "[]"}, db_path=db_path)
+    ps.write_content_status("tk-1", "infographic", asset_url="http://h/x.png", db_path=db_path)
+
+    ss.render_content_to_sheet(board, db_path=db_path)
+    first = board._tab("CONTENT").get_all_values()
+    ss.ingest_content_from_sheet(board, db_path=db_path)
+    ss.render_content_to_sheet(board, db_path=db_path)
+    assert board._tab("CONTENT").get_all_values() == first
+
+
+def test_asset_cell_falls_back_to_local_path_then_empty():
+    assert ss._asset_cell({"asset_local_path": "D:/x.png"}) == "D:/x.png"
+    assert ss._asset_cell({}) == ""
+
+
+def test_asset_cell_matches_render_script_formula():
+    """2 lối ghi ô AssetPath (store->Sheet ở đây, và ghi thẳng ở
+    scripts/render_production_assets.py cho đường chạy tay) PHẢI cho ra CÙNG
+    chuỗi -- lệch nhau là ô nhấp nháy đổi giá trị mỗi lượt render."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_rpa", os.path.join(REPO_ROOT, "scripts", "render_production_assets.py"))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["_rpa"] = mod
+    spec.loader.exec_module(mod)
+
+    url = "http://127.0.0.1:8800/a/b.png"
+    assert ss._asset_cell({"asset_url": url}) == mod.asset_hyperlink_formula(url)
+
+
+# =============================================================================
+# REQUEST ID + HUỶ YÊU CẦU (2026-07-28, quyết định Lead)
+# =============================================================================
+
+def _ctx_row(gate1="APPROVE", output_type="", key="tk-1", execute=""):
+    return [CONTEXT_HEADER,
+            ["28/07/2026", "0.0", "0", "", "", "Bài 1", "h", "u1", gate1,
+             output_type, execute, "", "", key]]
+
+
+def test_cancel_pending_when_gate1_leaves_approve(board, db_path):
+    """Người RÚT duyệt -> job đang xếp hàng trở nên vô nghĩa (nó sẽ sinh nội
+    dung cho yêu cầu vừa bị bỏ). Phải huỷ, không để chạy."""
+    ps.write_raw("tk-1", {"context": "Bài 1"}, db_path=db_path)
+    ps.write_gate_status("tk-1", gate1="APPROVE", execute="Waiting", db_path=db_path)
+    qs.enqueue("tk-1", job_type="produce", db_path=db_path)
+
+    board._tab("CONTEXT").set_rows(_ctx_row(gate1="PENDING"))
+    ss.ingest_context_from_sheet(board, db_path=db_path)
+
+    jobs = qs.list_queue(db_path=db_path)
+    assert [j["status"] for j in jobs] == ["cancelled"]
+    assert ps.read_gate_status("tk-1", db_path=db_path)["execute"] == "Waiting"
+
+
+def test_change_output_type_cancels_old_request_and_creates_new(board, db_path):
+    """Đổi Output Type = huỷ yêu cầu CŨ + tạo yêu cầu MỚI (request_id khác)."""
+    ps.write_raw("tk-1", {"context": "Bài 1"}, db_path=db_path)
+    ps.write_gate_status("tk-1", gate1="APPROVE", output_type=["Article"],
+                         execute="DONE", db_path=db_path)
+    qs.enqueue("tk-1", job_type="produce", request_id="req-cu", db_path=db_path)
+
+    board._tab("CONTEXT").set_rows(_ctx_row(output_type="Infographic"))
+    ss.ingest_context_from_sheet(board, db_path=db_path)
+
+    jobs = qs.list_queue(db_path=db_path)
+    old = [j for j in jobs if j["request_id"] == "req-cu"]
+    new = [j for j in jobs if j["request_id"] != "req-cu"]
+    assert old and old[0]["status"] == "cancelled"
+    assert new and new[0]["status"] == "queued"
+    assert ps.read_gate_status("tk-1", db_path=db_path)["execute"] == "Waiting"
+
+
+def test_running_job_locks_out_user_changes(board, db_path):
+    """Job 'claimed' -> BỎ QUA mọi thay đổi người vừa gõ. Nhận yêu cầu chồng
+    lên việc đang làm dở chỉ đẻ trạng thái mâu thuẫn."""
+    ps.write_raw("tk-1", {"context": "Bài 1"}, db_path=db_path)
+    ps.write_gate_status("tk-1", gate1="APPROVE", output_type=["Article"],
+                         execute="Running...", db_path=db_path)
+    qs.enqueue("tk-1", job_type="produce", db_path=db_path)
+    qs.claim_next("w1", db_path=db_path)          # -> claimed
+
+    board._tab("CONTEXT").set_rows(_ctx_row(gate1="REJECT", output_type="Video"))
+    ss.ingest_context_from_sheet(board, db_path=db_path)
+
+    g = ps.read_gate_status("tk-1", db_path=db_path)
+    assert g["gate1"] == "APPROVE"                 # KHÔNG nhận REJECT
+    assert g["output_type"] == ["Article"]         # KHÔNG nhận Video
+    assert [j["status"] for j in qs.list_queue(db_path=db_path)] == ["claimed"]
+
+
+def test_cancel_render_job_when_gate2_leaves_approve(board, db_path):
+    """Rút Gate 2 -> huỷ job render. Quan trọng hơn Gate 1 vì render TỐN TIỀN
+    THẬT (ảnh gpt-image-2, hoặc cả lượt dựng video)."""
+    ps.write_raw("tk-1", {"context": "Bài 1"}, db_path=db_path)
+    ps.write_content_output("tk-1", "infographic", {"status": "DONE", "output": "{}",
+                                                    "notes": "", "facts": "[]"}, db_path=db_path)
+    ps.write_content_status("tk-1", "infographic", gate2="APPROVE", db_path=db_path)
+    qs.enqueue("tk-1", job_type="render_assets", db_path=db_path)
+
+    board._tab("CONTENT").set_rows([
+        CONTENT_HEADER,
+        ["28/07/2026", "Bài 1", "infographic", "DONE", "{}", "", "PENDING", "tk-1", "[]", "",
+         "", "PENDING", ""],
+    ])
+    ss.ingest_content_from_sheet(board, db_path=db_path)
+    assert [j["status"] for j in qs.list_queue(db_path=db_path)] == ["cancelled"]
+
+
+def test_cancel_pending_never_touches_running_job(db_path):
+    """Job 'claimed' KHÔNG bị huỷ (quyết định Lead): giết giữa chừng 1 lượt gọi
+    LLM/render là nguồn bug khó truy — cứ để chạy hết, không đạt thì chạy lại."""
+    qs.enqueue("tk-1", job_type="produce", db_path=db_path)
+    qs.claim_next("w1", db_path=db_path)
+    assert qs.cancel_pending("tk-1", db_path=db_path) == 0
+    assert [j["status"] for j in qs.list_queue(db_path=db_path)] == ["claimed"]
+
+
+def test_reconcile_recovers_lost_transition(board, db_path):
+    """BUG THẬT 2026-07-29: store ghi gate1=APPROVE xong thì tiến trình CHẾT
+    trước khi enqueue (worker crash vì DB thiếu cột). Chuyển tiếp đã bị TIÊU
+    THỤ nên không lần ingest nào cứu được — topic nằm im ở Waiting mãi mãi."""
+    ps.write_raw("tk-1", {"context": "Bài 1"}, db_path=db_path)
+    ps.write_gate_status("tk-1", gate1="APPROVE", execute="Waiting",
+                         output_type=["Video"], db_path=db_path)
+    assert qs.list_queue(db_path=db_path) == []          # đúng trạng thái kẹt
+
+    assert ss.reconcile_pending_requests(db_path=db_path) == 1
+    jobs = qs.list_queue(db_path=db_path)
+    assert [(j["topic_key"], j["status"]) for j in jobs] == [("tk-1", "queued")]
+
+
+def test_reconcile_does_not_resurrect_finished_or_queued_work(board, db_path):
+    """Không được dựng lại việc ĐÃ XONG hoặc ĐANG chờ — nếu không, mỗi vòng
+    poll sẽ đẻ thêm job cho mọi topic đã duyệt."""
+    ps.write_raw("done", {"context": "A"}, db_path=db_path)
+    ps.write_gate_status("done", gate1="APPROVE", execute="DONE", db_path=db_path)
+    ps.write_raw("pending-gate", {"context": "B"}, db_path=db_path)
+    ps.write_gate_status("pending-gate", gate1="PENDING", execute="Waiting", db_path=db_path)
+    ps.write_raw("co-job", {"context": "C"}, db_path=db_path)
+    ps.write_gate_status("co-job", gate1="APPROVE", execute="Waiting", db_path=db_path)
+    qs.enqueue("co-job", job_type="produce", db_path=db_path)
+
+    assert ss.reconcile_pending_requests(db_path=db_path) == 0
+    assert len(qs.list_queue(db_path=db_path)) == 1
+
+
+def test_render_preserves_original_timestamp_not_today(board, db_path):
+    """BUG THẬT (Lead báo 2026-07-29): render KHÔNG truyền `ts` -> context_row
+    lấy now() -> MỖI LƯỢT RENDER ghi đè Timestamp thành hôm nay. Mọi dòng crawl
+    28/07 hoá 29/07, mất hẳn khả năng phân biệt tin theo ngày."""
+    ps.write_raw("tk-1", {"context": "Bài cũ", "timestamp": "28/07/2026"}, db_path=db_path)
+    ps.write_gate_status("tk-1", gate1="PENDING", db_path=db_path)
+    ps.write_content_output("tk-1", "article", {"status": "DONE", "output": "x",
+                                                "notes": "", "facts": "[]",
+                                                "timestamp": "28/07/2026"}, db_path=db_path)
+
+    ss.render_context_to_sheet(board, db_path=db_path)
+    ss.render_content_to_sheet(board, db_path=db_path)
+
+    ctx = board._tab("CONTEXT").get_all_values()
+    assert ctx[1][_header_index(ctx[0], "Timestamp")] == "28/07/2026"
+    con = board._tab("CONTENT").get_all_values()
+    assert con[1][_header_index(con[0], "Timestamp")] == "28/07/2026"
+
+
+def test_ingest_stores_sheet_timestamp_for_new_topic(board, db_path):
+    """Timestamp gốc do review_to_sheet.py ghi lúc crawl phải đi VÀO store,
+    ghi 1 lần rồi bất biến."""
+    board._tab("CONTEXT").set_rows([
+        CONTEXT_HEADER,
+        ["28/07/2026", "0.0", "0", "", "", "Bài mới", "h", "u1", "PENDING", "", "", "", "", "tk-new"],
+    ])
+    ss.ingest_context_from_sheet(board, db_path=db_path)
+    assert ps.read_raw("tk-new", db_path=db_path)["timestamp"] == "28/07/2026"
+
+
+# =============================================================================
+# KHÔI PHỤC 100% (2026-07-29, yêu cầu Lead): "DB là nguồn dữ liệu đầy đủ tin
+# cậy, có thể khôi phục 100% cho Sheet UI khi cần." Test kiểm nghiệm ĐÚNG kịch
+# bản Lead nêu: xoá sạch bảng -> dựng lại -> phải GIỐNG HỆT từng ô.
+# =============================================================================
+
+def _seed_full_state(db_path):
+    """Dựng 1 trạng thái ĐẦY ĐỦ mọi loại dữ liệu người + máy."""
+    ps.write_raw("tk-a", {"context": "Bài A", "hook": "hook A", "source": "https://cafef.vn/a.chn",
+                          "tickers": ["FPT", "ACB"], "group": "CoPhieu", "topic": "CoPhieu",
+                          "score": 7, "hot_pct": 62.0, "timestamp": "28/07/2026"}, db_path=db_path)
+    ps.write_gate_status("tk-a", gate1="APPROVE", execute="DONE", notes="ghi chú người",
+                         output_type=["Article", "Infographic"], db_path=db_path)
+    ps.write_content_output("tk-a", "article", {"status": "DONE", "output": "x" * 3000,
+                                                "notes": "", "facts": "[]",
+                                                "timestamp": "29/07/2026",
+                                                "published_at": "28/07/2026"}, db_path=db_path)
+    ps.write_content_status("tk-a", "article", gate2="APPROVE", gate3="APPROVE",
+                            social_link="https://fb.com/p/1", posting_status="Đã đăng",
+                            asset_url="https://drive.google.com/file/d/X/view", db_path=db_path)
+    ps.write_content_output("tk-a", "infographic", {"status": "SKIPPED", "output": "",
+                                                    "notes": "router từ chối", "facts": "[]",
+                                                    "timestamp": "29/07/2026"}, db_path=db_path)
+    ps.write_content_status("tk-a", "infographic", gate2="PENDING", db_path=db_path)
+
+    ps.write_raw("tk-b", {"context": "Bài B", "hook": "hook B", "source": "https://vietstock.vn/b",
+                          "tickers": [], "group": "ChinhSach", "topic": "ChinhSach",
+                          "score": 3, "hot_pct": 20.0, "timestamp": "29/07/2026"}, db_path=db_path)
+    ps.write_gate_status("tk-b", gate1="PENDING", execute="Waiting", db_path=db_path)
+
+
+def test_full_restore_after_wiping_both_tabs(board, db_path):
+    """KỊCH BẢN LEAD: xoá TOÀN BỘ dữ liệu 2 tab -> render lại từ store -> phải
+    khớp TỪNG Ô với trước khi xoá. Đây là thước đo "DB đủ tin cậy": bất kỳ
+    trường nào chỉ sống trên Sheet mà không vào store sẽ làm test này đỏ."""
+    _seed_full_state(db_path)
+    ss.render_context_to_sheet(board, db_path=db_path)
+    ss.render_content_to_sheet(board, db_path=db_path)
+    before_ctx = board._tab("CONTEXT").get_all_values()
+    before_con = board._tab("CONTENT").get_all_values()
+
+    # Người xoá sạch (giữ mỗi header) — mô phỏng sự cố thật.
+    board._tab("CONTEXT").set_rows([CONTEXT_HEADER])
+    board._tab("CONTENT").set_rows([CONTENT_HEADER])
+
+    ss.render_context_to_sheet(board, db_path=db_path)
+    ss.render_content_to_sheet(board, db_path=db_path)
+
+    assert board._tab("CONTEXT").get_all_values() == before_ctx
+    assert board._tab("CONTENT").get_all_values() == before_con
+
+
+def test_restore_keeps_every_user_owned_field(board, db_path):
+    """Soi TỪNG cột NGƯỜI-SỞ-HỮU sau khôi phục — đây là nhóm dễ mất nhất vì
+    máy không tự sinh lại được: mất là mất vĩnh viễn."""
+    _seed_full_state(db_path)
+    board._tab("CONTEXT").set_rows([CONTEXT_HEADER])
+    board._tab("CONTENT").set_rows([CONTENT_HEADER])
+    ss.render_context_to_sheet(board, db_path=db_path)
+    ss.render_content_to_sheet(board, db_path=db_path)
+
+    ctx = board._tab("CONTEXT").get_all_values()
+    row_a = next(r for r in ctx[1:] if r[_header_index(ctx[0], "TopicKey")] == "tk-a")
+    assert row_a[_header_index(ctx[0], GATE1_COL)] == "APPROVE"
+    assert row_a[_header_index(ctx[0], "Notes")] == "ghi chú người"
+    assert row_a[_header_index(ctx[0], OUTPUT_TYPE_COL)] == "Article, Infographic"
+    assert row_a[_header_index(ctx[0], "Timestamp")] == "28/07/2026"
+
+    con = board._tab("CONTENT").get_all_values()
+    art = next(r for r in con[1:] if r[_header_index(con[0], "Type")] == "article")
+    assert art[_header_index(con[0], GATE2_COL)] == "APPROVE"
+    assert art[_header_index(con[0], GATE3_COL)] == "APPROVE"
+    assert art[_header_index(con[0], "Social Link")] == "https://fb.com/p/1"
+    assert art[_header_index(con[0], "Posting Status")] == "Đã đăng"
+    assert "drive.google.com" in art[_header_index(con[0], "AssetPath")]
+    # Ngày XỬ LÝ hiển thị ở cột Timestamp (KHÁC ngày đăng — 2 mốc tách bạch).
+    assert art[_header_index(con[0], "Timestamp")] == "29/07/2026"
+
+
+def test_store_keeps_both_publish_and_produce_dates(db_path):
+    """Hai mốc thời gian phải cùng tồn tại trong DB (quyết định Lead
+    2026-07-29): trùng nhau khi crawl+xử lý cùng ngày, KHÁC khi người duyệt
+    sản xuất vào ngày sau. Chỉ lưu 1 mốc là mất khả năng phân biệt."""
+    _seed_full_state(db_path)
+    rec = ps.read_content_output("tk-a", "article", db_path=db_path)
+    assert rec["timestamp"] == "29/07/2026"       # ngày xử lý
+    assert rec["published_at"] == "28/07/2026"    # ngày đăng bài gốc
+    assert rec["timestamp"] != rec["published_at"]
+
+
+def test_restore_is_idempotent_across_repeated_renders(board, db_path):
+    """Render nhiều lần liên tiếp KHÔNG được làm trôi giá trị nào (đây chính
+    là bug Timestamp 2026-07-29: mỗi lượt render ghi đè ngày thành hôm nay)."""
+    _seed_full_state(db_path)
+    ss.render_context_to_sheet(board, db_path=db_path)
+    first = board._tab("CONTEXT").get_all_values()
+    for _ in range(3):
+        ss.render_context_to_sheet(board, db_path=db_path)
+    assert board._tab("CONTEXT").get_all_values() == first
+
+
+# =============================================================================
+# XOÁ CHỦ ĐỀ — Gate 1 = "DELETE" (2026-07-29, quyết định Lead)
+# =============================================================================
+
+def test_gate1_delete_removes_topic_from_db_and_sheet(board, db_path):
+    """DELETE = xoá HẲN khỏi DB; dòng tự biến mất khỏi Sheet ở lượt render kế
+    tiếp vì store không còn dữ liệu. KHÔNG hoàn tác được."""
+    ps.write_raw("tk-xoa", {"context": "Bài bỏ", "timestamp": "29/07/2026"}, db_path=db_path)
+    ps.write_gate_status("tk-xoa", gate1="APPROVE", execute="DONE", db_path=db_path)
+    ps.write_content_output("tk-xoa", "article", {"status": "DONE", "output": "x",
+                                                  "notes": "", "facts": "[]"}, db_path=db_path)
+    ps.write_raw("tk-giu", {"context": "Bài giữ", "timestamp": "29/07/2026"}, db_path=db_path)
+    ps.write_gate_status("tk-giu", gate1="PENDING", db_path=db_path)
+
+    board._tab("CONTEXT").set_rows([
+        CONTEXT_HEADER,
+        ["29/07/2026", "0", "0", "", "", "Bài bỏ", "h", "u", "DELETE", "", "", "", "", "tk-xoa"],
+        ["29/07/2026", "0", "0", "", "", "Bài giữ", "h", "u", "PENDING", "", "", "", "", "tk-giu"],
+    ])
+    ss.ingest_context_from_sheet(board, db_path=db_path)
+
+    assert ps.read_raw("tk-xoa", db_path=db_path) is None
+    assert ps.read_content_output("tk-xoa", "article", db_path=db_path) is None
+    assert ps.read_raw("tk-giu", db_path=db_path) is not None   # KHÔNG đụng chủ đề khác
+
+    ss.render_context_to_sheet(board, db_path=db_path)
+    grid = board._tab("CONTEXT").get_all_values()
+    keys = [r[_header_index(grid[0], "TopicKey")] for r in grid[1:]]
+    assert keys == ["tk-giu"]
+
+
+def test_gate1_delete_cancels_pending_jobs(board, db_path):
+    """Xoá chủ đề -> job chờ của nó phải bị huỷ, không được chạy tiếp."""
+    ps.write_raw("tk-1", {"context": "A"}, db_path=db_path)
+    ps.write_gate_status("tk-1", gate1="APPROVE", db_path=db_path)
+    qs.enqueue("tk-1", job_type="produce", db_path=db_path)
+
+    board._tab("CONTEXT").set_rows([
+        CONTEXT_HEADER,
+        ["29/07/2026", "0", "0", "", "", "A", "h", "u", "DELETE", "", "", "", "", "tk-1"],
+    ])
+    ss.ingest_context_from_sheet(board, db_path=db_path)
+    # delete_topic xoá luôn hàng đợi của topic -> không còn job nào sót lại.
+    assert qs.list_queue(db_path=db_path) == []
+
+
+def test_gate1_delete_on_new_topic_does_not_create_it(board, db_path):
+    """Người gõ DELETE cho dòng crawl mới (chưa vào store) -> KHÔNG được nạp
+    vào store rồi mới xoá; phải bỏ qua hẳn."""
+    board._tab("CONTEXT").set_rows([
+        CONTEXT_HEADER,
+        ["29/07/2026", "0", "0", "", "", "Bài mới", "h", "u", "DELETE", "", "", "", "", "tk-moi"],
+    ])
+    ss.ingest_context_from_sheet(board, db_path=db_path)
+    assert ps.read_raw("tk-moi", db_path=db_path) is None
+
+
+def test_delete_topic_requires_key_and_leaves_others(db_path):
+    ps.write_raw("a", {"context": "A"}, db_path=db_path)
+    ps.write_raw("b", {"context": "B"}, db_path=db_path)
+    assert ds.delete_topic("a", db_path=db_path) >= 1
+    assert ps.read_raw("a", db_path=db_path) is None
+    assert ps.read_raw("b", db_path=db_path) is not None
+    try:
+        ds.delete_topic("  ", db_path=db_path)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("topic_key rỗng phải raise ValueError")
+
+
+def test_delete_removes_sheet_row_immediately_bottom_up(board, db_path):
+    """Realtime (2026-07-29): xoá dòng NGAY, và xoá TỪ DƯỚI LÊN — xoá dòng
+    trên trước làm mọi chỉ số dưới nó dịch lên 1, các lần xoá sau nhắm sai
+    dòng (lỗi kinh điển khi xoá theo chỉ số)."""
+    deleted = []
+    board.delete_row = lambda tab, row: deleted.append((tab, row))
+    for k in ("tk-1", "tk-2", "tk-3"):
+        ps.write_raw(k, {"context": k}, db_path=db_path)
+        ps.write_gate_status(k, gate1="PENDING", db_path=db_path)
+
+    board._tab("CONTEXT").set_rows([
+        CONTEXT_HEADER,
+        ["29/07/2026", "0", "0", "", "", "1", "h", "u", "DELETE", "", "", "", "", "tk-1"],
+        ["29/07/2026", "0", "0", "", "", "2", "h", "u", "PENDING", "", "", "", "", "tk-2"],
+        ["29/07/2026", "0", "0", "", "", "3", "h", "u", "DELETE", "", "", "", "", "tk-3"],
+    ])
+    ss.ingest_context_from_sheet(board, db_path=db_path)
+
+    assert deleted == [("CONTEXT", 4), ("CONTEXT", 2)]   # dưới lên, KHÔNG phải 2 rồi 4
+    assert ps.read_raw("tk-2", db_path=db_path) is not None
+
+
+def test_render_never_clears_whole_tab(board, db_path):
+    """CỐT LÕI 2026-07-29: `clear()` xoá CẢ ĐỊNH DẠNG -> băng màu và thiết lập
+    người dựng tay bay sau MỖI lượt render. Khoá lại: render KHÔNG được gọi
+    clear() trên cả tab."""
+    called = []
+    ws = board._tab("CONTEXT")
+    ws.clear = lambda: called.append("clear")
+    ps.write_raw("tk-1", {"context": "A", "timestamp": "29/07/2026"}, db_path=db_path)
+    ps.write_gate_status("tk-1", gate1="PENDING", db_path=db_path)
+
+    ss.render_context_to_sheet(board, db_path=db_path)
+    assert called == [], "render KHÔNG được clear() cả tab (mất định dạng)"
+
+
+def test_context_rows_sorted_into_day_blocks_newest_at_bottom(board, db_path):
+    """Quy ước Lead: khối NGÀY liền nhau, và ngày MỚI NHẤT nằm DƯỚI CÙNG —
+    người vận hành cuộn xuống cuối là thấy việc hôm nay, dòng mới không đẩy
+    dòng cũ trôi chỗ."""
+    from datetime import date, timedelta
+    d0 = date.today()
+    d1 = d0 - timedelta(days=1)
+    older, newer = d1.strftime("%d/%m/%Y"), d0.strftime("%d/%m/%Y")
+    for k, day, hot in (("a", older, 10.0), ("b", newer, 5.0),
+                        ("c", older, 90.0), ("d", newer, 99.0)):
+        ps.write_raw(k, {"context": k, "timestamp": day, "hot_pct": hot}, db_path=db_path)
+        ps.write_gate_status(k, gate1="PENDING", db_path=db_path)
+
+    ss.render_context_to_sheet(board, db_path=db_path)
+    grid = board._tab("CONTEXT").get_all_values()
+    i_ts = _header_index(grid[0], "Timestamp")
+    assert [r[i_ts] for r in grid[1:]] == [older, older, newer, newer]
+
+
+def test_context_hides_rows_older_than_display_days(board, db_path):
+    """Sheet là BẢNG LÀM VIỆC: chỉ hiện `sheets.display_days` ngày gần nhất.
+    Dòng cũ VẪN nằm nguyên trong DB — không xoá gì, chỉ không hiển thị."""
+    from datetime import date, timedelta
+    from twmkt.config import Settings as _S
+    today = date.today()
+    for k, delta in (("moi", 0), ("cu", 30)):
+        d = (today - timedelta(days=delta)).strftime("%d/%m/%Y")
+        ps.write_raw(k, {"context": k, "timestamp": d}, db_path=db_path)
+        ps.write_gate_status(k, gate1="PENDING", db_path=db_path)
+
+    ss.render_context_to_sheet(board, db_path=db_path, settings=_S({"sheets": {"display_days": 7}}))
+    grid = board._tab("CONTEXT").get_all_values()
+    keys = [r[_header_index(grid[0], "TopicKey")] for r in grid[1:]]
+    assert keys == ["moi"]
+    assert ps.read_raw("cu", db_path=db_path) is not None      # DB giữ nguyên
+
+    # display_days=0 -> hiện tất cả (đường thoát soi lịch sử)
+    ss.render_context_to_sheet(board, db_path=db_path, settings=_S({"sheets": {"display_days": 0}}))
+    grid = board._tab("CONTEXT").get_all_values()
+    assert len(grid) - 1 == 2

@@ -200,3 +200,55 @@ def test_list_queue_filters_by_status(db_path):
     queued_rows = qs.list_queue(status="queued", db_path=db_path)
     assert [r["topic_key"] for r in done_rows] == ["tk-1"]
     assert [r["topic_key"] for r in queued_rows] == ["tk-2"]
+
+
+def test_init_db_migrates_old_execution_queue_adding_request_id(tmp_path):
+    """BUG THẬT 2026-07-29: schema.sql dùng `CREATE TABLE IF NOT EXISTS`, nên
+    thêm cột vào file schema KHÔNG có tác dụng với DB ĐÃ TỒN TẠI — worker chết
+    ngay vòng poll đầu với `no such column: request_id`. Trên VPS ai cũng có DB
+    cũ nên đây là ca THƯỜNG. Migration phải: thêm cột, cho phép 'cancelled',
+    và GIỮ NGUYÊN dữ liệu cũ (lịch sử job là thứ để truy vết)."""
+    import sqlite3
+    from store import document_store as ds
+
+    db = tmp_path / "old.db"
+    # Dựng bảng theo schema CŨ (không có request_id, CHECK không có 'cancelled').
+    con = sqlite3.connect(str(db))
+    con.executescript("""
+        CREATE TABLE execution_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            topic_key TEXT NOT NULL, job_type TEXT NOT NULL DEFAULT 'produce',
+            status TEXT NOT NULL DEFAULT 'queued'
+                CHECK (status IN ('queued','claimed','done','failed')),
+            requested_at TEXT NOT NULL, claimed_at TEXT, claimed_by TEXT,
+            finished_at TEXT, attempt_count INTEGER NOT NULL DEFAULT 0,
+            error TEXT, payload_json TEXT NOT NULL DEFAULT '{}');
+        INSERT INTO execution_queue (topic_key, status, requested_at)
+        VALUES ('tk-cu', 'done', '2026-07-01T00:00:00+00:00');
+    """)
+    con.commit(); con.close()
+
+    ds.init_db(db)
+
+    con = sqlite3.connect(str(db))
+    cols = {r[1] for r in con.execute("PRAGMA table_info(execution_queue)")}
+    assert "request_id" in cols
+    # Dữ liệu cũ KHÔNG được mất khi nâng cấp.
+    assert con.execute("SELECT topic_key FROM execution_queue").fetchone()[0] == "tk-cu"
+    # CHECK mới cho phép 'cancelled' (bảng cũ sẽ raise IntegrityError ở đây).
+    con.execute("INSERT INTO execution_queue (topic_key, status, requested_at) "
+                "VALUES ('tk-2','cancelled','2026-07-29T00:00:00+00:00')")
+    con.commit(); con.close()
+
+
+def test_init_db_migration_is_idempotent(tmp_path):
+    """Gọi lại nhiều lần KHÔNG dựng lại bảng/mất dữ liệu — init_db chạy mỗi
+    lượt khởi động worker."""
+    from store import document_store as ds
+
+    db = tmp_path / "x.db"
+    ds.init_db(db)
+    qs.enqueue("tk-1", request_id="r1", db_path=db)
+    ds.init_db(db); ds.init_db(db)
+    jobs = qs.list_queue(db_path=db)
+    assert len(jobs) == 1 and jobs[0]["request_id"] == "r1"

@@ -61,7 +61,39 @@ storage:
   # máy dev không cần phục vụ HTTP suốt 24/7. BẬT (true) khi triển khai VPS
   # để chạy full service chỉ bằng `python system_power_on.py`, không cần
   # lệnh tay `scripts/serve_assets.py` riêng.
-  asset_server_enabled: false
+  # BẬT 2026-07-28 (quyết định Lead — hệ thống đã chạy trên VPS): đúng kịch
+  # bản mà cờ này được viết sẵn cho. `python system_power_on.py` giờ tự khởi
+  # động asset server cùng 2 lịch crawl/draft, không cần lệnh tay
+  # `scripts/serve_assets.py` nữa.
+  # LƯU Ý CỔNG: đừng chạy ĐỒNG THỜI system_power_on.py và serve_assets.py —
+  # cả hai bind cùng cổng 8898, cái sau sẽ chết vì "address in use".
+  asset_server_enabled: true
+
+# --- Google Drive: nơi lưu SẢN PHẨM CUỐI + nguồn link AssetPath công khai ----
+# (2026-07-28, quyết định Lead) Thay link asset server cục bộ
+# (http://127.0.0.1:8898/... — CHỈ mở được trên chính máy render, vô dụng khi
+# người duyệt Gate 3 ngồi máy khác). Xem src/twmkt/publishers/drive_store.py.
+#
+# folder_id = phần sau /folders/ trong URL thư mục Drive. Thư mục này do LEAD
+# sở hữu và ĐÃ share quyền Editor cho Service Account (client_email trong
+# sheets.creds_path) — bắt buộc, vì service account KHÔNG có quota Drive riêng
+# nên không thể tự tạo thư mục của chính nó. Đổi thư mục = sửa ĐÚNG dòng này,
+# không đụng code.
+# Cây thư mục tự tạo bên trong: <loại nội dung>/<dd-mm-yyyy>/<tên chủ đề>/
+drive:
+  enabled: true
+  folder_id: "1_qkIxDKeBgfBPwmMj7MBY7ktJmetxOiJ"
+  # XÁC THỰC = OAuth NGƯỜI DÙNG, KHÔNG phải Service Account. Kiểm chứng thật
+  # 2026-07-28: SA tạo được thư mục nhưng upload FILE vào My Drive thì Google
+  # chặn cứng ("Service Accounts do not have storage quota") — share Editor
+  # cho SA KHÔNG gỡ được. Shared Drive gỡ được nhưng cần Workspace trả phí.
+  # Uỷ quyền 1 lần: python scripts/drive_authorize.py (xem docstring script đó).
+  oauth_client_path: "secrets/oauth_client.json"   # tải từ GCP Console, gitignored
+  oauth_token_path: "secrets/drive_token.json"     # script sinh ra, gitignored
+  # true = đặt quyền `anyone`/`reader` lên TỪNG FILE: ai có link đều xem/tải
+  # được, không ai ngoài Owner+SA sửa/xoá được. Đặt trên file chứ KHÔNG trên
+  # thư mục — chia sẻ 1 ảnh không kéo theo lộ cả kho.
+  make_public: true
 
 # --- Brand kit render Infographic (src/twmkt/render/infographic.py, $0 tất định) --
 # Đổi màu/font/kích thước ở ĐÂY, KHÔNG sửa code. SVG thuần (không phụ thuộc
@@ -292,6 +324,17 @@ sources:
 crawl:
   engine: "http"                  # http (httpx+bs4, $0) | crawl4ai (fallback JS)
   limit_per_source: 12
+  # --- Lọc theo NGÀY ĐĂNG (2026-07-28, yêu cầu Lead) ------------------------
+  # Trang chuyên mục liệt kê cả tin cũ, mà trước đây không có bộ lọc ngày nào
+  # -> mẻ crawl 28/07 lẫn bài đăng 12/06 và chiều 27/07. Xem
+  # scripts/review_to_sheet.py::filter_by_freshness() +
+  # collectors/http_collector.py::extract_published_at().
+  # 36h (không phải 24h): tin đăng chiều/tối hôm trước vẫn còn giá trị khi
+  # crawl sáng hôm sau; 24h cứng sẽ cắt mất đúng khung đó.
+  max_age_hours: 36               # 0 = TẮT lọc (crawl bù dữ liệu cũ)
+  # Bài nguồn KHÔNG khai ngày đăng: true = GIỮ (mặc định, thà lọt bài cũ còn
+  # hơn âm thầm đánh rơi tin nóng — còn Gate 1 chặn phía sau). false = LOẠI.
+  keep_undated: true
   http_first: true                # thử HTTP tĩnh trước, fallback Playwright
   respect_robots: true
   rate_limit_s: 1.5
@@ -566,13 +609,17 @@ sheets:
   # Ưu tiên biến môi trường nếu đặt; nếu không, dùng giá trị dưới đây.
   spreadsheet_id: "157b9WY9cpgLvzNP2TH8loN-6AiEy6YXmGpFdObYhNwo"
   creds_path: "secrets/sa.json"        # forward slash chạy cả Windows/Linux
+  # Sheet là BẢNG LÀM VIỆC, không phải kho (quy ước Lead): chỉ hiển thị N ngày
+  # gần nhất; dữ liệu cũ hơn CHỈ nằm trong DB, KHÔNG bị xoá. Đổi số này rồi
+  # render lại là dòng cũ hiện lại ngay. 0 = hiện tất cả (soi lịch sử).
+  display_days: 7
   # RÀO CHẮN MÔI TRƯỜNG (Content Factory Phase D) — sheet RIÊNG cho benchmark/
   # A-B/thử nghiệm (Phase 3 trở đi), TÁCH KHỎI spreadsheet_id (production) ở
   # trên. config.resolve_sheet_id(settings, allow_production=...) MẶC ĐỊNH LUÔN
   # đọc key này (hoặc ENV TWMKT_TEST_SHEET_ID) — KHÔNG BAO GIỜ ngầm định lùi về
   # spreadsheet_id production dù đã set sẵn trong môi trường. Tạo 1 Google Sheet
   # TEST riêng (khác hẳn Sheet production ở trên) rồi điền ID vào đây/ENV.
-  test_spreadsheet_id: ""
+  test_spreadsheet_id: "14ltfeUgsq7m27Q5oEIu05YGH8h8bQ0Oeuyrx6WhbLMo"
   # Sheet UI cleanup Phase 5 — Sheet VẬN HÀNH RIÊNG cho tab backup/archive
   # (*_backup_*), TÁCH KHỎI spreadsheet_id (production) — KHÔNG phải "db"
   # (TopicKey Document Store chưa xây). Người vận hành tự tạo + share quyền
@@ -664,7 +711,12 @@ production:
 # Claude Code file-drop) — hàng đợi execution_queue thay cờ Execute đơn thuần,
 # xem docstring store/queue_store.py.
 queue:
-  poll_interval_s: 3               # nghỉ giữa 2 lượt poll khi hàng đợi rỗng
+  # 2026-07-28 (agent-B đo, Lead chốt): 3s -> 20s. Mỗi vòng poll đọc 2 tab
+  # Sheet (ingest CONTEXT + CONTENT) nên 3s = ~40 read/phút khi hàng đợi RỖNG,
+  # trong khi hạn mức Google Sheets API là 60 read/phút/user — gần cạn quota
+  # chỉ để chờ không, không còn chỗ cho crawl/render/script tay. 20s = ~6
+  # read/phút, vẫn cho độ trễ tệ nhất 20s (so với 30 PHÚT của schedule_draft cũ).
+  poll_interval_s: 20              # nghỉ giữa 2 lượt poll khi hàng đợi rỗng
   lease_timeout_s: 600             # 10 phút — claim quá hạn coi là worker chết, tự giải phóng (C8)
   max_attempts: 3                  # số lần requeue tối đa trước khi đánh failed hẳn
 
@@ -675,4 +727,17 @@ queue:
 # hoặc set ENV. Repo AIGEN chính thức = github.com/trieuvan-s/aigen-pipeline
 # (aigen-fva-capital ĐÃ CHẾT, không còn dùng — xem docs/VPS_MIGRATION_BACKLOG.md A3).
 media_factory:
+  # 2026-07-28: thư mục local ĐÃ ĐỔI TÊN LẠI "aigen" -> "aigen-pipeline" cho
+  # khớp tên repo GitHub + tên thư mục dữ liệu (marketing-database/
+  # aigen-pipeline/). Trước đó config trỏ "../aigen-pipeline" trong khi thư mục
+  # thật tên "../aigen" -> seam sẽ raise AigenRepoPathNotFoundError ngay lần
+  # gọi thật đầu tiên; chưa ai phát hiện vì CHƯA CÓ CALLER THẬT nào.
   aigen_repo_path: "../aigen-pipeline"
+  # Kho dữ liệu của aigen (job dir: <đây>/<topic_key>/ chứa content-output.json
+  # + script.json + video.mp4). PHẢI khớp `dataRoot` trong
+  # aigen-pipeline/config/paths.config.json — 2 repo cùng kho chung nhưng mỗi
+  # repo 1 thư mục con riêng, không ghi đè nhau.
+  aigen_data_root: "../marketing-database/aigen-pipeline"
+  # Render video (TTS + ffmpeg + Chrome) chậm hơn ảnh RẤT nhiều; lần đầu còn
+  # cộng thêm tới 180s nạp model TTS lên GPU. 1800s = 30 phút.
+  video_timeout_s: 1800
