@@ -7,6 +7,14 @@
 > Lịch sử quyết định: `PROJECT_HANDOFF_P5.md`. Bản đồ code: `docs/MODULE_INDEX.md`.
 > Quy tắc bất biến: `CLAUDE.md`. Nợ dài hạn: `docs/VPS_MIGRATION_BACKLOG.md`.
 
+**MỤC LỤC** — §1 trạng thái · §2 nhánh · §3 việc đã làm · §4 nợ của
+marketing-automation · **§4B nợ của aigen-pipeline** · **§4C luồng nối 2 repo +
+trạng thái test** · §5 hạ tầng · §6 lệnh hay dùng · §7 nguyên tắc.
+
+> Bổ sung 2026-07-30: bản đầu chỉ viết từ góc nhìn marketing-automation. §4B và
+> §4C được thêm vì thiếu 2 thứ đó thì người tiếp nhận PHẢI mò: nợ riêng của
+> aigen, và cách 2 repo nối vào nhau.
+
 ---
 
 ## 1. TRẠNG THÁI — HỆ THỐNG ĐÃ THÔNG TOÀN BỘ
@@ -255,6 +263,235 @@ xong **không dẫn tới hành động nào** — đúng thiết kế giai đo�
   Nhớ `-u` (unbuffered) — thiếu nó log im lặng hoàn toàn.
 - **Quota Sheets API 60 read/phút** là ràng buộc thật. `poll_interval_s` đã hạ
   3s → 20s. Đừng chạy `test_sheet_ui.py` khi worker đang chạy — tranh quota.
+
+---
+
+---
+
+## 4B. NỢ RIÊNG CỦA `aigen-pipeline`
+
+> Bổ sung 2026-07-30 — bản đầu của bàn giao viết từ góc nhìn
+> marketing-automation, nợ của aigen gần như vắng mặt. Người tiếp nhận đọc CẢ
+> mục 4 và 4B.
+
+### 4B.1. Ô "chrome" chưa có ngữ nghĩa biên tập — video ra thiếu khung
+
+`scene-builder` đổ `payload` (từ vựng TRUNG LẬP VENDOR) vào `slots` (từ vựng
+TEMPLATE). `withChromeSlots()` đã lấp được `brand` (từ `outro.brand_name`) và
+`kicker` (từ `output.source`) — MAP từ dữ liệu ĐÃ CÓ, không bịa.
+
+CÒN TRỐNG, cần **quyết định BIÊN TẬP** chứ không phải kỹ thuật:
+`eyebrow` · `side_left` · `side_right` · `badge` · `footer_left` ·
+`footer_right` · `author_role` · `subline` · `tag` · `tagline`.
+
+Hệ quả: video ra đúng nội dung nhưng **thiếu chrome** (khung trang trí, nhãn
+phụ). Không chặn render vì `required:false` đã hạ cho ô thuần trang trí.
+
+⚠️ `TEMPLATE_SLOTS` **KHÔNG đồng nhất giữa các template**:
+`frame-market-ticker` không có `kicker`; `frame-news-lower-third` không có
+`brand`; chỉ `frame-liquid-bg-hero` và `frame-quote-pull` có đủ cả hai. Kiểm
+`TEMPLATE_SLOTS[templateId]` trước khi sửa `withChromeSlots` —
+`fillSlotDefaults()` sẽ DROP field ngoài slot set của template (hợp đồng đã có,
+không phải bug).
+
+### 4B.2. Guardrail số — 3 việc treo chờ quyết định
+
+Chi tiết đầy đủ: `marketing-automation/tasks/ACTIVE_TASK.md` §V2/V3/R3. Tóm
+tắt để không phải tra:
+
+- **V2 — word-scan trước voice là bề mặt dương-tính-giả.** `checkText()` luôn
+  chạy CẢ 2 lối (chữ số + số-viết-bằng-chữ). Đứng TRƯỚC `voice`, narration đúng
+  hợp đồng là dạng chữ số, nên lối word-scan chỉ còn tạo oan ("Quý **hai năm**
+  nay" → parse thành 2 → chặn oan). Tắt nó thì bài nào Composer viết sai sẽ lọt
+  hoàn toàn không bị kiểm. Nên làm V1 (chặn contract violation ở đầu nguồn)
+  trước, rồi mới tắt an tâm.
+- **V3 — số TRẦN không đơn vị KHÔNG được soi.** `_DIGIT_MAGNITUDE_RE` chỉ bắt
+  số CÓ đơn vị (`%|tỷ|triệu|đồng|usd`). Nên "2021"/"2030" trần không bị kiểm.
+  Đây là tính chất CÓ SẴN từ lâu, không phải hồi quy. Siết thì phải sửa **ĐỒNG
+  BỘ 2 REPO**.
+- **R3 — delta chéo câu bị từ chối ĐÚNG chức năng.** `_find_shared_sentence`
+  đòi from/to CÙNG 1 câu (chống bịa). Bài "công ty lỗ" có 2 số ở 2 câu liền kề
+  nên không ghép được thành delta → Composer dùng số ngoài facts → guardrail
+  chặn cấp (a). Cần quyết 1 trong 3: sửa PROMPT Brief emit thêm scalar / chấp
+  nhận chặn / nới `_find_shared_sentence` (rủi ro chống-bịa, KHÔNG khuyến nghị).
+
+⚠️ **LUẬT CỨNG: sửa bất kỳ logic số/guardrail nào PHẢI sửa ĐỒNG BỘ CẢ 2 REPO**
+(`media_factory/numbers.py` Python + `production-spec/guardrail/verify-spec.ts`
+TS), test 2 bên cùng lượt. Đã có tiền lệ: lỗi "linh" và lỗi tokenize dấu câu
+đều phải vá đồng bộ.
+
+### 4B.3. Cạm bẫy template đã thành tài liệu — ĐỌC TRƯỚC KHI SỬA RENDER
+
+`docs/ADAPTER_UNDOCUMENTED_QUIRKS.md` — 10 mục, đều là bẫy đã trả giá:
+
+1. Key `inputs` sai/gõ nhầm **thất bại IM LẶNG** — foot-gun số 1
+2. Bỏ trống key có thể làm hiện **copy DEMO baked-in**, không phải ô trắng
+3. `cta` trên `frame-liquid-bg-hero` là ghost slot chỉ có ở 16:9
+4. `frame-logo-outro` từng chỉ có 3 slot — không có disclaimer
+5. Template danh sách **cắt ở 5 mục, im lặng**
+6. `frame-icon-list.title` cần khoảng trắng cuối, thiếu là chữ dính nhau
+7. `voiceText` normalize là **2 cơ chế khác nhau, KHÔNG tự kết hợp**
+8. Forecast/comparison cần chọn "không có winner" tường minh
+9. **Brand KHÔNG data-driven** — nhiều template hardcode mark FVA
+10. Giới hạn ký tự slot là thật nhưng **mềm** — chỉ adapter cảnh báo
+
+Mục 10 đang gây hệ quả thấy được — cảnh báo THẬT lúc chạy (xem
+`tasks/ACTIVE_TASK.md` dòng ~238): `primary_url` **67 ký tự / giới hạn CATALOG
+40**, `hero` **17-30 / giới hạn 10**. Chữ có thể tràn hoặc bị cắt trên khung
+hình. Cần MẮT NGƯỜI xem video xác nhận có tràn thật không, rồi siết PROMPT
+Composer bên marketing-automation — KHÔNG vá renderer.
+
+### 4B.4. Nợ nhỏ
+
+- **82 assert test `production-spec` chưa ai đọc từng dòng** xem có expect viết
+  sai theo (nợ từ PHA 3).
+- **HeyGen avatar**: `visual_kind="avatar"` nằm TRONG `VISUAL_KINDS` nhưng cũng
+  trong `DEFERRED_VISUAL_KINDS` — chưa nguồn nào sinh. Đề xuất ở
+  `docs/AVATAR_HEYGEN_PROPOSAL.md`.
+- **`speechLayer: "off"`** trong `config/tts.config.json` — tầng fvb (normalizer
+  Python, bảng 108 mục viết tay) KHÔNG chạy trong đường aigen. Đây là lý do
+  phải sinh `pronunciation_dict.vi.json`. Nếu sau này BẬT speechLayer thì xem
+  lại kẻo phiên âm bị xử lý 2 lần.
+- **Video ngắn** (30s, 4 scene): render KHÔNG cắt gì — Composer viết ngắn
+  (narration 254 ký tự tổng). Muốn dài hơn thì siết prompt Composer bên
+  marketing-automation, KHÔNG sửa aigen.
+
+---
+
+## 4C. LUỒNG NỐI 2 REPO — CHỈ DẪN KỸ THUẬT
+
+> Bổ sung 2026-07-30. Đây là phần dễ mò mẫm nhất: 2 repo, 2 ngôn ngữ, 2 kho dữ
+> liệu, và nhiều tên gọi TRÙNG NHAU.
+
+### 4C.1. Hợp đồng: `CONTENT.Output`
+
+Ranh giới DUY NHẤT giữa 2 repo. Đặc tả: `docs/CONTENT_OUTPUT_SCHEMA.md` —
+**tồn tại GIỐNG HỆT ở CẢ HAI repo**, sửa phải đồng bộ.
+
+marketing-automation (Python) **sinh**; aigen (TypeScript) **biến thành video**.
+Không có kênh nào khác: aigen KHÔNG đọc Sheet, KHÔNG đọc SQLite store.
+
+⚠️ File bàn giao này chỉ nằm trong repo **marketing-automation**. Người tiếp
+nhận mà mở repo aigen trước sẽ KHÔNG thấy nó — nếu nhận việc bên aigen, đọc
+`../marketing-automation/tasks/HANDOFF_2026-07-29_MVP.md` (mục §4B, §4C) trước
+khi sửa gì ở `src/production-spec/`.
+
+### 4C.2. Chuỗi gọi đầy đủ
+
+```
+[marketing-automation]
+scripts/render_production_assets.py::render_video_one()
+  |- doc CONTENT.Output NGUYEN VAN tu store: ps.read_content_output(tk,"video")
+  |- ghi ra  <aigen_data_root>/<topic_key>/content-output.json
+  |- media_factory/aigen_seam.py::run_aigen_pipeline(co_path)
+        |- subprocess: npm run produce:content -- <co_path>   (cwd = aigen repo)
+
+[aigen-pipeline]
+scripts/produce-from-content-output.ts
+  |- buildTemplateScriptFromContentOutput()      <-- ADAPTER DAY DU
+  |     scene-builder -> withDisclaimerOnOutro -> verifySpecScenes (guardrail-2)
+  |     -> normalizeScenes(dictionary) (voice) -> withChromeSlots -> adapter -> Zod
+  |- ghi  <dir>/script.json    (TemplateScript, giu lai de soi khi loi)
+  |- prepareTts()   <-- TU bat OmniVoice neu chua song (spawn warm, cho /health 180s)
+  |- runTemplatePipeline(script.json)
+        |- Chrome capture -> ffmpeg encode -> concat + mux
+
+Ket qua trong CUNG thu muc:
+  content-output.json - script.json - script.txt - voice.mp3 - clips/ - video.mp4
+
+[quay lai marketing-automation]
+  |- ps.write_content_status(tk,"video", asset_local_path=...)
+  |- drive.upload(video.mp4) -> asset_url
+  |- render_content_to_sheet() -> AssetPath = link Drive
+```
+
+### 4C.3. HAI CONFIG PHẢI KHỚP NHAU
+
+| Repo | Khoá | Giá trị |
+|---|---|---|
+| marketing-automation | `media_factory.aigen_repo_path` | `../aigen-pipeline` |
+| marketing-automation | `media_factory.aigen_data_root` | `../marketing-database/aigen-pipeline` |
+| aigen-pipeline | `config/paths.config.json::dataRoot` | `../marketing-database/aigen-pipeline` |
+
+**Hai dòng `dataRoot` lệch nhau là hỏng IM LẶNG**: Python ghi
+`content-output.json` một chỗ, aigen suy `outputDir` chỗ khác. Đã có tiền lệ
+thật: `aigen_repo_path` trỏ `../aigen-pipeline` trong khi thư mục thật tên
+`../aigen` → seam raise ngay lần gọi thật đầu tiên, và **chưa ai phát hiện vì
+chưa có caller thật nào**.
+
+### 4C.4. LỖI Ở TẦNG NÀO — cách phân biệt
+
+Đây là thứ tiết kiệm nhiều thời gian nhất khi debug:
+
+| Thông báo | Tầng | Nghĩa |
+|---|---|---|
+| `GuardrailViolationError` + danh sách violation | guardrail-2 | Số trong scene KHÔNG khớp `facts[]`. **ĐÚNG chức năng** (chặn bịa số), KHÔNG phải lỗi tích hợp |
+| `AliasGuardrailViolation: voiceText contains real ticker "XXX"` | alias-guardrail | Mã chưa có phiên âm → chạy `python scripts/gen_ticker_aliases.py` |
+| Zod error từ `TemplateScriptSchema.parse()` | adapter | Slot thiếu/sai tên — xem `required-slot-fields.ts` |
+| `OmniVoice server did not become healthy within 180 s` | TTS | Đọc `aigen-pipeline/output/omnivoice-server.log`. Đã gặp: venv trỏ base python sai sau khi đổi tên thư mục |
+| `FileNotFoundError` khi gọi npm | seam | `npm` là shim `.cmd` trên Windows — đã vá bằng `shutil.which`, nhưng PATH của tiến trình NỀN có thể khác terminal |
+| exit 0 nhưng không thấy `video.mp4` | seam | Đã có kiểm riêng — không tin exit code một mình |
+
+### 4C.5. BẪY TÊN TRÙNG — đã gây hiểu lầm nghiêm trọng 1 lần
+
+| Trùng chữ | Phân biệt |
+|---|---|
+| `aigen-pipeline/src/production-spec/` (TS) | **CÂY CẦU THẬT, đang chạy. GIỮ** |
+| `marketing-automation/media_factory/spec.py::ProductionSpec` (Python) | **ĐÃ XOÁ** 2026-07-29 (bản bị thay thế) |
+| `npm run pipeline` | nhận `TemplateScript` ĐÃ chuyển đổi, KHÔNG tự bật TTS |
+| `npm run produce` | nhận `TemplateScript`, CÓ tự bật TTS |
+| **`npm run produce:content`** | nhận **`CONTENT.Output`** + adapter + tự bật TTS ← **CỔNG ĐÚNG** |
+| `marketing-database/marketing-automation/` | kho của repo Python |
+| `marketing-database/aigen-pipeline/` | kho của repo TS (job dir video) |
+
+Lead từng phải dừng lại hỏi *"bạn có thực sự hiểu kiến trúc?"* vì agent lẫn 2
+dòng đầu. Luôn nêu ĐƯỜNG DẪN FILE ĐẦY ĐỦ khi nói về class/module có thể trùng
+tên.
+
+### 4C.6. Chạy thử luồng video KHÔNG cần Sheet
+
+```bash
+# 1. Lay CONTENT.Output cua 1 topic da co trong store
+cd marketing-automation
+python -c "import sys; sys.path.insert(0,'src'); sys.path.insert(0,'.'); from store import pipeline_store as ps; from pathlib import Path; tk='<topic_key>'; d=Path('../marketing-database/aigen-pipeline')/tk; d.mkdir(parents=True, exist_ok=True); (d/'content-output.json').write_text(ps.read_content_output(tk,'video')['output'], encoding='utf-8'); print(d)"
+
+# 2. CHI dung TemplateScript (KHONG render) — kiem guardrail nhanh, khong ton GPU
+cd ../aigen-pipeline
+npx tsx scripts/_e2e_real_build.ts <topic_key>
+
+# 3. Render day du ra .mp4 (tu bat OmniVoice)
+npm run produce:content -- --job <topic_key>
+```
+
+Bước 2 là cách RẺ NHẤT để biết guardrail-2 / alias-guardrail có chặn không —
+không phải chờ TTS nạp model lên GPU (~180s lần đầu).
+
+### 4C.7. RANH GIỚI CHO CHẾ ĐỘ MULTI-AGENT
+
+Để 2 agent không đạp nhau:
+
+| Vùng | Chủ | Ghi chú |
+|---|---|---|
+| `collectors/` `curation/` `agents/` (Brief/Router/Composer) | agent nội dung | Gói rules §4.1 nằm ở đây |
+| `sheets_board.py` `store/` `scripts/queue_worker.py` | agent hạ tầng Sheet/queue | Vùng dễ gây MẤT DỮ LIỆU NGƯỜI |
+| `render/ai_full.py` `render/brand_stamp.py` `config/brand.yaml` | agent infographic | Nhánh `feature/infographic-polish` |
+| `aigen-pipeline/src/render/` `src/adapter/` | agent video | 79/79 test adapter, đừng phá |
+| `media_factory/numbers.py` + `production-spec/guardrail/` | **CẦN 2 AGENT PHỐI HỢP** | Luật cứng: sửa đồng bộ 2 repo cùng lượt |
+
+**Luồng B** (`orchestrator.py`, `demo.py`, `agents/{researcher,hook,producers}.py`,
+`approval/`, `knowledge/rag.py`) — offline demo/legacy, **KHÔNG dùng sản xuất,
+KHÔNG gọi lẫn** với Luồng A. Đừng gộp 2 luồng khi sửa bug/thêm tính năng.
+
+### 4C.8. TRẠNG THÁI TEST — CHẠY THẾ NÀO
+
+| Suite | Số | Lệnh | Lưu ý |
+|---|---|---|---|
+| marketing-automation | **675 pass** | `python -m pytest -q` | Chạy từ **GỐC repo**, không phải `src/`. Cần `pillow` + `fastapi` (xem `requirements.txt` + `api/requirements-webhook.txt`) |
+| aigen-pipeline | **244 pass** | `npx vitest run` | kèm `npx tsc --noEmit` |
+| Sheet UI (Sheet THẬT) | **13 pass** | `python scripts/test_sheet_ui.py` | Chạy trên Sheet TEST riêng, tự reset. **Dừng worker trước** — tranh quota Sheets |
+
+⚠️ Ba suite này **không bắt được** lỗi chỉ xuất hiện khi chạy thật với LLM/API
+ảnh/TTS thật. 13 bug đợt 29/07 đều lộ ra theo đường đó. Xem §7.
 
 ---
 
