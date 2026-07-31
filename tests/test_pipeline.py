@@ -7245,8 +7245,13 @@ def test_content_writer_rules_no_longer_bans_tickers_in_voice_over():
     """
     from twmkt.agents.production import _load_content_writer_rules
 
-    rules = _load_content_writer_rules(sections=("2", "4"))
-    assert rules, "không đọc được content_writer_rules.md"
+    # settings=Settings({}) TƯỜNG MINH -- cô lập khỏi config/settings.yaml THẬT
+    # (từ Phase A, file đó đã set `writer.content_rules_path` cho mode "full",
+    # cùng KEY này cũng là override của `_load_content_writer_rules` -- không
+    # cô lập sẽ đọc NHẦM path v3.4 rồi cắt §2/§4 kiểu legacy trên file không
+    # cùng cấu trúc mục, cho kết quả rỗng/sai).
+    rules = _load_content_writer_rules(sections=("2", "4"), settings=Settings({}))
+    assert rules, "không đọc được content_rules_v1.0.md"
     assert "Voice-over CẤM dùng mã chứng khoán" not in rules, (
         "§4.5 vẫn còn luật cũ nguyên văn — sẽ ghi đè hợp đồng narration mới"
     )
@@ -7256,7 +7261,7 @@ def test_content_writer_rules_no_longer_bans_tickers_in_voice_over():
 def test_content_writer_rules_section_re_accepts_both_heading_levels_no_false_match():
     """1.2 — loader cắt mục phải nhận CẢ `# N.` LẪN `## N.`.
 
-    Vì sao: `content_writer_rules.md` dùng `#`, `longform_content_writing_rules.md`
+    Vì sao: `content_rules_v1.0.md` dùng `#`, `long_content_rules.md`
     dùng `##`. Regex cũ (`^# `) khớp 0 mục trên file longform -> loader trả ""
     ÂM THẦM (rule không bao giờ được áp, KHÔNG cảnh báo) — đúng lớp lỗi hỏng-im-lặng.
 
@@ -7279,7 +7284,7 @@ def test_content_writer_rules_section_re_no_regression_on_existing_file():
     from twmkt.agents.production import _CONTENT_WRITER_RULES_SECTION_RE as NEW
 
     old = re.compile(r"(?m)^# (\d+)\. ")
-    text = Path("prompts/content_writer_rules.md").read_text(encoding="utf-8")
+    text = Path("prompts/content_rules_v1.0.md").read_text(encoding="utf-8")
     assert [(m.group(1), m.start()) for m in old.finditer(text)] == \
            [(m.group(1), m.start()) for m in NEW.finditer(text)]
 
@@ -7291,7 +7296,7 @@ def test_longform_rules_file_present_in_repo_and_sectionable():
     from pathlib import Path
     from twmkt.agents.production import _CONTENT_WRITER_RULES_SECTION_RE as RE
 
-    p = Path("prompts/longform_content_writing_rules.md")
+    p = Path("prompts/long_content_rules.md")
     assert p.exists(), "thiếu bản copy trong repo"
     text = p.read_text(encoding="utf-8")
     assert "NGUỒN: content-rules/" in text, "thiếu khối ghi nguồn + ngày"
@@ -7304,8 +7309,8 @@ def test_composer_rules_v21_copy_present_and_sectionable():
     from pathlib import Path
     from twmkt.agents.production import _CONTENT_WRITER_RULES_SECTION_RE as RE
 
-    p = Path("prompts/content_composer_rules_v2_1.md")
-    assert p.exists(), "thiếu bản copy content_composer_rules_v2_1.md trong repo"
+    p = Path("prompts/content-rules-v2.1.md")
+    assert p.exists(), "thiếu bản copy content-rules-v2.1.md trong repo"
     text = p.read_text(encoding="utf-8")
     assert "NGUỒN: content-rules/CONTENT_COMPOSER_RULES_v2.1.md" in text
     assert "- Hệ thống đóng dấu nguồn và disclaimer tất định" in text   # BƯỚC 0: §3.4 đã sửa
@@ -7320,12 +7325,19 @@ def test_load_composer_rules_defaults_to_v21_and_selects_correct_product_section
     """BƯỚC 1.1/1.4 — mặc định profile v21, mỗi content_type nhận ĐÚNG phần
     §7.N của mình (article->7.1, video->7.2, infographic->7.3), core §1-6
     dùng CHUNG. KHÔNG lẫn phần loại khác (vd video không dính "Article và
-    Long-form Article" của §7.1)."""
+    Long-form Article" của §7.1).
+
+    settings=Settings({"writer": {"rules_load_mode": "legacy_sections"}}) TƯỜNG
+    MINH -- test này khoá hành vi nhánh legacy_sections/v21 CŨ (TRƯỚC Phase A),
+    phải cô lập khỏi config/settings.yaml THẬT (nay mặc định mode "full" cho
+    sản xuất, xem test_load_composer_rules_full_mode_reads_v34_verbatim_no_
+    section_cut) -- không cô lập sẽ vô tình test nhầm nhánh full."""
     from twmkt.agents.production import _load_composer_rules
 
-    article = _load_composer_rules("article")
-    video = _load_composer_rules("video")
-    infographic = _load_composer_rules("infographic")
+    s = Settings({"writer": {"rules_load_mode": "legacy_sections"}})
+    article = _load_composer_rules("article", settings=s)
+    video = _load_composer_rules("video", settings=s)
+    infographic = _load_composer_rules("infographic", settings=s)
 
     for r in (article, video, infographic):
         assert "## 1. Mục tiêu" in r   # core §1 dùng chung
@@ -7368,10 +7380,207 @@ def test_load_composer_rules_profile_switch_and_explicit_override_wins():
 
     # Override tường minh THẮNG mọi profile (kể cả v21 mặc định) — tương thích
     # test cũ trỏ file tạm qua content_rules_path.
-    s_override = Settings({"writer": {"content_rules_path": "prompts/content_writer_rules.md",
+    s_override = Settings({"writer": {"content_rules_path": "prompts/content_rules_v1.0.md",
                                       "rules_profile": "v21"}})
     assert _load_composer_rules("article", settings=s_override) == \
            _load_content_writer_rules(sections=("2", "3"), settings=s_override)
+
+
+# ==== PHASE A (rules loader v3+, 2026-07-3x) — A6 test list =================
+
+def test_load_composer_rules_full_mode_reads_v34_verbatim_no_section_cut():
+    """A1/A2 — mode "full" nạp NGUYÊN VĂN content-rules-daily-v3.4.md, KHÔNG
+    cắt theo mục (khác hẳn nhánh legacy_sections cắt §N riêng theo
+    content_type). Cả 3 content_type nhận CÙNG 1 văn bản NGUYÊN VẸN — so khớp
+    ĐÚNG BẰNG nội dung đọc trực tiếp từ đĩa (rstrip), không suy luận qua độ dài
+    hay 1 câu con."""
+    from pathlib import Path
+    from twmkt.agents.production import _load_composer_rules
+
+    settings = Settings({"writer": {"rules_load_mode": "full"}})
+    raw = Path("prompts/content-rules-daily-v3.4.md").read_text(encoding="utf-8").rstrip()
+    assert raw, "file rules v3.4 rỗng -- không test được tính verbatim"
+    for content_type in ("article", "video", "infographic"):
+        assert _load_composer_rules(content_type, settings=settings) == raw
+
+
+def test_load_composer_rules_legacy_mode_explicit_matches_unset_default():
+    """A2 — set `rules_load_mode: legacy_sections` TƯỜNG MINH phải cho kết quả
+    HỆT khi KHÔNG set gì (Settings({})) -- "legacy_sections" là mặc định CODE
+    khi thiếu key này (tương thích ngược tuyệt đối với pipeline đang chạy
+    TRƯỚC Phase A, vốn không biết khái niệm rules_load_mode)."""
+    from twmkt.agents.production import _load_composer_rules
+
+    s_legacy = Settings({"writer": {"rules_load_mode": "legacy_sections"}})
+    s_unset = Settings({})
+    for content_type in ("article", "video", "infographic"):
+        assert _load_composer_rules(content_type, settings=s_legacy) == \
+               _load_composer_rules(content_type, settings=s_unset)
+    assert "### 7.2. Video Script" in _load_composer_rules("video", settings=s_legacy)
+
+
+def test_load_composer_rules_full_mode_missing_file_returns_empty():
+    """LÙI MƯỢT -- file rules chỉ định (mode=full) không tồn tại -> "" (agent
+    vẫn chạy bằng persona/schema gốc, KHÔNG crash), cùng nếp mọi nhánh
+    legacy_sections khác trong hàm này."""
+    from twmkt.agents.production import _load_composer_rules
+
+    settings = Settings({"writer": {"rules_load_mode": "full",
+                                    "content_rules_path": "prompts/khong-ton-tai-xyz-test.md"}})
+    assert _load_composer_rules("article", settings=settings) == ""
+
+
+def test_full_mode_composer_prompt_embeds_rules_exactly_once(tmp_path):
+    """A6 -- "full-mode prompt chứa ĐÚNG 1 file rules": dựng 1 file rules tạm
+    có 1 chuỗi đánh dấu DUY NHẤT, gán qua `agent.rules_settings` (per-request,
+    A5, CÙNG NẾP `agent.model = ...`), xác nhận system prompt Composer chứa
+    chuỗi đó ĐÚNG 1 LẦN -- không lặp (không lẫn cả bản full lẫn 1 bản cắt
+    legacy nào khác cùng lúc)."""
+    import json as _json
+    from twmkt.agents.production import AnalysisWriterAgent, ProductionBrief
+
+    marker = "MARKER-RULES-V34-UNIQUE-773311"
+    rules_file = tmp_path / "rules_full.md"
+    rules_file.write_text(f"# Rules test\n{marker}\nNội dung rules.\n", encoding="utf-8")
+
+    class _SpyLLM:
+        last_system = ""
+
+        def complete(self, system, prompt, **kwargs):
+            self.last_system = system
+            return _json.dumps({
+                "title": "t", "sapo": "s",
+                "sections": [{"heading": "h", "content": "Doanh thu tăng 40%."}],
+                "disclaimer": "d", "sources": [],
+            }, ensure_ascii=False)
+
+    llm = _SpyLLM()
+    agent = AnalysisWriterAgent(llm)
+    agent.rules_settings = Settings({"writer": {
+        "rules_load_mode": "full", "content_rules_path": str(rules_file),
+    }})
+    brief = ProductionBrief(title="t", hook="h", evidence="Doanh thu tăng 40%.")
+    agent.run(brief)
+    assert llm.last_system.count(marker) == 1
+
+
+def test_video_agent_accepts_per_request_rules_settings(tmp_path):
+    """A5 -- premise gốc của task ("Video đang thiếu rules_settings riêng,
+    Article/Infographic ĐÃ CÓ") ĐÃ XÁC NHẬN LÀ SAI (grep+đọc call site TRƯỚC
+    Phase A: cả 3 đều gọi `_load_composer_rules(content_type)` KHÔNG settings)
+    -- test này khoá hành vi ĐÃ THÊM ĐỒNG NHẤT cho cả 3, không riêng Video."""
+    import json as _json
+    from twmkt.agents.production import VideoScriptAgent, ProductionBrief
+
+    marker = "MARKER-VIDEO-RULES-991122"
+    rules_file = tmp_path / "video_rules.md"
+    rules_file.write_text(f"# Rules\n{marker}\n", encoding="utf-8")
+
+    class _SpyLLM:
+        last_system = ""
+
+        def complete(self, system, prompt, **kwargs):
+            self.last_system = system
+            return _json.dumps({
+                "schema_version": 1, "title": "t",
+                "scenes": [
+                    {"role": "hook", "visual_kind": "statement",
+                     "payload": {"hero": "x", "desc": ""}, "narration": "x"},
+                    {"role": "body", "visual_kind": "statement",
+                     "payload": {"hero": "y", "desc": ""}, "narration": "y"},
+                    {"role": "outro", "visual_kind": "outro",
+                     "payload": {"brand_name": "FVA Capital", "cta": "c"}, "narration": "c"},
+                ],
+                "source": "ignored", "disclaimer": "d",
+            }, ensure_ascii=False)
+
+    llm = _SpyLLM()
+    brief = ProductionBrief(title="t", hook="h", evidence="Doanh thu tăng 40%.")
+
+    agent = VideoScriptAgent(llm)
+    agent.rules_settings = Settings({"writer": {
+        "rules_load_mode": "full", "content_rules_path": str(rules_file),
+    }})
+    agent.run(brief)
+    assert marker in llm.last_system
+
+    # KHÔNG set rules_settings (None mặc định) -> lùi về settings TOÀN CỤC,
+    # KHÔNG thấy marker file tạm (chứng minh set/không-set THẬT SỰ khác nhau).
+    agent2 = VideoScriptAgent(llm)
+    agent2.run(brief)
+    assert marker not in llm.last_system
+
+
+def test_infographic_agent_accepts_per_request_rules_settings(tmp_path):
+    """A5 -- InfographicSpecAgent (composer LLM Loại B) cũng nhận rules_settings
+    riêng mỗi request, đồng nhất với Article/Video."""
+    import json as _json
+    from twmkt.agents.production import InfographicSpecAgent, ProductionBrief
+
+    marker = "MARKER-INFOGRAPHIC-RULES-334455"
+    rules_file = tmp_path / "info_rules.md"
+    rules_file.write_text(f"# Rules\n{marker}\n", encoding="utf-8")
+
+    class _SpyLLM:
+        last_system = ""
+
+        def complete(self, system, prompt, **kwargs):
+            self.last_system = system
+            return _json.dumps({
+                "title": "FPT lãi kỷ lục", "subtitle": "Tăng trưởng vượt kỳ vọng",
+                "hero": [{"label": "Tăng trưởng doanh thu", "value": "+40%"}],
+                "market": [], "highlights": ["x"], "related": [],
+                "priority": {"primary": [], "secondary": [], "minor": []},
+                "source": "ignored",
+                "render_hint": {"ratio": "1:1"},
+            }, ensure_ascii=False)
+
+    llm = _SpyLLM()
+    brief = ProductionBrief(title="t", hook="h", tickers=["FPT"],
+                            url="https://cafef.vn/x.chn",
+                            evidence="Doanh thu tăng 40%.",
+                            facts=_infographic_test_facts())
+
+    agent = InfographicSpecAgent(llm)
+    agent.rules_settings = Settings({"writer": {
+        "rules_load_mode": "full", "content_rules_path": str(rules_file),
+    }})
+    agent.run(brief)
+    assert marker in llm.last_system
+
+    agent2 = InfographicSpecAgent(llm)
+    agent2.run(brief)
+    assert marker not in llm.last_system
+
+
+def test_append_rules_run_state_writes_sha256_json_and_swallows_io_error(tmp_path, monkeypatch, capsys):
+    """A4 -- ghi 1 dòng JSONL {ts, content_type, path, sha256, mode} vào
+    state/rules_run_log.jsonl mỗi lần nạp rules THÀNH CÔNG (truy vết bài nào
+    dùng bản rules nào). Lỗi ghi (OSError -- đĩa đầy/quyền...) KHÔNG được văng
+    ra ngoài làm hỏng sản xuất -- nuốt, chỉ cảnh báo console (cùng triết lý LÙI
+    MƯỢT xuyên suốt module này)."""
+    import json as _json
+    from pathlib import Path
+    from twmkt.agents.production import _append_rules_run_state, _sha256_text
+
+    settings = Settings({"storage": {"data_root": str(tmp_path)}})
+    text = "nội dung rules test"
+    sha = _sha256_text(text)
+    _append_rules_run_state(content_type="article", path=Path("prompts/x.md"),
+                            sha256=sha, mode="full", settings=settings)
+    log_path = tmp_path / "state" / "rules_run_log.jsonl"
+    assert log_path.exists()
+    entry = _json.loads(log_path.read_text(encoding="utf-8").strip().splitlines()[-1])
+    assert entry["sha256"] == sha
+    assert entry["content_type"] == "article"
+    assert entry["mode"] == "full"
+
+    def _boom(*a, **k):
+        raise OSError("disk full (giả lập)")
+    monkeypatch.setattr("twmkt.agents.production.data_path", _boom)
+    _append_rules_run_state(content_type="article", path=Path("prompts/x.md"),
+                            sha256=sha, mode="full", settings=settings)
+    assert "rules_run_log" in capsys.readouterr().out
 
 
 def test_match_source_by_domain_and_fetch_full_evidence_fallback():
