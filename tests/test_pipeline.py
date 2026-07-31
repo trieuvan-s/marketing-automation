@@ -3908,13 +3908,15 @@ def test_run_infographic_composer_swaps_to_route_llm_and_flags_needs_human_when_
 
 
 def test_run_infographic_skipped_when_no_numeric_content_true_article_still_produced():
-    """Phase 4.12 Mục B (rỗng-HỢP-LỆ), tái dùng làm ca BẤT ĐỒNG router/brief
-    (Phase 4.13 Mục A item 3): router (rỗng ở test này) fallback -> channels
-    default article/infographic/video=True (channels.infographic=True), NHƯNG
-    Brief tự xác nhận no_numeric_content=true (content_units=[] hợp lệ, tin thuần định
-    tính) -> router "tưởng" có số nhưng Brief đọc kỹ hơn thấy không có ->
-    infographic SKIPPED (KHÔNG gọi composer, KHÔNG phải ERROR/NEEDS_HUMAN, Notes
-    nêu lý do bất đồng), article vẫn sinh bình thường (chế độ định tính),
+    """Phase 4.12 Mục B (rỗng-HỢP-LỆ) — BƯỚC 4.4 (Router, 31/07) đã THAY cơ
+    chế phát hiện: router (rỗng ở test này) fallback -> channels default
+    article/infographic/video=True, NHƯNG brief_result.has_numeric_units=False
+    (content_units=[] hợp lệ, tin thuần định tính, no_numeric_content=true) ->
+    format_mismatch_channels ép infographic=False NGAY TỪ ĐẦU (trước khi vào
+    vòng lặp agent, KHÔNG còn nhánh "router/brief bất đồng" cũ — đã XOÁ vì
+    thành code chết, xem produce_from_sheet.py comment tại chỗ) -> infographic
+    SKIPPED (KHÔNG gọi composer, KHÔNG phải ERROR/NEEDS_HUMAN, Notes mã
+    FORMAT_MISMATCH), article vẫn sinh bình thường (chế độ định tính),
     Execute vẫn DONE (KHÔNG bị kéo xuống NEEDS_HUMAN chỉ vì tin không có số)."""
     import json as _json
 
@@ -3940,7 +3942,7 @@ def test_run_infographic_skipped_when_no_numeric_content_true_article_still_prod
     infographic_rows = [r for r in board.appended_content if r[2] == "infographic"]
     assert len(infographic_rows) == 1
     assert infographic_rows[0][3] == "SKIPPED"          # Status
-    assert "no_numeric_content" in infographic_rows[0][5]  # Notes nêu lý do
+    assert "FORMAT_MISMATCH" in infographic_rows[0][5]  # Notes mã chuẩn hoá (Bước 4.3)
 
     article_rows = [r for r in board.appended_content if r[2] == "article"]
     assert len(article_rows) == 1 and article_rows[0][3] == "DONE"
@@ -4011,14 +4013,21 @@ def test_run_infographic_skipped_when_router_decides_channel_false_upfront():
 
 
 def test_run_article_skipped_when_router_decides_channel_false_upfront():
-    """Phase 4.13 Mục A: router quyết output_channels.article=False (tin quá
-    vụn) -> article SKIPPED (KHÔNG gọi writer_llm — PoisonWriterLLM sẽ raise
-    nếu lỡ gọi), Execute KHÔNG bị kéo NEEDS_HUMAN/FAILED (chỉ SKIPPED hợp lệ)."""
+    """Phase 4.13 Mục A (SỬA kỳ vọng theo BƯỚC 4.3, Router, quyết định Lead
+    31/07): router quyết output_channels.article=False (tin quá vụn) NHƯNG
+    Brief cũng xác nhận content_units=[]+no_numeric_content=False (chính là
+    chữ ký brief_status=NO_USABLE_CONTENT) -> article SKIPPED (KHÔNG gọi
+    writer_llm — PoisonWriterLLM sẽ raise nếu lỡ gọi), Execute KHÔNG bị kéo
+    NEEDS_HUMAN/FAILED (chỉ SKIPPED hợp lệ). Notes GIỜ LÀ "NO_USABLE_CONTENT"
+    (KHÔNG còn hiện rationale riêng "Tin chỉ 1 câu" của Router như Phase 4.13
+    — Bước 4.3 chuẩn hoá: NO_USABLE_CONTENT là sự thật NỀN TẢNG, thắng mọi ý
+    kiến chủ quan của Router về từng tuyến riêng lẻ, xem produce_from_sheet.py
+    comment tại no_usable_content_channels)."""
     import json as _json
 
     class _PoisonWriterLLM:
         def complete(self, *a, **kw):
-            raise AssertionError("KHÔNG được gọi writer khi router quyết article:false")
+            raise AssertionError("KHÔNG được gọi writer khi brief_status=NO_USABLE_CONTENT")
 
     class _ArticleFalseRouteLLM:
         def complete(self, system, prompt, *, model=None, fail_loud=False, **kw):
@@ -4039,7 +4048,189 @@ def test_run_article_skipped_when_router_decides_channel_false_upfront():
 
     article_rows = [r for r in board.appended_content if r[2] == "article"]
     assert len(article_rows) == 1 and article_rows[0][3] == "SKIPPED"
-    assert "Tin chỉ 1 câu" in article_rows[0][5]
+    assert "NO_USABLE_CONTENT" in article_rows[0][5]
+
+
+def test_run_article_forced_true_when_router_vetoes_but_content_units_anchored():
+    """BƯỚC 4.1/4.2 (Router, quyết định Lead 31/07) — KHÁC HẲN test ngay trên
+    (`..._router_decides_channel_false_upfront`, ở đó content_units=[] nên
+    brief_status=NO_USABLE_CONTENT, Router VẪN có quyền quyết): ca NÀY Brief
+    xác nhận có content_unit THẬT (verify được, đủ để brief_status=OK VÀ
+    has_anchored_units=True), NHƯNG Router (LLM) VẪN tự ý nói article:false
+    kèm rationale riêng ("tin quá vụn") — CODE PHẢI ÉP article=True, BỎ QUA ý
+    kiến Router, đúng chữ "KHÔNG BAO GIỜ đặt article=false vì thiếu số/nguồn
+    ngắn" khi ĐÃ có chất liệu neo nguồn thật. Writer PHẢI được gọi (khác hẳn
+    PoisonWriterLLM ở test trên — ở đây writer_llm PHẢI chạy được)."""
+    import json as _json
+
+    class _CleanWriterLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            return _clean_writer_json()
+
+    class _AnchoredButRouterVetoesRouteLLM:
+        """`raw`/`value` PHẢI verify được trong evidence THẬT dùng ở test này
+        (source="" -> fetch_full_evidence() lùi về fallback=item["hook"]=
+        "hook gợi ý", xem _approved_row/fetch_full_evidence) -- "8,18%" không
+        verify được (không có trong "hook gợi ý") sẽ khiến content_units=[]
+        -> brief_status=NO_USABLE_CONTENT SAI Ý ĐỊNH test này (cần OK+anchored)."""
+
+        def complete(self, system, prompt, *, model=None, fail_loud=False, **kw):
+            if "no_numeric_content" in system:
+                return _json.dumps({
+                    "content_units": [{"shape": "scalar", "value": "ý", "label": "GDP 6 tháng",
+                                      "unit": None, "kind": "percent", "raw": "gợi ý", "approx": False}],
+                    "no_numeric_content": False,
+                }, ensure_ascii=False)
+            return _json.dumps({
+                "content_type": "article", "structure": "S1", "hook": "H1",
+                "secondary_structure": None, "rationale": "Router tự ý cho là quá vụn.",
+                "signals": {"has_genuine_paradox": False, "drivers": [],
+                           "has_central_thesis": True},
+                "output_channels": {"article": False, "infographic": True, "video": True},
+                "channel_rationale": {"article": "Router tự ý: tin chỉ có 1 con số, quá vụn"},
+            }, ensure_ascii=False)
+
+    evidence = "GDP 6 tháng đầu năm tăng 8,18%, mức cao nhất nhiều năm."
+    result, board, notifier = _run_produce_scenario(
+        _CleanWriterLLM(), _approved_row(evidence, row=2),
+        route_llm=_AnchoredButRouterVetoesRouteLLM())
+
+    article_rows = [r for r in board.appended_content if r[2] == "article"]
+    assert len(article_rows) == 1 and article_rows[0][3] == "DONE", (
+        f"content_units có anchored data thật -- Router KHÔNG được quyền phủ quyết article, "
+        f"thực tế: {article_rows[0][3] if article_rows else 'KHÔNG có dòng'}"
+    )
+
+
+def test_run_infographic_format_mismatch_when_no_numeric_units_article_video_untouched():
+    """BƯỚC 4.4 (Router) — "no numeric chỉ tắt Data Infographic, KHÔNG chạm
+    article/video": brief_status=OK VỚI content_unit ĐỊNH TÍNH THẬT (không
+    phải content_units=[]+no_numeric_content=true như test Phase 4.12 cũ) —
+    has_numeric_units=False, has_qualitative_units=True -> infographic
+    SKIPPED mã FORMAT_MISMATCH (KHÔNG gọi composer), article DONE + video
+    KHÔNG bị loại."""
+    import json as _json
+
+    class _CleanWriterLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            return _clean_writer_json()
+
+    class _QualitativeOnlyRouteLLM:
+        """`source` PHẢI verify được (substring sau chuẩn hoá khoảng trắng)
+        trong evidence THẬT dùng ở test này — source="" -> fetch_full_
+        evidence() lùi về fallback=item["hook"]="hook gợi ý" (xem _approved_
+        row/fetch_full_evidence), nên `source` dùng ĐÚNG cụm "hook gợi ý"."""
+
+        def complete(self, system, prompt, *, model=None, fail_loud=False, **kw):
+            if "no_numeric_content" in system:
+                return _json.dumps({
+                    "content_units": [{"shape": "qualitative", "type": "policy_change",
+                                      "subject": "Ngân hàng Nhà nước",
+                                      "claim": "Ngân hàng Nhà nước bỏ trần lãi suất huy động",
+                                      "source": "hook gợi ý",
+                                      "evidence": "direct_quote"}],
+                    "no_numeric_content": False,
+                }, ensure_ascii=False)
+            return ""   # router fallback -> channels mặc định cả 3 True
+
+    class _QualitativeVideoContentLLM:
+        def __init__(self):
+            from twmkt.agents.router import Usage
+            self.usage = Usage()
+
+        def complete(self, system, prompt, *, model=None, fail_loud=False, **kw):
+            return _json.dumps({
+                "schema_version": 1, "title": "Chính sách mới",
+                "scenes": [
+                    {"role": "hook", "visual_kind": "statement",
+                     "payload": {"hero": "NHNN bỏ trần lãi suất", "desc": ""},
+                     "narration": "NHNN bỏ trần lãi suất"},
+                    {"role": "body", "visual_kind": "statement",
+                     "payload": {"hero": "Tác động", "desc": "Ảnh hưởng thị trường."},
+                     "narration": "Tác động thị trường"},
+                    {"role": "outro", "visual_kind": "outro",
+                     "payload": {"brand_name": "FVA Capital", "cta": "Theo dõi thêm"},
+                     "narration": "Theo dõi thêm"},
+                ],
+                "source": "ignored", "disclaimer": "d",
+            }, ensure_ascii=False)
+
+    evidence = "Ngân hàng Nhà nước bỏ trần lãi suất huy động kỳ hạn ngắn."
+    result, board, notifier = _run_produce_scenario(
+        _CleanWriterLLM(), _approved_row(evidence, row=2),
+        route_llm=_QualitativeOnlyRouteLLM(), content_llm=_QualitativeVideoContentLLM())
+
+    infographic_rows = [r for r in board.appended_content if r[2] == "infographic"]
+    assert len(infographic_rows) == 1 and infographic_rows[0][3] == "SKIPPED"
+    assert "FORMAT_MISMATCH" in infographic_rows[0][5]
+
+    article_rows = [r for r in board.appended_content if r[2] == "article"]
+    assert len(article_rows) == 1 and article_rows[0][3] == "DONE"
+    video_rows = [r for r in board.appended_content if r[2] == "video"]
+    assert len(video_rows) == 1 and video_rows[0][3] != "SKIPPED"
+
+
+def test_run_output_type_explicit_choice_overrides_router_veto():
+    """BƯỚC 4.5 (Router) — "người chọn TƯỜNG MINH một loại -> Router MẤT
+    quyền phủ quyết": Output Type=["Infographic"] CHỈ chọn infographic, Router
+    (LLM) lại tự ý nói infographic:false (channel_rationale riêng, KHÔNG phải
+    do thiếu số/format_mismatch — content_units CÓ số thật) -> CODE phải BỎ
+    QUA ý kiến Router, vẫn cho infographic chạy (composer ĐƯỢC gọi, KHÔNG
+    SKIPPED). Article dù channels mặc định True (router không nói gì) nhưng
+    KHÔNG được chọn ở Output Type -> KHÔNG ghi dòng nào."""
+    import json as _json
+
+    class _ComposerLLM:
+        def __init__(self):
+            from twmkt.agents.router import Usage
+            self.usage = Usage()
+
+        def complete(self, system, prompt, *, model=None):
+            return _json.dumps({
+                "title": "GDP 6 tháng", "subtitle": "Tăng trưởng vượt kỳ vọng",
+                "hero": [{"label": "GDP 6 tháng", "value": "+8,18%"}],
+                "market": [], "highlights": ["Mức cao nhất nhiều năm."], "related": [],
+                "priority": {"primary": [], "secondary": [], "minor": []},
+                "source": "ignored", "render_hint": {"ratio": "1:1"},
+            }, ensure_ascii=False)
+
+    class _RouterVetoesInfographicDespiteNumbersRouteLLM:
+        """`raw`/`value` PHẢI verify được trong evidence THẬT (source="" ->
+        fetch_full_evidence() lùi về fallback=item["hook"]="hook gợi ý", xem
+        _approved_row/fetch_full_evidence) — dùng "gợi ý"/"ý" thay vì "8,18%"
+        (không verify được, sẽ khiến content_units=[] SAI Ý ĐỊNH test này)."""
+
+        def complete(self, system, prompt, *, model=None, fail_loud=False, **kw):
+            if "no_numeric_content" in system:
+                return _json.dumps({
+                    "content_units": [{"shape": "scalar", "value": "ý", "label": "GDP 6 tháng",
+                                      "unit": None, "kind": "percent", "raw": "gợi ý", "approx": False}],
+                    "no_numeric_content": False,
+                }, ensure_ascii=False)
+            return _json.dumps({
+                "content_type": "article", "structure": "S1", "hook": "H1",
+                "secondary_structure": None, "rationale": "Router tự ý không thích infographic.",
+                "signals": {"has_genuine_paradox": False, "drivers": [],
+                           "has_central_thesis": True},
+                "output_channels": {"article": True, "infographic": False, "video": True},
+                "channel_rationale": {"infographic": "Router tự ý: không thích hợp dù có số"},
+            }, ensure_ascii=False)
+
+    evidence = "GDP 6 tháng đầu năm tăng 8,18%, mức cao nhất nhiều năm."
+    result, board, notifier = _run_produce_scenario(
+        _ComposerLLM(),
+        _approved_row(evidence, row=2, output_type=["Infographic"]),
+        route_llm=_RouterVetoesInfographicDespiteNumbersRouteLLM(),
+        content_llm=_ComposerLLM())
+
+    rows_by_type = {r[2]: r for r in board.appended_content}
+    assert set(rows_by_type) == {"infographic"}, (
+        f"CHỈ được ghi dòng infographic (Output Type chọn riêng), thực tế: {sorted(rows_by_type)}"
+    )
+    assert rows_by_type["infographic"][3] == "DONE", (
+        f"Output Type chọn tường minh infographic -- Router KHÔNG được quyền phủ quyết dù tự ý nói false, "
+        f"thực tế: {rows_by_type['infographic'][3]} | {rows_by_type['infographic'][5][:150]}"
+    )
 
 
 def test_run_boilerplate_source_now_skipped_not_fabricated_article_phase_c():
@@ -5906,11 +6097,12 @@ def test_brief_result_facts_property_is_adapter_for_content_units():
 
 def test_has_numeric_units_and_has_qualitative_units_independent_flags():
     """Phase C — 2 cờ độc lập tính từ `type` của TỪNG content_unit (mặc định
-    "numeric", models.py). Hiện tại CHƯA có parser trích content_unit định
-    tính (type != "numeric") -- xem PHẦN "CHƯA LÀM" trong docstring module
-    brief.py -- nên has_qualitative_units luôn False trên dữ liệu THẬT hiện
-    tại; test này khoá đúng CÔNG THỨC tính (không phải hành vi cuối) bằng
-    cách tự dựng ContentUnit type khác nhau trực tiếp, không qua LLM giả."""
+    "numeric", models.py). Bước 3 đã xây parser thật cho type != "numeric"
+    (_parse_qualitative_unit, agents/brief.py) nên has_qualitative_units GIỜ
+    phản ánh dữ liệu THẬT khi Brief chạy thật (xem test_regression_row2_row3_
+    ..., chốt kiểm nội bộ thật với claude -p/Anthropic API); test này khoá
+    đúng CÔNG THỨC tính bằng cách tự dựng ContentUnit type khác nhau trực
+    tiếp, không qua LLM giả."""
     from twmkt.agents.brief import BriefResult
     from twmkt.models import ContentUnit
 
@@ -5926,6 +6118,54 @@ def test_has_numeric_units_and_has_qualitative_units_independent_flags():
                                        ContentUnit(value="", label="y", type="event")])
     assert mixed.has_numeric_units is True
     assert mixed.has_qualitative_units is True
+
+
+def test_has_anchored_units_numeric_always_counts_qualitative_needs_direct_or_paraphrase():
+    """Bước 4.1 (Router) — has_anchored_units là sàn MỚI thay "đếm số" cho
+    quyết định article=true. MỌI content_unit type="numeric" LUÔN tính (verify
+    RIÊNG của chúng đã chặt hơn "direct_quote"). content_unit ĐỊNH TÍNH CHỈ
+    tính khi evidence ∈ {direct_quote, paraphrase} — "derived"/"inferred"
+    KHÔNG đủ MỘT MÌNH để ép article=true (chúng là diễn giải, không phải bằng
+    chứng neo nguồn trực tiếp)."""
+    from twmkt.agents.brief import BriefResult
+    from twmkt.models import ContentUnit
+
+    numeric_alone = BriefResult(content_units=[ContentUnit(value="8", label="x", type="numeric")])
+    assert numeric_alone.has_anchored_units is True
+
+    qualitative_direct_quote = BriefResult(content_units=[
+        ContentUnit(value="", label="s", type="statement", subject="s", claim="c",
+                   source="src", evidence="direct_quote")])
+    assert qualitative_direct_quote.has_anchored_units is True
+
+    qualitative_paraphrase = BriefResult(content_units=[
+        ContentUnit(value="", label="s", type="policy_change", subject="s", claim="c",
+                   source="src", evidence="paraphrase")])
+    assert qualitative_paraphrase.has_anchored_units is True
+
+    only_derived = BriefResult(content_units=[
+        ContentUnit(value="", label="s", type="inference", subject="s", claim="c",
+                   source="src", evidence="derived")])
+    assert only_derived.has_anchored_units is False, (
+        "1 content_unit derived DUY NHẤT không đủ neo nguồn để ép article=true"
+    )
+
+    only_inferred = BriefResult(content_units=[
+        ContentUnit(value="", label="s", type="inference", subject="s", claim="c",
+                   source="src", evidence="inferred")])
+    assert only_inferred.has_anchored_units is False
+
+    empty = BriefResult(content_units=[])
+    assert empty.has_anchored_units is False
+
+    mixed_derived_plus_numeric = BriefResult(content_units=[
+        ContentUnit(value="", label="s", type="inference", subject="s", claim="c",
+                   source="src", evidence="derived"),
+        ContentUnit(value="8", label="x", type="numeric"),
+    ])
+    assert mixed_derived_plus_numeric.has_anchored_units is True, (
+        "1 content_unit numeric BẤT KỲ trong danh sách vẫn đủ ép article=true"
+    )
 
 
 # =====================================================================

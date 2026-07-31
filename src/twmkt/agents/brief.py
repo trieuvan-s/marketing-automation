@@ -167,6 +167,31 @@ class BriefResult:
     def has_qualitative_units(self) -> bool:
         return any(u.type != "numeric" for u in self.content_units)
 
+    @property
+    def has_anchored_units(self) -> bool:
+        """Bước 4.1 (Router) — sàn thay cho "đếm số" cũ: article=true khi
+        brief_status=OK VÀ có ≥1 content_unit NEO ĐƯỢC vào nguồn, đó là:
+          - MỌI content_unit type="numeric" (5 shape số) — LUÔN được tính,
+            vì cơ chế verify RIÊNG của chúng (value/raw PHẢI là substring
+            chính xác của evidence, xem _parse_scalar/_parse_range/...) đã
+            NGHIÊM NGẶT HƠN mức "direct_quote" định tính — không cần field
+            `evidence` (vốn chỉ áp cho content_unit định tính).
+          - content_unit ĐỊNH TÍNH (type != "numeric") CHỈ tính khi evidence
+            ∈ {"direct_quote", "paraphrase"} — "derived"/"inferred" KHÔNG
+            tính vào ngưỡng này (chúng là DIỄN GIẢI, không phải bằng chứng
+            neo nguồn trực tiếp — có thể vẫn đúng, nhưng không đủ CHẮC CHẮN
+            để một mình quyết định "bài này có chất liệu viết Article").
+        1 content_unit derived/inferred DUY NHẤT (không kèm gì khác) KHÔNG
+        đủ để ép article=true — đây CHÍNH LÀ sàn "không đặt article=false vì
+        thiếu số" NHƯNG cũng không lỏng tới mức chấp nhận suy diễn đơn thuần
+        làm chất liệu."""
+        for u in self.content_units:
+            if u.type == "numeric":
+                return True
+            if u.evidence in ("direct_quote", "paraphrase"):
+                return True
+        return False
+
 _SENT_SPLIT_RE = re.compile(r"(?<=[.!?\n])\s+")
 
 _DEFAULT_ENTITY_TYPES = ("ticker", "company", "policy", "place", "person", "project", "other")

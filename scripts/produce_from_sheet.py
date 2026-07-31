@@ -149,27 +149,57 @@ def _allowed_output_types(output_type: list[str]) -> set[str] | None:
     return {_OUTPUT_TYPE_TO_CONTENT_TYPE[t] for t in output_type if t in _OUTPUT_TYPE_TO_CONTENT_TYPE}
 
 
+# BƯỚC 4.3 (Router, quyết định Lead 31/07) — CHUẨN HOÁ mã SKIP ghi vào Notes:
+# SOURCE_BROKEN | DUPLICATE | BOILERPLATE | NO_USABLE_CONTENT | FORMAT_MISMATCH.
+# 5 mã này mô tả NGUYÊN NHÂN NỘI DUNG (content-driven) — KHÁC "Output Type
+# không chọn" (đó là NGƯỜI chủ động loại, không phải nội dung có vấn đề, giữ
+# nguyên câu riêng, không gán mã). SOURCE_BROKEN dùng cho nhánh NEEDS_HUMAN
+# "Brief hỏng thật" (facts[] rỗng do lỗi hạ tầng — xem nhánh isinstance(agent,
+# InfographicSpecAgent) and not brief.content_units bên dưới, KHÔNG phải nhánh
+# này). DUPLICATE hiện KHÔNG có Notes riêng (chủ đề đã DONE trước đó -> không
+# ghi dòng nào cả, xem write_article/_is_fully_produced_channels — im lặng
+# CÓ CHỦ Ý, không phải thiếu sót, không cần gán mã cho thứ không ghi ra).
+# BOILERPLATE dùng CHUNG cơ chế phát hiện với NO_USABLE_CONTENT (content_units
+# rỗng + no_numeric_content=False sau khi Brief chạy trọn vẹn) — CHƯA có bộ
+# phát hiện MẪU boilerplate riêng (vd nhận diện văn bản kiểu menu/điều hướng)
+# nên 2 mã này hiện là 1 -- không tách giả tạo khi chưa có tín hiệu phân biệt
+# thật, xem _NO_USABLE_CONTENT_REASON.
 _NO_USABLE_CONTENT_REASON = (
     "NO_USABLE_CONTENT: Brief đọc được nguồn nhưng KHÔNG tìm thấy nội dung thực "
     "chất nào (không phải lỗi hạ tầng, không phải tin thuần định tính đã xác "
-    "nhận) — nghi nguồn boilerplate/trang điều hướng/placeholder. SKIP cả 3 "
-    "tuyến, KHÔNG cần người can thiệp (xem agents/brief.BriefResult.brief_status, Phase C)."
+    "nhận) — nghi nguồn boilerplate/trang điều hướng/placeholder (BOILERPLATE "
+    "dùng chung mã này — chưa có bộ nhận diện mẫu riêng). SKIP cả 3 tuyến, "
+    "KHÔNG cần người can thiệp (xem agents/brief.BriefResult.brief_status)."
+)
+
+_FORMAT_MISMATCH_NO_NUMERIC_REASON = (
+    "FORMAT_MISMATCH: content_units xác nhận KHÔNG có dữ liệu định lượng nào "
+    "(has_numeric_units=false) — Data Infographic cần số để dựng hero/market, "
+    "KHÔNG có gì để trình bày. KHÔNG PHẢI lỗi nội dung/Brief — Article/Video "
+    "vẫn sinh bình thường (xem BriefResult.has_numeric_units, Bước 4.4)."
 )
 
 
 def _channel_skip_reason(ch: str, decision, output_type_excluded: set[str], *,
-                         no_usable_content: bool = False) -> str:
+                         no_usable_content: bool = False,
+                         format_mismatch: bool = False) -> str:
     """Notes giải thích ĐÚNG nguyên nhân SKIPPED — phân biệt router (nội dung
-    không hợp tuyến), Output Type (người không chọn tuyến, dù router có thể
-    đã đồng ý), và Phase C `no_usable_content` (Brief xác nhận nguồn KHÔNG có
-    nội dung thực chất — ưu tiên CAO NHẤT, kiểm TRƯỚC 2 nhánh kia vì đây là lý
-    do THẬT SỰ khiến router/Output Type không còn ý nghĩa để xét) — gộp làm 1
-    thông điệp sẽ đánh lừa người đọc Notes khi tra vì sao thiếu 1 loại."""
+    không hợp tuyến, mã FORMAT_MISMATCH), Output Type (người không chọn tuyến,
+    dù router có thể đã đồng ý — KHÔNG gán mã, đây không phải vấn đề nội
+    dung), NO_USABLE_CONTENT (Brief xác nhận nguồn KHÔNG có nội dung thực
+    chất), và `format_mismatch` (Bước 4.4, không đủ dữ liệu SỐ cho Data
+    Infographic — TÁCH RIÊNG khỏi nhánh router/channel_rationale dù CÙNG mã
+    FORMAT_MISMATCH, vì đây là cổng TẤT ĐỊNH không qua Router) — ưu tiên kiểm
+    THEO THỨ TỰ no_usable_content > format_mismatch (Bước 4.4) > Output Type >
+    router, vì mỗi nhánh sau chỉ còn ý nghĩa khi nhánh trước KHÔNG áp dụng —
+    gộp làm 1 thông điệp sẽ đánh lừa người đọc Notes khi tra vì sao thiếu 1 loại."""
     if no_usable_content:
         return _NO_USABLE_CONTENT_REASON
+    if format_mismatch:
+        return _FORMAT_MISMATCH_NO_NUMERIC_REASON
     if ch in output_type_excluded:
         return f"Output Type không chọn tuyến {ch} cho chủ đề này (người giới hạn qua cột Output Type)."
-    return (f"Router quyết định tuyến {ch} không hợp tin này: "
+    return (f"FORMAT_MISMATCH: Router quyết định tuyến {ch} không hợp tin này: "
            f"{decision.channel_rationale.get(ch) or '(router không cho lý do)'}")
 
 
@@ -450,23 +480,57 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
         # DONE -- xác nhận THẬT qua tests/test_pipeline.py::test_regression_
         # row11_boilerplate_source_currently_produces_fabricated_article_
         # known_gap (Phase B, SẼ chuyển PASS sau thay đổi này).
-        # CHỈ đè tuyến Router ĐỂ MẶC ĐỊNH true (fallback/không có ý kiến riêng)
-        # -- tuyến Router đã CHỦ ĐỘNG tắt kèm rationale riêng (vd "tin bảng-số
-        # không hợp hình") GIỮ NGUYÊN lý do gốc, KHÔNG ghi đè bằng
-        # NO_USABLE_CONTENT (2 nguyên nhân khác nhau, dù cùng ra SKIPPED —
-        # router có thể thấy channel không hợp VÌ LÝ DO KHÁC dù Brief vẫn có
-        # verify được content_units, xem 2 test Phase 4.13 channel-false/
-        # article-false vốn dùng evidence rỗng/placeholder trong fixture,
-        # KHÔNG phải nguồn boilerplate thật -- không nên bị gán nhầm lý do).
+        # BƯỚC 4.3 (Router, quyết định Lead 31/07, SỬA lại quyết định Phase C
+        # ban đầu) — ÉP CẢ 3 TUYẾN vào no_usable_content_channels VÔ ĐIỀU KIỆN
+        # khi brief_status=NO_USABLE_CONTENT, KỂ CẢ tuyến Router đã tự tắt kèm
+        # rationale riêng (khác Phase C bản đầu: từng CHỈ đè tuyến Router để
+        # mặc định true, giữ nguyên rationale Router cho tuyến router đã tắt
+        # sẵn). LÝ DO ĐỔI: Bước 4.3 chuẩn hoá 5 mã SKIP — NO_USABLE_CONTENT là
+        # sự thật NỀN TẢNG (không có gì để làm việc), PHẢI thắng mọi ý kiến chủ
+        # quan của Router về TỪNG tuyến riêng lẻ, để Notes nhất quán thay vì
+        # tuỳ tiện theo tuyến nào Router tình cờ tự tắt trước. Xem test_run_
+        # article_skipped_when_router_decides_channel_false_upfront (đã cập
+        # nhật kỳ vọng theo thay đổi này).
         no_usable_content_channels: set[str] = set()
         if write_article and brief_result.brief_status == "NO_USABLE_CONTENT":
-            for ch in ("article", "video", "infographic"):
-                if channels.get(ch, True):
-                    channels[ch] = False
-                    no_usable_content_channels.add(ch)
-        # Bước 4 — Output Type AND với quyết định router (xem docstring
-        # _allowed_output_types/_channel_skip_reason): output_type rỗng/AUTO
-        # -> KHÔNG đổi channels (hành vi router-only như trước Bước 4).
+            no_usable_content_channels = {"article", "video", "infographic"}
+            for ch in no_usable_content_channels:
+                channels[ch] = False
+
+        # BƯỚC 4.4 (Router, quyết định Lead 31/07) — "no numeric chỉ tắt Data
+        # Infographic, KHÔNG chạm article/video": content_units KHÁC RỖNG (đã
+        # qua cổng no_usable_content ở trên) nhưng KHÔNG CÓ content_unit type=
+        # "numeric" nào -- Data Infographic (hero/market là SỐ) không có gì để
+        # trình bày, ÉP infographic=False NGAY, TRƯỚC khi gọi composer (khỏi
+        # phí lượt LLM sinh spec rỗng). Mã lý do: FORMAT_MISMATCH (nội dung
+        # KHÔNG SAI, chỉ SAI ĐỊNH DẠNG cho tuyến này) -- xem _channel_skip_reason.
+        format_mismatch_channels: set[str] = set()
+        if (write_article and brief_result.brief_status == "OK"
+                and not brief_result.has_numeric_units
+                and "infographic" not in no_usable_content_channels
+                and channels.get("infographic", True)):
+            channels["infographic"] = False
+            format_mismatch_channels.add("infographic")
+
+        # BƯỚC 4.1/4.2 (Router) — "article=true khi brief_status=OK VÀ có ≥1
+        # content_unit NEO ĐƯỢC vào nguồn (has_anchored_units — xem agents/
+        # brief.BriefResult), BẤT KỂ type; KHÔNG BAO GIỜ đặt article=false vì
+        # thiếu số/nguồn ngắn": Router (LLM) VẪN được quyền tự phán qua prompt
+        # (_SYSTEM structure_router.py), NHƯNG khi Brief đã xác nhận có chất
+        # liệu neo nguồn thật, CODE ÉP article=True — Router MẤT quyền phủ
+        # quyết article trong trường hợp này (khác hẳn trước đây, Router có
+        # thể tắt article vì "tin quá vụn" dù Brief đã trích được content_unit
+        # thật, xem test_run_article_skipped_when_router_decides_channel_
+        # false_upfront -- ca đó brief_status=NO_USABLE_CONTENT nên KHÔNG bị
+        # ép ở đây, giữ nguyên hành vi cũ, không phá test).
+        if (write_article and brief_result.brief_status == "OK"
+                and brief_result.has_anchored_units
+                and not channels.get("article", True)):
+            channels["article"] = True
+
+        # Bước 4 (2026-07-28, Output Type AND với quyết định router) — xem
+        # docstring _allowed_output_types/_channel_skip_reason: output_type
+        # rỗng/AUTO -> KHÔNG đổi channels (hành vi router-only như trước).
         allowed_types = _allowed_output_types(item.get("output_type") or [])
         output_type_excluded: set[str] = set()
         if allowed_types is not None:
@@ -481,6 +545,20 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                 if ch not in allowed_types:
                     output_type_excluded.add(ch)
                     channels[ch] = False
+            # BƯỚC 4.5 (Router, quyết định Lead 31/07) — "người chọn TƯỜNG
+            # MINH một loại -> Router MẤT quyền phủ quyết": tuyến người CHỌN
+            # (trong allowed_types) mà Router TỰ Ý tắt (channel_rationale
+            # riêng, vd "tin quá vụn"/"không đủ dữ liệu trình bày hình") ->
+            # BỎ QUA ý kiến Router, ép bật lại. CHỈ áp cho quyết định RIÊNG
+            # CỦA ROUTER — KHÔNG ghi đè 2 cổng TẤT ĐỊNH ở trên (no_usable_
+            # content/format_mismatch): đó là SỰ THẬT về hình dạng nội dung
+            # (không có gì để viết/không có số để trình bày), ép bật sẽ ép
+            # Composer BỊA hoặc sinh spec rỗng — khác hẳn Router chỉ đang nêu
+            # Ý KIẾN chủ quan có thể sai.
+            deterministic_off_channels = no_usable_content_channels | format_mismatch_channels
+            for ch in allowed_types:
+                if ch not in deterministic_off_channels and not channels.get(ch, True):
+                    channels[ch] = True
 
         article_outcome = None
         if not write_article:
@@ -560,7 +638,8 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                     skipped += 1
                     continue
                 reason = _channel_skip_reason(ch, decision, output_type_excluded,
-                                              no_usable_content=ch in no_usable_content_channels)
+                                              no_usable_content=ch in no_usable_content_channels,
+                                              format_mismatch=ch in format_mismatch_channels)
                 _write_content(topic_key, type_key, status="SKIPPED", output="", notes=reason, content_units_json=content_units_json)
                 written += 1
                 seen.add((topic_key, type_key))
@@ -568,29 +647,16 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                 notifier.notify("skipped", topic=item["context"], type=ch, reason=reason)
                 continue
 
-            # Phase 4.12 (thu hẹp phạm vi ở 4.13 — chỉ còn xử lý CA BẤT ĐỒNG):
-            # router chọn infographic:true (đã qua cổng ở trên) NHƯNG Brief xác
-            # nhận no_numeric_content=True (content_units=[] hợp lệ, tin thuần định
-            # tính) -> router "tưởng" có số nhưng Brief đọc kỹ hơn thấy không
-            # có -> vẫn SKIP (không có gì để trình bày), NHƯNG log WARN để
-            # tinh chỉnh prompt router (mục 3, "để tinh chỉnh"). content_units[] rỗng
-            # mà KHÔNG có cờ (Brief hỏng thật) vẫn giữ nguyên đường NEEDS_HUMAN
-            # cũ bên dưới (Mục B item 3, KHÔNG đổi).
-            if isinstance(agent, InfographicSpecAgent) and not brief.content_units and brief.no_numeric_content:
-                if (topic_key, "infographic") in seen:
-                    skipped += 1
-                    continue
-                print(f"[CẢNH BÁO] router/brief bất đồng: router chọn infographic:true "
-                     f"nhưng Brief xác nhận no_numeric_content=true (không có số) cho "
-                     f"'{item['context'][:60]}' -> vẫn SKIP, cần tinh chỉnh prompt router.")
-                reason = ("Router chọn infographic:true nhưng Brief xác nhận không có số "
-                         "liệu (no_numeric_content=true) -> bất đồng router/brief, tạm SKIP")
-                _write_content(topic_key, "infographic", status="SKIPPED", output="", notes=reason, content_units_json=content_units_json)
-                written += 1
-                seen.add((topic_key, "infographic"))
-                skipped += 1
-                notifier.notify("skipped", topic=item["context"], type="infographic", reason=reason)
-                continue
+            # Phase 4.12 (thu hẹp phạm vi ở 4.13 — chỉ còn xử lý CA BẤT ĐỒNG)
+            # từng có 1 nhánh riêng ở đây bắt "router chọn infographic:true
+            # nhưng Brief xác nhận no_numeric_content=true". BƯỚC 4.4 (Router,
+            # 31/07) ĐÃ THAY THẾ HOÀN TOÀN: cổng format_mismatch_channels ở
+            # trên (tính TRƯỚC vòng lặp này, từ brief_result.has_numeric_units)
+            # bắt ĐÚNG case này SỚM HƠN (channels["infographic"]=False ngay từ
+            # đầu) -- nhánh cũ do đó KHÔNG BAO GIỜ còn chạy tới được (điều kiện
+            # `not brief.content_units and brief.no_numeric_content` là TẬP CON
+            # của điều kiện format_mismatch mới), đã XOÁ để không giữ code chết
+            # dùng chung 1 ý nghĩa nhưng 2 cơ chế/2 mã lý do khác nhau.
 
             if isinstance(agent, VideoScriptAgent):
                 # BƯỚC 3 (rules v2.1) — nguồn không đủ SCENE cho video (sàn
@@ -624,7 +690,8 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                 # DO Brief HỎNG THẬT (timeout/lỗi/parse hỏng), KHÔNG phải tin
                 # định tính (nhánh đó đã "continue" ở trên) -> vẫn NEEDS_HUMAN.
                 draft.compliance_issues.append(
-                    "content_units[] rỗng (Brief chưa trích được số liệu) -> NEEDS_HUMAN, "
+                    "SOURCE_BROKEN: content_units[] rỗng (Brief chưa trích được số liệu, "
+                    "brief_status=FAILED — lỗi hạ tầng thật) -> NEEDS_HUMAN, "
                     "không bịa nhãn 'Số liệu N'")
             type_ = draft.fmt.value
             if (topic_key, type_) in seen:
