@@ -65,15 +65,17 @@ là sửa NGUỒN để giảm tỷ lệ bị lưới chặn oan.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
 from ._jsonparse import try_json_object
 from ._numeric import has_approx_word, parse_magnitude_token
-from ..config import load_brand, load_settings
+from ..config import data_path, load_brand, load_settings
 from ..guardrails import compliance
 from ..media_factory.numbers import find_spelled_number_phrases
 from ..media_factory.spec import DEFERRED_VISUAL_KINDS, VISUAL_KINDS
@@ -158,34 +160,43 @@ _CONTENT_WRITER_RULES_SECTION_RE = re.compile(r"(?m)^#{1,2} (\d+)\. ")
 
 def _load_content_writer_rules(*, sections: tuple[str, ...], settings=None) -> str:
     """Đọc + trích các mục `sections` (số §, vd ("2","3") cho Article) từ
-    `prompts/content_writer_rules.md` (đường dẫn qua config, KHÔNG hard-code —
-    `writer.content_rules_path`). File thiếu/đọc lỗi -> "" (LÙI MƯỢT, agent
-    vẫn chạy bằng persona/schema gốc, KHÔNG crash) + 1 dòng cảnh báo console.
-    Hàm THUẦN ngoại trừ đọc đĩa — test được bằng cách trỏ `settings` tới file
-    tạm, không cần LLM thật."""
+    `prompts/content_rules_v1.0.md` (đã đổi tên từ `CONTENT_WRITER_RULES.md`
+    qua `git mv`, xem Phase A quy ước tên file — đường dẫn qua config, KHÔNG
+    hard-code — `writer.content_rules_path`). File thiếu/đọc lỗi -> "" (LÙI
+    MƯỢT, agent vẫn chạy bằng persona/schema gốc, KHÔNG crash) + 1 dòng cảnh
+    báo console. Hàm THUẦN ngoại trừ đọc đĩa — test được bằng cách trỏ
+    `settings` tới file tạm, không cần LLM thật."""
     settings = settings or load_settings()
-    path = Path(settings.get("writer.content_rules_path", "prompts/content_writer_rules.md"))
+    path = Path(settings.get("writer.content_rules_path", "prompts/content_rules_v1.0.md"))
     if not path.exists():
         print(f"[CẢNH BÁO] không thấy {path} -> bỏ qua CONTENT_WRITER_RULES (rỗng).")
         return ""
     return _load_content_writer_rules_from_text(path.read_text(encoding="utf-8"), sections)
 
 
-# BƯỚC 1 (rules v2.1, 2026-07-22) — v2.1 là RULES MẶC ĐỊNH cho Composer, áp
-# MỌI loại content_type. A (content_writer_rules.md, rule cũ) và C (rules_c_
-# unified_longform.md, hợp nhất longform — kết quả thí nghiệm A/B/C) GIỮ làm
-# DỰ PHÒNG, chọn qua `writer.rules_profile` ("v21" mặc định | "A" | "C") —
-# KHÔNG XOÁ. Hàm này KHÔNG đụng `_load_content_writer_rules` ở trên (giữ
-# nguyên — ~10 test gọi trực tiếp, phụ thuộc đọc THẲNG content_writer_rules.md
-# qua `writer.content_rules_path`) — chỉ ĐỊNH TUYẾN profile rồi gọi lại hàm cũ
-# HOẶC logic trích riêng cho v2.1 (numbering khác hẳn, xem dưới).
+# BƯỚC 1 (rules v2.1, 2026-07-22) — v2.1 là RULES MẶC ĐỊNH cho Composer TRƯỚC
+# Phase A, áp MỌI loại content_type. A (content_rules_v1.0.md, rule cũ) và C
+# (c_unified_longform_rules.md, hợp nhất longform — kết quả thí nghiệm A/B/C)
+# GIỮ làm DỰ PHÒNG, chọn qua `writer.rules_profile` ("v21" mặc định | "A" |
+# "C") — KHÔNG XOÁ. Hàm này KHÔNG đụng `_load_content_writer_rules` ở trên
+# (giữ nguyên — ~10 test gọi trực tiếp, phụ thuộc đọc THẲNG content_rules_v1.
+# 0.md qua `writer.content_rules_path`) — chỉ ĐỊNH TUYẾN profile rồi gọi lại
+# hàm cũ HOẶC logic trích riêng cho v2.1 (numbering khác hẳn, xem dưới).
+#
+# PHASE A (rules loader v3+, 2026-07-3x, gói Lead) — toàn bộ nhánh v21/A/C
+# dưới đây giờ là NHÁNH "legacy_sections" (`writer.rules_load_mode`), GIỮ
+# NGUYÊN 100% hành vi cũ khi mode này được chọn (mặc định khi KHÔNG set
+# rules_load_mode — tương thích ngược tuyệt đối, không phá pipeline đang
+# chạy). Nhánh MỚI "full" (nạp nguyên văn v3+, xem `_load_rules_full`) đứng
+# TRƯỚC, tách bạch hoàn toàn — không tái dùng biến/hàm của nhánh cũ để tránh
+# lẫn 2 hình dạng dữ liệu.
 _LEGACY_SECTIONS_BY_TYPE = {"article": ("2", "3"), "video": ("2", "4"), "infographic": ("2", "5")}
 
 # v2.1 core dùng CHUNG mọi loại: §1 mục tiêu, §2 thứ tự ưu tiên, §3 ranh giới
 # bắt buộc, §4 cấu trúc vừa đủ, §5 không gian sáng tạo, §6 chất lượng lập luận/
 # văn phong. KHÔNG gồm §7 (theo loại — trích RIÊNG dưới), §8 (validation —
 # tài liệu cho VALIDATOR, không phải Composer), §9/§10 (checklist/nguyên tắc
-# cuối, giống §6-9 content_writer_rules.md CŨ cũng không nhúng — input cho
+# cuối, giống §6-9 content_rules_v1.0.md CŨ cũng không nhúng — input cho
 # guardrail/self-review, không phải "dạy văn").
 _V21_CORE_SECTIONS = ("1", "2", "3", "4", "5", "6")
 _V21_PRODUCT_SUBSECTION = {"article": "7.1", "video": "7.2", "infographic": "7.3"}
@@ -199,39 +210,122 @@ def _v21_subsection_re(num: str) -> re.Pattern:
     return _V21_SUBSECTION_RE_CACHE[num]
 
 
+# PHASE A1/A2 — nhánh "full" (rules v3+, KHÔNG cắt mục). File v3.4/v3.0/v2.1
+# KHÔNG còn thiết kế theo "trích §N riêng cho content_type" như v2.1 cũ —
+# phạm vi áp dụng đã tự ghi ngay trong file (xem đầu content-rules-daily-v3.4.
+# md: "Phạm vi: Article · Infographic · Video"). A2 CẤM hard-code tên file/số
+# mục -- default dưới đây CHỈ là fallback khi config không set, giống mọi
+# hằng số _DEFAULT_* khác trong repo (config LUÔN thắng).
+_DEFAULT_RULES_FULL_PATH = "prompts/content-rules-daily-v3.4.md"
+
+
+def _load_rules_full(path: Path) -> str:
+    """A1 — nạp NGUYÊN VĂN, KHÔNG cắt mục nào. Chỉ rstrip khoảng trắng thừa
+    cuối file, không đụng nội dung (khác hẳn `_load_content_writer_rules_
+    from_text` ở nhánh legacy_sections, vốn CẮT theo số §)."""
+    return path.read_text(encoding="utf-8").rstrip()
+
+
+def _sha256_text(text: str) -> str:
+    """A4 — SHA-256 của NỘI DUNG rules đã nạp (không phải đường dẫn) -- đổi 1
+    ký tự trong file là đổi hash, truy vết được bài nào dùng ĐÚNG bản nào kể
+    cả khi tên file không đổi."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _append_rules_run_state(*, content_type: str, path: Path, sha256: str, mode: str, settings=None) -> None:
+    """A4 — ghi 1 dòng JSONL truy vết "bài nào dùng bản rules nào" (đường dẫn
+    + SHA-256 NỘI DUNG tại thời điểm nạp + mode + content_type + mốc giờ).
+    Ghi dưới `state/` (CÙNG NẾP `state/router_decisions.json`,
+    `state/production_drafts` đã có trong storage.*_dir) — KHÔNG đụng store/
+    (vùng agent hạ tầng Sheet/queue, ranh giới nhiệm vụ này). Lỗi ghi (đĩa
+    đầy, quyền...) KHÔNG được làm hỏng cả lượt sản xuất -- nuốt, chỉ cảnh báo
+    console, cùng triết lý LÙI MƯỢT của cả module này."""
+    try:
+        log_path = data_path("state", "rules_run_log.jsonl", settings=settings)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "content_type": content_type,
+            "path": str(path),
+            "sha256": sha256,
+            "mode": mode,
+        }
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as e:
+        print(f"[CẢNH BÁO] không ghi được state/rules_run_log.jsonl (A4): {e}")
+
+
 def _load_composer_rules(content_type: str, *, settings=None) -> str:
-    """Điểm ĐỊNH TUYẾN DUY NHẤT rules cho 3 Composer (Analysis/Video/Infographic)
-    — chọn v2.1 (mặc định)/A/C theo `writer.rules_profile`, trích ĐÚNG phần
-    `content_type` ("article"|"video"|"infographic"). File thiếu/lỗi -> ""
-    (LÙI MƯỢT, cùng nếp `_load_content_writer_rules`).
+    """Điểm ĐỊNH TUYẾN DUY NHẤT rules cho 3 Composer (Analysis/Video/Infographic).
 
-    `writer.content_rules_path` (override tường minh, DÙNG BỞI TEST CŨ để trỏ
-    file tạm) LUÔN THẮNG — đi thẳng qua `_load_content_writer_rules` KHÔNG đổi,
-    giữ nguyên hành vi hiện có, không phá test cũ.
+    PHASE A (2026-07-3x) — `writer.rules_load_mode` là công tắc TƯỜNG MINH,
+    KHÔNG suy đoán từ heading file (A2 — bỏ hẳn kiểu nhận diện "# PHẦN..."):
+      "full"            -> nạp NGUYÊN VĂN `writer.content_rules_path`
+                           (mặc định `_DEFAULT_RULES_FULL_PATH`), không cắt
+                           mục nào (A1). ĐÂY LÀ MẶC ĐỊNH SẢN XUẤT MỚI (xem
+                           config/settings.yaml — Lead chọn v3.4 sau khi P0
+                           xong, LEAD_DECISION_INPUT_STRICTNESS.md §9.1).
+      "legacy_sections" (mặc định CODE khi KHÔNG set rules_load_mode, tương
+                         thích ngược tuyệt đối) -> HỆT hành vi trước Phase A:
+                         override `content_rules_path` (nếu set) LUÔN THẮNG,
+                         qua `_load_content_writer_rules` cắt §N theo
+                         `_LEGACY_SECTIONS_BY_TYPE`; không thì định tuyến
+                         `writer.rules_profile` (v21 mặc định | A | C).
 
-    profile "C" (hợp nhất longform) CHỈ có nội dung cho "article" (thí nghiệm
-    A/B/C không phủ video/infographic) -> LÙI VỀ "A" cho 2 loại kia (quyết định
-    thực dụng, không phải lỗi — C chưa từng được thiết kế cho video/infographic)."""
+    Cả 2 nhánh đều ghi SHA-256 + đường dẫn vào `state/rules_run_log.jsonl`
+    (A4) mỗi lần nạp THÀNH CÔNG (rỗng/lỗi thì không ghi — không có gì để
+    truy vết). File thiếu/lỗi -> "" (LÙI MƯỢT, agent vẫn chạy bằng persona/
+    schema gốc, KHÔNG crash)."""
     settings = settings or load_settings()
+    mode = str(settings.get("writer.rules_load_mode", "legacy_sections")).strip() or "legacy_sections"
+
+    if mode == "full":
+        path = Path(settings.get("writer.content_rules_path", _DEFAULT_RULES_FULL_PATH))
+        if not path.exists():
+            print(f"[CẢNH BÁO] không thấy {path} (rules_load_mode=full) -> bỏ qua rules (rỗng).")
+            return ""
+        text = _load_rules_full(path)
+        if text:
+            _append_rules_run_state(content_type=content_type, path=path,
+                                    sha256=_sha256_text(text), mode=mode, settings=settings)
+        return text
+
+    # mode == "legacy_sections" — GIỮ NGUYÊN 100% hành vi trước Phase A.
     if str(settings.get("writer.content_rules_path", "")).strip():
-        return _load_content_writer_rules(sections=_LEGACY_SECTIONS_BY_TYPE[content_type], settings=settings)
+        override_path = Path(settings.get("writer.content_rules_path", ""))
+        text = _load_content_writer_rules(sections=_LEGACY_SECTIONS_BY_TYPE[content_type], settings=settings)
+        if text:
+            _append_rules_run_state(content_type=content_type, path=override_path,
+                                    sha256=_sha256_text(text), mode=f"{mode}:override", settings=settings)
+        return text
 
     profile = str(settings.get("writer.rules_profile", "v21")).strip() or "v21"
     if profile == "C" and content_type != "article":
         profile = "A"   # C không có mục video/infographic -> lùi về A
 
     if profile == "A":
-        return _load_content_writer_rules(sections=_LEGACY_SECTIONS_BY_TYPE[content_type], settings=settings)
+        path = Path(settings.get("writer.content_rules_path", "prompts/content_rules_v1.0.md"))
+        text = _load_content_writer_rules(sections=_LEGACY_SECTIONS_BY_TYPE[content_type], settings=settings)
+        if text:
+            _append_rules_run_state(content_type=content_type, path=path,
+                                    sha256=_sha256_text(text), mode=f"{mode}:A", settings=settings)
+        return text
 
     if profile == "C":
-        path = Path(settings.get("writer.rules_c_path", "prompts/rules_c_unified_longform.md"))
+        path = Path(settings.get("writer.rules_c_path", "prompts/c_unified_longform_rules.md"))
         if not path.exists():
             print(f"[CẢNH BÁO] không thấy {path} -> bỏ qua rules profile C (rỗng).")
             return ""
-        return path.read_text(encoding="utf-8").strip()   # C không tách content_type -> dùng NGUYÊN VĂN
+        text = path.read_text(encoding="utf-8").strip()   # C không tách content_type -> dùng NGUYÊN VĂN
+        if text:
+            _append_rules_run_state(content_type=content_type, path=path,
+                                    sha256=_sha256_text(text), mode=f"{mode}:C", settings=settings)
+        return text
 
     # v21 (mặc định) — trích core (§1-6) + đúng sub-section §7.N theo content_type.
-    path = Path(settings.get("writer.rules_v21_path", "prompts/content_composer_rules_v2_1.md"))
+    path = Path(settings.get("writer.rules_v21_path", "prompts/content-rules-v2.1.md"))
     if not path.exists():
         print(f"[CẢNH BÁO] không thấy {path} -> bỏ qua rules v2.1 (rỗng).")
         return ""
@@ -242,7 +336,11 @@ def _load_composer_rules(content_type: str, *, settings=None) -> str:
     # rstrip dấu "---" (hr phân cách trước mục kế) lẫn vào cuối do lookahead chỉ
     # dừng Ở HEADING kế, không loại dòng hr đứng giữa.
     product = re.sub(r"\n+---\s*\Z", "", m.group(0).rstrip()) if m else ""
-    return "\n\n".join(b for b in (core, product) if b)
+    result = "\n\n".join(b for b in (core, product) if b)
+    if result:
+        _append_rules_run_state(content_type=content_type, path=path,
+                                sha256=_sha256_text(text), mode=f"{mode}:v21", settings=settings)
+    return result
 
 
 def _load_content_writer_rules_from_text(text: str, sections: tuple[str, ...]) -> str:
@@ -474,7 +572,7 @@ class AnalysisWriterAgent(Agent):
         # đường LEGACY này — xem agents/writer.py cho đường MỚI có router thật).
         voice = assemble_voice(None)
         extra = f"\n\n---\n\nVOICE-LOCK (giọng văn bắt buộc):\n{voice}" if voice else ""
-        rules = _load_composer_rules("article")
+        rules = _load_composer_rules("article", settings=self.rules_settings)
         if rules:
             extra += f"\n\n---\n\nCONTENT_WRITER_RULES (bắt buộc, nguồn chuẩn):\n{rules}"
         data = try_json_object(self._ask(build_analysis_prompt(brief), extra_system=extra))
@@ -639,7 +737,7 @@ class VideoScriptAgent(Agent):
         voice = assemble_voice(decision)
         extra = (f"\n\n---\n\nVOICE-LOCK (giọng văn bắt buộc):\n{voice}" if voice else "")
         extra += _VIDEO_TTS_GUIDANCE
-        rules = _load_composer_rules("video")
+        rules = _load_composer_rules("video", settings=self.rules_settings)
         if rules:
             extra += f"\n\n---\n\nCONTENT_WRITER_RULES (bắt buộc, nguồn chuẩn):\n{rules}"
         data = try_json_object(self._ask(build_video_prompt(brief), extra_system=extra))
@@ -1129,7 +1227,7 @@ class InfographicSpecAgent(Agent):
         if not brief.facts:
             spec = _empty_infographic_spec(brief)
         else:
-            rules = _load_composer_rules("infographic")
+            rules = _load_composer_rules("infographic", settings=self.rules_settings)
             extra = (f"\n\n---\n\nCONTENT_WRITER_RULES (bắt buộc, nguồn chuẩn):\n{rules}"
                     if rules else "")
             data = try_json_object(self._ask(build_infographic_composer_prompt(brief, decision),

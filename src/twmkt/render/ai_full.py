@@ -34,8 +34,9 @@ TUYỆT ĐỐI (không có nhánh "chừa chỗ dán bản đồ thật" vì ch�
 Khi Lead cấp asset chuẩn, bổ sung `_MAP_ASSET_PATH` + logic dán riêng.
 
 Theme-rules (Bước 2): copy nguyên văn từ content-rules/ (sibling, KHÔNG theo
-git) vào `prompts/themes/FVA_Infographic_Theme_{Dark,Light}.md` — MỘT NGUỒN,
-không sửa nội dung khi đọc. `information_score`/layout selector implement lại
+git) vào `prompts/themes/Infographic_Theme_{Dark,Light}.md` (đổi tên bỏ tiền
+tố "FVA_" — Phase A dọn `prompts/`, 2026-07-3x, KHÔNG đổi nội dung) — MỘT
+NGUỒN, không sửa nội dung khi đọc. `information_score`/layout selector implement lại
 Ở CODE (tất định) theo đúng công thức trong theme file, KHÔNG để LLM tự đoán
 layout — cùng triết lý "AI hiểu ở Brief, CODE phán ở Guardrail" xuyên suốt dự
 án này.
@@ -93,8 +94,8 @@ _BANNED_PROMPT_WORDS = [
 ]
 
 _THEME_FILES = {
-    "dark": "FVA_Infographic_Theme_Dark.md",
-    "light": "FVA_Infographic_Theme_Light.md",
+    "dark": "Infographic_Theme_Dark.md",
+    "light": "Infographic_Theme_Light.md",
 }
 
 # Trích ĐÚNG design token màu từ 2 theme file (tránh nhúng nguyên 300 dòng

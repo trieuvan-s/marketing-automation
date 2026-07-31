@@ -525,16 +525,27 @@ writer:
   max_retries: 1        # số lần thử LẠI (không tính lượt đầu)
   retry_backoff_s: 3     # chờ giữa các lần thử lại (giây)
   timeout_s: 120          # timeout riêng cho LLM client bước writer (factory.build_writer_llm)
-  # BƯỚC 1 (rules v2.1, 2026-07-22): rules MẶC ĐỊNH cho Composer (Analysis/
-  # Video/Infographic) — "v21" (prompts/content_composer_rules_v2_1.md, CHỐT
-  # LÀM CHÍNH — đo A/B/C thật: META-COMPLIANCE C=3/2 câu lộ rule, v21=0/0) |
-  # "A" (prompts/content_writer_rules.md, rule CŨ, dự phòng) | "C" (prompts/
-  # rules_c_unified_longform.md, hợp nhất longform — CHỈ có nội dung article,
-  # video/infographic tự lùi về "A"). Đổi qua đây, KHÔNG sửa code. Xem
-  # agents/production._load_composer_rules(). `content_rules_path` bên dưới
-  # (nếu set) LUÔN THẮNG — override tường minh cho test/legacy, giữ nguyên.
+  # BƯỚC 1 (rules v2.1, 2026-07-22): rules profile CŨ cho nhánh legacy_sections
+  # dưới đây — "v21" (prompts/content-rules-v2.1.md, CHỐT LÀM CHÍNH lúc đó —
+  # đo A/B/C thật: META-COMPLIANCE C=3/2 câu lộ rule, v21=0/0) | "A" (prompts/
+  # content_rules_v1.0.md, rule CŨ, dự phòng) | "C" (prompts/
+  # c_unified_longform_rules.md, hợp nhất longform — CHỈ có nội dung article,
+  # video/infographic tự lùi về "A"). CHỈ có hiệu lực khi rules_load_mode:
+  # legacy_sections (xem dưới) — bị BỎ QUA hoàn toàn ở mode "full".
   rules_profile: "v21"
-  # content_rules_path: "prompts/content_writer_rules.md"   # override tường minh (KHÔNG mặc định set)
+
+  # PHASE A (rules loader v3+, 2026-07-3x, quyết định Lead) — "full" là MẶC
+  # ĐỊNH SẢN XUẤT MỚI: nạp NGUYÊN VĂN content_rules_path, KHÔNG cắt mục (A1).
+  # "legacy_sections" lùi về hành vi CŨ (rules_profile ở trên, cắt §N theo
+  # content_type) — giữ lại làm lối thoát khẩn cấp, KHÔNG xoá. Xem
+  # agents/production._load_composer_rules().
+  rules_load_mode: "full"
+  # content_rules_path: override tường minh — dùng cho CẢ 2 mode (mode=full:
+  # đường dẫn nạp nguyên văn; mode=legacy_sections: đường dẫn cắt §N theo
+  # content_type, hành vi override cũ giữ nguyên). Mặc định KHÔNG set ở đây
+  # (code tự lùi về _DEFAULT_RULES_FULL_PATH = prompts/content-rules-daily-v3.4.md
+  # khi mode=full) — set tường minh dưới đây theo quyết định Lead 2026-07-3x.
+  content_rules_path: "prompts/content-rules-daily-v3.4.md"
 
 # --- Thông báo vận hành (PHASE TELE, src/twmkt/utils/telegram_notifier.py) --
 # 1 chiều, KHÔNG chặn luồng chính — báo qua Telegram khi bắt đầu xử lý/đổi nội
