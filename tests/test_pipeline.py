@@ -4114,6 +4114,227 @@ def test_run_output_type_long_article_has_no_producer_all_skipped():
     assert board.execute_updates.get(2) not in ("FAILED", "NEEDS_HUMAN")
 
 
+# ==== PHASE B (2026-07-3x) — hồi quy §7 reports/LEAD_DECISION_INPUT_STRICTNESS.md ====
+#
+# File nguồn (báo cáo nhanh gửi Lead 2026-07-29, "rủi ro quá khắt khe đầu vào")
+# đã bị XOÁ theo yêu cầu Lead sau khi đọc xong (gitignored, không phải tài
+# liệu bền của repo — nội dung 10 ca §7 được chép NGUYÊN VĂN vào docstring
+# từng test dưới đây làm nguồn tham chiếu duy nhất còn lại).
+#
+# QUAN TRỌNG — khi bắt đầu Phase B, phần lớn P0 (Router output_channels AI-
+# phán thay vì đếm số cứng, Infographic SKIPPED-không-ERROR khi no_numeric_
+# content, Output Type lọc thật) ĐÃ ĐƯỢC LÀM Ở PHASE 4.12/4.13 (xem git log
+# "San xuat: Output Type loc that...", commit bfabab9) — SAU thời điểm báo
+# cáo được viết. Vì vậy nhiều ca dưới đây PASS ngay bằng cách TÁI DÙNG hạ
+# tầng test 4.12/4.13 đã có (_QualitativeBriefRouteLLM v.v.) — đây KHÔNG phải
+# "test chưa chạm hành vi thật" (điều kiện DỪNG KHI #1) vì các ca THẬT SỰ
+# fail (9/10/11 dưới đây) chứng minh bộ test này CÓ chạm code thật, chỉ là
+# phần Router đã được sửa trước khi tới lượt tôi.
+
+
+def test_regression_row1_row7_qualitative_article_done_infographic_skipped_video_not_gated():
+    """§7 dòng 1 ("Chính sách mới, không có số": Article DONE, Infographic
+    Explanatory-hoặc-SKIPPED-hợp-lệ, Video ngắn) + dòng 7 ("Brief chạy tốt,
+    facts định lượng rỗng nhưng facts định tính có": DONE, Infographic KHÔNG
+    báo Brief lỗi, Video KHÔNG bị loại mặc định) — 2 dòng cùng cơ chế
+    (no_numeric_content=True), gộp 1 test.
+
+    Article + Infographic: ĐÃ PASS từ Phase 4.12 (test_run_infographic_
+    skipped_when_no_numeric_content_true_article_still_produced) — không lặp
+    lại, chỉ thêm phần CHƯA có test nào phủ: Video. Đọc code (scripts/
+    produce_from_sheet.py, nhánh `isinstance(agent, VideoScriptAgent)`) xác
+    nhận KHÔNG có gate `if not brief.facts` nào cho Video (khác Infographic) —
+    Composer video vẫn được GỌI bình thường bất kể facts=[]/no_numeric_
+    content. Test này khoá lại bằng chứng đó: Composer trả video hợp lệ (đủ
+    sàn 3 scene) -> phải ra ĐÚNG 1 dòng video, KHÔNG SKIPPED/thiếu dòng.
+
+    LƯU Ý (không thuộc phạm vi test này): nếu nguồn định tính THẬT SỰ quá
+    nghèo để Composer dựng đủ 3 scene, `InsufficientScenesError` vẫn đưa
+    video xuống NEEDS_HUMAN — đó là RÀNG BUỘC RENDERER cố ý KHÔNG nới (P1,
+    xem InsufficientScenesError docstring), KHÁC BẢN CHẤT với việc Router/
+    code chủ động LOẠI video vì thiếu số — dòng 7 chỉ đòi hỏi vế SAU."""
+    import json as _json
+
+    class _CleanWriterLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            return _clean_writer_json()
+
+    class _QualitativeBriefVideoRouteLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False, **kw):
+            if "no_numeric_content" in system:
+                return _json.dumps({"facts": [], "no_numeric_content": True}, ensure_ascii=False)
+            return ""
+
+    class _QualitativeVideoContentLLM:
+        """content_llm giả cho Video composer -- Infographic KHÔNG tới lượt gọi
+        composer trong ca này (nhánh no_numeric_content continue trước khi gọi),
+        nên fake này chỉ cần đúng schema Video. `.usage` bắt buộc -- produce_
+        from_sheet.run() đọc content_llm.usage.as_dict() ở cuối để ghi log tổng
+        (LLMRouter.Usage thật cũng có field này, fake phải khớp interface)."""
+
+        def __init__(self):
+            from twmkt.agents.router import Usage
+            self.usage = Usage()
+
+        def complete(self, system, prompt, *, model=None, fail_loud=False, **kw):
+            return _json.dumps({
+                "schema_version": 1, "title": "Chính sách mới",
+                "scenes": [
+                    {"role": "hook", "visual_kind": "statement",
+                     "payload": {"hero": "Chính sách mới ban hành", "desc": ""},
+                     "narration": "Chính sách mới vừa ban hành"},
+                    {"role": "body", "visual_kind": "statement",
+                     "payload": {"hero": "Tác động", "desc": "Ảnh hưởng ngành."},
+                     "narration": "Tác động tới ngành"},
+                    {"role": "outro", "visual_kind": "outro",
+                     "payload": {"brand_name": "FVA Capital", "cta": "Theo dõi thêm"},
+                     "narration": "Theo dõi thêm"},
+                ],
+                "source": "ignored", "disclaimer": "d",
+            }, ensure_ascii=False)
+
+    result, board, notifier = _run_produce_scenario(
+        _CleanWriterLLM(), _approved_row("Chính sách mới, không có số liệu cụ thể", row=2),
+        route_llm=_QualitativeBriefVideoRouteLLM(), content_llm=_QualitativeVideoContentLLM())
+
+    video_rows = [r for r in board.appended_content if r[2] == "video"]
+    assert len(video_rows) == 1, "Video phải có ĐÚNG 1 dòng, không bị âm thầm loại vì facts=[]"
+    assert video_rows[0][3] != "SKIPPED"
+
+    article_rows = [r for r in board.appended_content if r[2] == "article"]
+    assert len(article_rows) == 1 and article_rows[0][3] == "DONE"
+
+
+def test_regression_row5_short_two_sentence_source_article_done_not_needs_human():
+    """§7 dòng 5 ("Nguồn hai đoạn nhưng có sự kiện rõ" -> Article ngắn DONE,
+    KHÔNG phải NEEDS_HUMAN). Đọc AnalysisWriterAgent.run() xác nhận KHÔNG có
+    sàn độ dài evidence tối thiểu nào trong code (chỉ build prompt rồi gọi
+    LLM) -- test khoá lại: nguồn 2 câu vẫn phải ra DONE khi Writer trả JSON
+    sạch, KHÔNG NEEDS_HUMAN/SKIPPED chỉ vì nguồn ngắn."""
+    class _CleanWriterLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            return _clean_writer_json()
+
+    short_source = "Ngân hàng X công bố tăng lãi suất huy động thêm 0,3 điểm %. Áp dụng từ đầu tháng sau."
+    result, board, notifier = _run_produce_scenario(
+        _CleanWriterLLM(), _approved_row(short_source, row=2))
+
+    article_rows = [r for r in board.appended_content if r[2] == "article"]
+    assert len(article_rows) == 1 and article_rows[0][3] == "DONE", (
+        f"nguồn ngắn 2 câu phải DONE, thực tế: {article_rows[0][3] if article_rows else 'KHÔNG có dòng'}"
+    )
+
+
+def test_regression_row9_composer_empty_subtitle_is_auto_filled_known_bug():
+    """§7 dòng 9 ("Composer trả subtitle: ''" -> Infographic PHẢI giữ nguyên
+    theo schema, KHÔNG tự điền) -- XÁC NHẬN LÀ BUG THẬT đang tồn tại (khớp
+    §8.2 báo cáo gốc: "parser có thể tự điền từ brief.title"). Đọc
+    `infographic_spec_from_data()` (agents/production.py): khi Composer trả
+    subtitle="" (rỗng), code LUÔN thay bằng `brief.title` (coi rỗng = "Composer
+    quên điền", KHÔNG phân biệt được với "Composer CHỦ ĐỘNG để rỗng"). Test
+    này set brief.title KHÁC brief.hook để phân biệt rõ 2 nguồn -- hiện tại
+    SẼ FAIL (subtitle bị điền brief.title thay vì giữ ""), đúng như dự kiến
+    của Phase B (case CHƯA sửa, để dành Phase D/schema fix)."""
+    from twmkt.agents.production import infographic_spec_from_data, ProductionBrief
+
+    brief = ProductionBrief(title="Tiêu đề Brief gốc KHÁC hẳn", hook="Hook khác nữa",
+                            url="https://cafef.vn/x.chn", evidence="Doanh thu tăng 40%.",
+                            facts=_infographic_test_facts())
+    data = {
+        "title": "FPT lãi kỷ lục", "subtitle": "",
+        "hero": [{"label": "Tăng trưởng doanh thu", "value": "+40%"}],
+        "market": [], "highlights": [], "related": [],
+        "priority": {"primary": [], "secondary": [], "minor": []},
+        "render_hint": {"ratio": "1:1"},
+    }
+    spec = infographic_spec_from_data(data, brief)
+    assert spec["subtitle"] == "", (
+        f"BUG XÁC NHẬN (§7 dòng 9): Composer trả subtitle rỗng có chủ đích nhưng code tự "
+        f"điền lại thành {spec['subtitle']!r} (brief.title) -- chưa phân biệt được "
+        f"'rỗng có chủ đích' với 'Composer quên điền'."
+    )
+
+
+def test_regression_row10_composer_empty_related_is_auto_filled_known_bug():
+    """§7 dòng 10 ("Composer trả related: []" -> Infographic PHẢI giữ rỗng,
+    KHÔNG tự chèn ticker) -- XÁC NHẬN LÀ BUG THẬT đang tồn tại, TRÁI với báo
+    cáo gốc §8.5 (báo cáo nói "lượt 3 đã đổi sang tôn trọng mảng rỗng" -- đọc
+    code hiện tại cho thấy CHƯA đúng). `infographic_spec_from_data()`:
+    `data.get("related") or _entity_names_from_facts(...) or brief.tickers` --
+    `[]` là falsy trong Python nên `or` CHUYỂN SANG nhánh kế dù Composer đã
+    trả rỗng TƯỜNG MINH, không phân biệt được "rỗng có chủ đích" với "thiếu
+    field". Test set brief.tickers khác rỗng để lộ rõ bug -- hiện tại SẼ FAIL."""
+    from twmkt.agents.production import infographic_spec_from_data, ProductionBrief
+
+    brief = ProductionBrief(title="t", hook="h", tickers=["FPT", "HPG"],
+                            url="https://cafef.vn/x.chn", evidence="Doanh thu tăng 40%.",
+                            facts=_infographic_test_facts())
+    data = {
+        "title": "FPT lãi kỷ lục", "subtitle": "Góc nhìn",
+        "hero": [{"label": "Tăng trưởng doanh thu", "value": "+40%"}],
+        "market": [], "highlights": [], "related": [],
+        "priority": {"primary": [], "secondary": [], "minor": []},
+        "render_hint": {"ratio": "1:1"},
+    }
+    spec = infographic_spec_from_data(data, brief)
+    assert spec["related"] == [], (
+        f"BUG XÁC NHẬN (§7 dòng 10): Composer trả related=[] tường minh nhưng code tự chèn "
+        f"lại {spec['related']!r} (từ facts/tickers) -- coi [] falsy giống thiếu field."
+    )
+
+
+def test_regression_row11_boilerplate_source_currently_produces_fabricated_article_known_gap():
+    """Ca THÊM (A6/Phase B yêu cầu bổ sung, KHÔNG có trong §7 gốc — sàn chống
+    sửa quá tay khi Phase D nới Router): nguồn boilerplate/trang điều
+    hướng/"đang cập nhật" (Brief đọc được nhưng KHÔNG có nội dung thực chất
+    nào, không phải lỗi hạ tầng) -- PHẢI được SKIPPED (mã lý do BOILERPLATE/
+    NO_USABLE_CONTENT), TUYỆT ĐỐI KHÔNG ra Article DONE (không có gì thật để
+    viết) và KHÔNG cần người can thiệp.
+
+    XÁC NHẬN GAP THẬT bằng CHẠY THẬT (không suy đoán): `curation.normalize.
+    is_relevant()` chỉ kiểm ticker/từ khoá vĩ mô, KHÔNG phát hiện boilerplate,
+    nên nguồn này lọt tới tận Brief/Writer. Chạy scenario này qua debug script
+    cho kết quả THẬT: article=DONE (AnalysisWriterAgent KHÔNG hề biết facts=[]
+    -- viết bất kể input rỗng tuếch, Execute tổng=DONE), infographic=ERROR
+    (KHÔNG phải SKIPPED), video=DONE (composer không kiểm nội dung nguồn).
+    KHÔNG CÓ tuyến nào bị chặn lại đúng cách -- ngược hẳn kỳ vọng "SKIPPED,
+    không cần người". Đây CHÍNH LÀ lý do Phase C cần `brief_status` 3 giá trị
+    (OK|NO_USABLE_CONTENT|FAILED) độc lập với facts=[]/no_numeric_content --
+    hiện tại hoàn toàn KHÔNG có tín hiệu nào phân biệt "brief chạy tốt nhưng
+    nguồn rỗng tuếch" với "brief chạy tốt, nguồn định tính hợp lệ" (cả 2 đều
+    cho facts=[]+no_numeric_content=False vì LLM không tự tin khẳng định
+    "chắc chắn không có số" khi đọc trang không có nội dung gì). Test này SẼ
+    FAIL cho tới khi Phase C/D làm xong, đúng vai trò SÀN chống sửa quá tay."""
+    import json as _json
+
+    class _CleanWriterLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            return _clean_writer_json()
+
+    class _BoilerplateRouteLLM:
+        """Mô phỏng Brief đọc 1 trang boilerplate: JSON parse ĐƯỢC (không phải
+        lỗi hạ tầng) nhưng facts=[] và no_numeric_content=False (LLM không tự
+        tin khẳng định "chắc chắn không có số" vì nội dung không có gì để đọc)."""
+
+        def complete(self, system, prompt, *, model=None, fail_loud=False, **kw):
+            if "no_numeric_content" in system:
+                return _json.dumps({"facts": [], "no_numeric_content": False}, ensure_ascii=False)
+            return ""
+
+    result, board, notifier = _run_produce_scenario(
+        _CleanWriterLLM(),
+        _approved_row("Trang chủ. Menu. Đăng nhập. Đang cập nhật nội dung...", row=2),
+        route_llm=_BoilerplateRouteLLM())
+
+    statuses = {r[2]: r[3] for r in board.appended_content}
+    article_status = statuses.get("article")
+    assert article_status != "DONE", (
+        f"BUG XÁC NHẬN (ca mới A6): nguồn boilerplate/không có nội dung thật vẫn ra Article "
+        f"DONE (bịa bài từ trang rỗng) thay vì SKIPPED -- toàn bộ trạng thái: {statuses}, "
+        f"Execute={board.execute_updates.get(2)}"
+    )
+
+
 def test_run_article_failed_marks_execute_failed_no_content_no_draft_changed():
     """outcome=FAILED (lỗi hạ tầng, hết retry): KHÔNG ghi CONTENT rác, Execute=
     FAILED (tái chạy được), notify start + retry/failed (adapter Phase 4.5) +
