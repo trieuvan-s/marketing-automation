@@ -152,6 +152,25 @@ FACT_KINDS = ("percent", "money", "count", "growth", "date", "ranking", "target"
 # facts_from_json (sheets_board.py) và test_fact_scalar_shape_backward_compat.
 FACT_SHAPES = ("scalar", "range", "delta", "entity_list", "entity")
 
+# PHASE C (content_unit contract, 2026-07-3x, quyết định Lead — reports/
+# LEAD_DECISION_INPUT_STRICTNESS.md §4.1/§5, file đã xoá sau khi đọc xong, xem
+# git log nhánh feature/content-unit-phase-c) — TRỤC PHÂN LOẠI THỨ 4, TRỰC GIAO
+# với `kind` (danh mục GIÁ TRỊ: percent/money/...) và `shape` (HÌNH DẠNG dữ
+# liệu: scalar/range/...): `type` là BẢN CHẤT NỘI DUNG — "đây là loại dữ kiện
+# gì" (số liệu/sự kiện/thay đổi chính sách/phát biểu/quy trình/quan hệ/trạng
+# thái trước-sau/timeline/trích dẫn/suy luận), KHÔNG đồng nhất "không có số"
+# với "không có nội dung" (nguyên tắc §4.1). "numeric" là mặc định — dữ liệu
+# Fact CŨ (trước Phase C, không có field `type` trong JSON) tự hiểu là
+# "numeric" (đa số Fact cũ đều mang số liệu), TƯƠNG THÍCH NGƯỢC 100%.
+CONTENT_UNIT_TYPES = ("numeric", "event", "policy_change", "statement", "process",
+                     "relation", "state_change", "timeline", "quote", "inference")
+
+# Mức độ chắc chắn của bằng chứng — CÀNG CỤ THỂ càng đáng tin: trích nguyên văn
+# > diễn giải lại > suy ra được từ nhiều câu > chỉ suy luận (không có câu nào
+# nói thẳng). KHÔNG suy ra "độ mạnh bằng chứng" chỉ từ có/không có số như cũ
+# (đây là field TƯỜNG MINH thay cho suy đoán ngầm đó).
+CONTENT_UNIT_EVIDENCE_LEVELS = ("direct_quote", "paraphrase", "derived", "inferred")
+
 
 @dataclass
 class Fact:
@@ -199,6 +218,22 @@ class Fact:
                             # date|ranking|target|other). KHÔNG đổi nghĩa Phase 1 — xem "shape"
                             # bên dưới cho HÌNH DẠNG dữ liệu (scalar|range|delta|entity_list|entity).
     shape: str = "scalar"   # Content Factory Phase 1 — xem FACT_SHAPES + docstring module.
+
+    # --- PHASE C (content_unit contract) — field ADDITIVE, KHÔNG đổi tên/xoá
+    # field nào ở trên (Fact JSON đã lưu trong store TRƯỚC Phase C không có 3
+    # field này -> default áp dụng, round-trip Fact(**item) vẫn nguyên vẹn). ---
+    type: str = "numeric"  # xem CONTENT_UNIT_TYPES — bản chất NỘI DUNG, KHÔNG
+                            # phải "kind" (percent/money/...) hay "shape"
+                            # (scalar/range/...) ở trên.
+    subject: str = ""       # chủ thể của claim (vd tên công ty/cơ quan/chính
+                            # sách) — BẮT BUỘC khi Brief phát ra content_unit
+                            # kiểu MỚI (agents/brief.py enforce, KHÔNG enforce
+                            # ở dataclass này để không phá Fact cũ round-trip).
+    claim: str = ""         # nội dung dữ kiện dạng câu — BẮT BUỘC cùng điều
+                            # kiện với `subject` ở trên.
+    evidence: str = ""      # xem CONTENT_UNIT_EVIDENCE_LEVELS — mức độ chắc
+                            # chắn của bằng chứng, TƯỜNG MINH thay vì suy đoán
+                            # ngầm từ có/không có số (nguyên tắc Phase C).
     raw: str = ""                          # cụm NGUYÊN VĂN (value+unit, kể cả từ xấp xỉ nếu có) —
                                             # PHẢI là substring THẬT của evidence+background, xem
                                             # agents/brief.facts_from_llm_output (không thì LOẠI fact)

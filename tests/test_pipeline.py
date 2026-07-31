@@ -3968,13 +3968,20 @@ def test_run_infographic_skipped_when_router_decides_channel_false_upfront():
         """route_llm giả: Brief trả facts thật (không rỗng — chứng minh channel
         gate KHÔNG phụ thuộc facts rỗng/không); router trả output_channels.
         infographic=False kèm rationale, để composer KHÔNG BAO GIỜ được gọi
-        (PoisonComposer sẽ raise nếu lỡ gọi tới)."""
+        (PoisonComposer sẽ raise nếu lỡ gọi tới).
+
+        Fact "raw" PHẢI verify được TRONG evidence thật dùng ở test này (source=
+        "" -> fetch_full_evidence() lùi về fallback=item["hook"]="hook gợi ý",
+        xem _approved_row/fetch_full_evidence) — Phase C tính brief_status từ
+        content_units ĐÃ VERIFY (không tin no_numeric_content rời), "10%" không
+        verify được (không có trong "hook gợi ý") sẽ khiến out=[] -> brief_
+        status=NO_USABLE_CONTENT SAI Ý ĐỊNH test này (facts THẬT, không rỗng)."""
 
         def complete(self, system, prompt, *, model=None, fail_loud=False, **kw):
             if "no_numeric_content" in system:   # Brief system prompt đặc trưng
                 return _json.dumps({
-                    "facts": [{"value": "10", "label": "Số liệu test", "unit": "%",
-                              "kind": "percent", "raw": "10%", "approx": False}],
+                    "facts": [{"value": "ý", "label": "Số liệu test", "unit": None,
+                              "kind": "percent", "raw": "gợi ý", "approx": False}],
                     "no_numeric_content": False,
                 }, ensure_ascii=False)
             return _json.dumps({
@@ -4033,6 +4040,40 @@ def test_run_article_skipped_when_router_decides_channel_false_upfront():
     article_rows = [r for r in board.appended_content if r[2] == "article"]
     assert len(article_rows) == 1 and article_rows[0][3] == "SKIPPED"
     assert "Tin chỉ 1 câu" in article_rows[0][5]
+
+
+def test_run_boilerplate_source_now_skipped_not_fabricated_article_phase_c():
+    """PHASE C — ca boilerplate/trang điều hướng/"đang cập nhật": Brief đọc
+    được (JSON parse ĐƯỢC, không phải lỗi hạ tầng) nhưng content_units RỖNG
+    và KHÔNG tự tin khẳng định no_numeric_content=true (không có gì để đọc
+    hiểu, khác hẳn "brief hỏng" hay "tin định tính đã xác nhận"). TRƯỚC Phase
+    C: Article vẫn được Writer viết BỊA từ trang rỗng (facts=[]+no_numeric_
+    content=False không đủ tín hiệu phân biệt) -- xác nhận THẬT ở Phase B
+    (nhánh feature/regression-tests-phase-b, test_regression_row11_...).
+    Test này SAU thay đổi Phase C (brief_status=NO_USABLE_CONTENT ép CẢ 3
+    tuyến SKIPPED ngay từ đầu, KHÔNG gọi Writer/Composer) PHẢI PASS."""
+    import json as _json
+
+    class _PoisonWriterLLM:
+        def complete(self, *a, **kw):
+            raise AssertionError("KHÔNG được gọi writer khi brief_status=NO_USABLE_CONTENT")
+
+    class _BoilerplateRouteLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False, **kw):
+            if "no_numeric_content" in system:
+                return _json.dumps({"facts": [], "no_numeric_content": False}, ensure_ascii=False)
+            return ""   # router fallback -> channels mặc định cả 3 True
+
+    result, board, notifier = _run_produce_scenario(
+        _PoisonWriterLLM(),
+        _approved_row("Trang chủ. Menu. Đăng nhập. Đang cập nhật nội dung...", row=2),
+        route_llm=_BoilerplateRouteLLM())
+
+    statuses = {r[2]: r[3] for r in board.appended_content}
+    assert statuses.get("article") == "SKIPPED", f"kỳ vọng SKIPPED, thực tế: {statuses}"
+    for r in board.appended_content:
+        if r[2] == "article":
+            assert "NO_USABLE_CONTENT" in r[5]
 
 
 def test_run_output_type_restricts_to_selected_type_only():
@@ -5515,6 +5556,105 @@ def test_facts_from_llm_output_empty_or_bad_json_returns_empty_list():
     assert facts_from_llm_output("", _SSI_EVIDENCE).facts == []
     assert facts_from_llm_output("không phải JSON", _SSI_EVIDENCE).facts == []
     assert facts_from_llm_output('{"facts": []}', _SSI_EVIDENCE).facts == []
+
+
+# =====================================================================
+# PHASE C (content_unit contract, 2026-07-3x) — brief_status 3 giá trị thay
+# suy luận nhị phân facts=[]/no_numeric_content cũ (Phase 4.12). `.content_units`
+# là tên field CHÍNH (BriefResult) — `.facts` GIỮ LÀM property tương thích
+# ngược, HẠN CỨNG 2026-08-10 (xem BriefResult.facts docstring, agents/brief.py).
+# =====================================================================
+def test_brief_result_status_failed_when_json_truly_broken():
+    """FAILED — LLM rỗng/JSON không parse được (lỗi hạ tầng THẬT), KHÁC hẳn
+    NO_USABLE_CONTENT (JSON parse ĐƯỢC nhưng rỗng tuếch) — 2 nguyên nhân khác
+    nhau, không được gộp (đây chính là gap Phase 4.12 để lọt, xem docstring
+    BriefResult)."""
+    from twmkt.agents.brief import facts_from_llm_output
+
+    assert facts_from_llm_output("", _SSI_EVIDENCE).brief_status == "FAILED"
+    assert facts_from_llm_output("không phải JSON", _SSI_EVIDENCE).brief_status == "FAILED"
+
+
+def test_brief_result_status_no_usable_content_when_json_parses_but_nothing_extractable():
+    """NO_USABLE_CONTENT — JSON parse ĐƯỢC (không phải lỗi hạ tầng), content_
+    units RỖNG, VÀ LLM KHÔNG tự tin khẳng định no_numeric_content=true. Đây là
+    CHỮ KÝ của nguồn boilerplate/trang điều hướng/"đang cập nhật" — LLM không
+    đọc hiểu được nội dung gì để khẳng định BẤT CỨ điều gì, kể cả "chắc chắn
+    không có số". TRƯỚC Phase C: case này lẫn vào cùng nhóm với "Brief hỏng
+    thật" (cả 2 đều facts=[]+no_numeric_content=False), khiến Article vẫn
+    được viết bịa (xem test_produce_boilerplate_source_now_skipped_not_done
+    bên dưới, integration test full pipeline cho đúng ca này)."""
+    from twmkt.agents.brief import facts_from_llm_output
+
+    result = facts_from_llm_output('{"facts": [], "no_numeric_content": false}', _SSI_EVIDENCE)
+    assert result.brief_status == "NO_USABLE_CONTENT"
+    assert result.content_units == []
+
+
+def test_brief_result_status_ok_when_qualitative_confirmed_even_with_zero_units():
+    """OK — content_units RỖNG nhưng LLM XÁC NHẬN CHẮC CHẮN no_numeric_content
+    =true (cơ chế Phase 4.12 GIỮ NGUYÊN) -> vẫn OK (có chất liệu định tính,
+    Router được quyền định tuyến), KHÔNG bị brief_status mới coi là
+    NO_USABLE_CONTENT."""
+    from twmkt.agents.brief import facts_from_llm_output
+
+    result = facts_from_llm_output('{"facts": [], "no_numeric_content": true}', _SSI_EVIDENCE)
+    assert result.brief_status == "OK"
+    assert result.content_units == []
+
+
+def test_brief_result_status_ok_when_content_units_non_empty():
+    """OK — content_units khác rỗng (bất kể no_numeric_content) -> OK, cùng
+    hành vi Phase 4.12 (facts thật luôn -> OK), chỉ đổi TÊN suy luận."""
+    from twmkt.agents.brief import facts_from_llm_output
+    import json as _json
+
+    raw = _json.dumps({
+        "facts": [{"shape": "scalar", "value": "8,18", "label": "GDP 6 tháng", "unit": "%",
+                  "kind": "percent", "raw": "8,18%", "approx": False}],
+        "no_numeric_content": False,
+    }, ensure_ascii=False)
+    result = facts_from_llm_output(raw, _SSI_EVIDENCE)
+    assert result.brief_status == "OK"
+    assert len(result.content_units) == 1
+
+
+def test_brief_result_facts_property_is_adapter_for_content_units():
+    """`.facts` (property, HẠN CỨNG 2026-08-10) PHẢI trả ĐÚNG object với
+    `.content_units` — code cũ đọc `.facts` không được thấy khác biệt."""
+    from twmkt.agents.brief import facts_from_llm_output
+    import json as _json
+
+    raw = _json.dumps({
+        "facts": [{"shape": "scalar", "value": "8,18", "label": "P/E SSI", "unit": None,
+                  "kind": "other", "raw": "8,18", "approx": False}],
+    }, ensure_ascii=False)
+    result = facts_from_llm_output(raw, _SSI_EVIDENCE)
+    assert result.facts is result.content_units
+
+
+def test_has_numeric_units_and_has_qualitative_units_independent_flags():
+    """Phase C — 2 cờ độc lập tính từ `type` của TỪNG content_unit (mặc định
+    "numeric", models.py). Hiện tại CHƯA có parser trích content_unit định
+    tính (type != "numeric") -- xem PHẦN "CHƯA LÀM" trong docstring module
+    brief.py -- nên has_qualitative_units luôn False trên dữ liệu THẬT hiện
+    tại; test này khoá đúng CÔNG THỨC tính (không phải hành vi cuối) bằng
+    cách tự dựng Fact type khác nhau trực tiếp, không qua LLM giả."""
+    from twmkt.agents.brief import BriefResult
+    from twmkt.models import Fact
+
+    numeric_only = BriefResult(content_units=[Fact(value="8", label="x", type="numeric")])
+    assert numeric_only.has_numeric_units is True
+    assert numeric_only.has_qualitative_units is False
+
+    qualitative_only = BriefResult(content_units=[Fact(value="", label="x", type="policy_change")])
+    assert qualitative_only.has_numeric_units is False
+    assert qualitative_only.has_qualitative_units is True
+
+    mixed = BriefResult(content_units=[Fact(value="8", label="x", type="numeric"),
+                                       Fact(value="", label="y", type="event")])
+    assert mixed.has_numeric_units is True
+    assert mixed.has_qualitative_units is True
 
 
 # =====================================================================

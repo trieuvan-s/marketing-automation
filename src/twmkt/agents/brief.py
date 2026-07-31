@@ -69,6 +69,40 @@ giờ trả `BriefResult` (facts + no_numeric_content: bool):
   - Caller (scripts/produce_from_sheet.run) dùng cờ này để quyết định
     SKIPPED (tin định tính, bỏ qua infographic hợp lệ) hay NEEDS_HUMAN (Brief
     hỏng thật) khi facts=[] — xem ProductionBrief.no_numeric_content.
+
+PHASE C (content_unit contract, 2026-07-3x, quyết định Lead — reports/LEAD_
+DECISION_INPUT_STRICTNESS.md §4.1/§5/§6-P0, file đã xoá sau khi đọc xong) —
+2 thay đổi chính TRÊN NỀN Phase 4.12 ở trên (KHÔNG thay thế, MỞ RỘNG):
+  1. `facts` (tên field BriefResult) đổi thành `content_units` — `facts` GIỮ
+     LẠI làm property tương thích ngược, HẠN CỨNG 2026-08-10 (xem BriefResult.
+     facts). `Fact` (tên class) KHÔNG đổi — thêm field ADDITIVE `type`/
+     `subject`/`claim`/`evidence` (models.py), KHÔNG phá round-trip dữ liệu
+     Fact cũ trong store.
+  2. `brief_status` (OK|NO_USABLE_CONTENT|FAILED, xem BriefResult docstring)
+     THAY `no_numeric_content` làm nguồn SUY LUẬN CHÍNH cho caller — đóng
+     đúng gap Phase 4.12 để lọt: no_numeric_content=False vốn dùng CHUNG cho
+     CẢ "Brief hỏng thật" LẪN "đọc được nhưng nguồn boilerplate/rỗng tuếch"
+     (2 tình huống khác hẳn nhau, gộp làm 1 khiến nguồn boilerplate rơi vào
+     NEEDS_HUMAN thay vì SKIPPED — xác nhận THẬT qua test hồi quy Phase B,
+     tests/test_pipeline.py::test_regression_row11_...). `no_numeric_content`
+     GIỮ NGUYÊN cơ chế cũ (LLM tự xác nhận, code không suy diễn) — chỉ
+     KHÔNG CÒN là field DUY NHẤT caller đọc để quyết định.
+
+  CHƯA LÀM (ngoài phạm vi Phase C đợt này, cần Lead xác nhận trước khi làm):
+  `type` (CONTENT_UNIT_TYPES: numeric|event|policy_change|statement|process|
+  relation|state_change|timeline|quote|inference) hiện CHỈ có giá trị mặc
+  định "numeric" — CHƯA xây parser/prompt trích content_unit ĐỊNH TÍNH (kiểu
+  policy_change/statement/...) với subject/claim/source riêng như 5 shape số
+  hiện có. Lý do: parser mới cần validate bằng LLM THẬT (không unit-test tất
+  định được bằng JSON giả — cùng lý do row 8/§7 không viết được test tất
+  định, xem Phase B report) và là 1 mặt trận kiến trúc riêng (thêm shape thứ
+  6 "unit" định tính, khác 5 shape số hiện có) — rủi ro nếu làm vội trong
+  cùng phase với đổi brief_status. `has_numeric_units`/`has_qualitative_units`
+  do đó hiện LUÔN đúng "has_numeric_units=True, has_qualitative_units=False"
+  khi content_units khác rỗng (mọi content_unit hiện tại đều type="numeric"
+  mặc định) — 2 cờ ĐỘC LẬP về mặt CODE (tính riêng theo `type` từng đơn vị,
+  sẵn sàng cho khi có content_unit định tính thật), chỉ chưa có dữ liệu định
+  tính nào để thấy has_qualitative_units=True trên thực tế.
 """
 from __future__ import annotations
 
@@ -84,13 +118,66 @@ from .base import LLMClient
 
 @dataclass
 class BriefResult:
-    """Output run_brief()/facts_from_llm_output() (Phase 4.12) — facts[] +
-    cờ phân biệt "rỗng-hợp-lệ" (tin thuần định tính, Brief xác nhận) vs
-    "rỗng-do-hỏng" (LLM lỗi/timeout/parse thất bại). Xem docstring module."""
-    facts: list[Fact] = field(default_factory=list)
+    """Output run_brief()/facts_from_llm_output() — content_units[] (Phase C,
+    trước đây tên `facts`) + `brief_status` (Phase C — thay `no_numeric_
+    content` làm nguồn SUY LUẬN chính, xem dưới) + cờ phụ trợ. Xem docstring
+    module.
+
+    PHASE C (content_unit contract, 2026-07-3x) — `brief_status` là 3 GIÁ TRỊ
+    tường minh (KHÔNG còn suy nhị phân facts=[] + no_numeric_content như
+    Phase 4.12):
+      "OK"               — content_units khác rỗng, HOẶC no_numeric_content=
+                           True (LLM XÁC NHẬN CHẮC CHẮN tin thuần định tính,
+                           cơ chế Phase 4.12 giữ nguyên) -> có chất liệu, cho
+                           Router định tuyến.
+      "NO_USABLE_CONTENT" — JSON parse ĐƯỢC (không phải lỗi hạ tầng) nhưng
+                           content_units RỖNG VÀ LLM KHÔNG tự tin khẳng định
+                           "chắc chắn không có số" (no_numeric_content vẫn
+                           False mặc định) -- ĐÂY LÀ CHỮ KÝ của nguồn
+                           boilerplate/trang điều hướng/"đang cập nhật": LLM
+                           không đọc hiểu được nội dung gì để KHẲNG ĐỊNH bất
+                           cứ điều gì, kể cả "không có số" -- xác nhận qua
+                           test_regression_row11_... (tests/test_pipeline.py,
+                           Phase B) trước khi có field này, ca này bị lẫn vào
+                           "NEEDS_HUMAN" (facts[] rỗng do hỏng) một cách SAI,
+                           dẫn tới Article vẫn được viết (bịa từ trang rỗng).
+      "FAILED"            — LLM rỗng/lỗi/timeout HOẶC JSON không parse được
+                           (lỗi hạ tầng THẬT) -- GIÁ TRỊ MẶC ĐỊNH của dataclass
+                           này (an toàn: mọi đường LÙI MƯỢT không set tường
+                           minh sẽ tự rơi vào FAILED, không bao giờ ngộ nhận
+                           OK/NO_USABLE_CONTENT từ 1 lỗi hạ tầng).
+    `facts=[]` KHÔNG CÒN được dùng riêng để suy trạng thái Brief (nguyên tắc
+    Phase C) — dùng `brief_status` tường minh."""
+    content_units: list[Fact] = field(default_factory=list)
     no_numeric_content: bool = False
     scan_note: str = ""   # Content Factory Phase 2 — LLM tự báo lý do fact_count < 8
                           # (bài nghèo dữ liệu thật) HOẶC "" nếu không cần giải trình
+    brief_status: str = "FAILED"   # xem docstring lớp — mặc định AN TOÀN, mọi
+                                    # chỗ tạo BriefResult() TRẦN (đường lùi mượt
+                                    # do lỗi hạ tầng) tự nhận FAILED, KHÔNG cần
+                                    # set tường minh ở từng nơi.
+
+    @property
+    def facts(self) -> list[Fact]:
+        """Adapter TƯƠNG THÍCH NGƯỢC cho code CŨ đọc `.facts` (Content/Video/
+        Infographic agents chưa kịp đổi sang `.content_units` cùng đợt Phase
+        C). HẠN CỨNG 2026-08-10 (10 ngày từ ngày viết code này, 2026-07-31) —
+        SAU NGÀY NÀY XOÁ property này, mọi nơi PHẢI dùng `.content_units`
+        trực tiếp — KHÔNG để property này thành nguồn sự thật thứ hai sống
+        mãi (cùng kỷ luật "TẠM THỜI" như hard-code màu Phase E)."""
+        return self.content_units
+
+    @property
+    def has_numeric_units(self) -> bool:
+        """Phase C — 2 cờ has_numeric_units/has_qualitative_units ĐỘC LẬP,
+        tính từ `type` của TỪNG content_unit (KHÔNG suy đoán từ có/không có
+        field rời như no_numeric_content cũ) — 1 bài có thể vừa có số vừa có
+        dữ kiện định tính, 2 cờ không loại trừ nhau."""
+        return any(u.type == "numeric" for u in self.content_units)
+
+    @property
+    def has_qualitative_units(self) -> bool:
+        return any(u.type != "numeric" for u in self.content_units)
 
 _SENT_SPLIT_RE = re.compile(r"(?<=[.!?\n])\s+")
 
@@ -130,7 +217,16 @@ def _system_prompt(entity_types: list[str] | None = None,
         "SỐ 'giảm từ 36 xuống 23 cảng', HOẶC CHUYỂN TRẠNG THÁI không phải số "
         "'từ diện kiểm soát sang diện cảnh báo', 'từ 16,3 tỷ đồng còn 176 "
         "triệu đồng'). Nhận diện qua cụm 'từ X xuống/còn/lên Y', 'so với mức "
-        "X ... nay Y', 'X ... giảm/tăng ... thành Y'.\n"
+        "X ... nay Y', 'X ... giảm/tăng ... thành Y'. QUAN TRỌNG (Phase C, "
+        "R3): range/delta CHỈ hợp lệ khi cả 2 đầu số CÙNG NẰM TRONG 1 CÂU — "
+        "nếu 2 số/mốc liên quan (vd 2 đợt trong 1 lịch thanh toán nhiều đợt) "
+        "nằm ở 2 CÂU KHÁC NHAU, TUYỆT ĐỐI KHÔNG cố ghép/diễn giải lại thành 1 "
+        "câu để ép vừa khung range/delta — hãy trích MỖI đầu số thành 1 fact "
+        "scalar RIÊNG (dùng chung `label` mô tả rõ đây là 1 phần của cùng 1 "
+        "chuỗi/lịch, vd label='Đợt 1 lịch thanh toán X', 'Đợt 2 lịch thanh "
+        "toán X') — fact bị ghép sai câu sẽ bị CODE LOẠI BỎ HOÀN TOÀN (không "
+        "phải cảnh báo), mất luôn dữ liệu thật, còn 2 fact scalar riêng vẫn "
+        "giữ được đủ thông tin.\n"
         "  4) entity_list — 1 TẬP HỢP tên (`entities`, ≥2 phần tử) được LIỆT "
         "KÊ CÙNG NHAU trong bài, vd 'Hàn Quốc, Nhật Bản, Singapore, Trung "
         "Quốc, Mỹ và châu Âu', '4 cảng: Cần Giờ, Liên Chiểu, Nam Đồ Sơn, Vân "
@@ -466,7 +562,7 @@ def facts_from_llm_output(raw: str, evidence: str, background: str = "",
     — xem run_brief."""
     data = try_json_object(raw) if raw else None
     if not data:
-        return BriefResult()
+        return BriefResult()   # brief_status mặc định "FAILED" (lỗi hạ tầng THẬT)
     # Chuẩn hoá NFC 1 LẦN Ở ĐÂY (xem _normalize_text) — mọi hàm _parse_* +
     # raw_phrase check bên dưới đọc source_text ĐÃ chuẩn hoá, tránh lặp lại
     # normalize() rải rác nhiều nơi.
@@ -504,7 +600,13 @@ def facts_from_llm_output(raw: str, evidence: str, background: str = "",
     # tin mù field rời của LLM, cùng triết lý driver_count/has_genuine_paradox).
     no_numeric_content = bool(data.get("no_numeric_content", False)) and not out
     scan_note = str(data.get("scan_note", "")).strip()
-    return BriefResult(facts=out, no_numeric_content=no_numeric_content, scan_note=scan_note)
+    # Phase C — brief_status: JSON parse ĐƯỢC tới đây rồi (không phải FAILED).
+    # out khác rỗng HOẶC LLM tự tin xác nhận no_numeric_content -> OK (có chất
+    # liệu). Cả 2 đều rỗng/False -> NO_USABLE_CONTENT (chữ ký boilerplate/
+    # trang rỗng — xem docstring BriefResult).
+    brief_status = "OK" if (out or no_numeric_content) else "NO_USABLE_CONTENT"
+    return BriefResult(content_units=out, no_numeric_content=no_numeric_content,
+                       scan_note=scan_note, brief_status=brief_status)
 
 
 def run_brief(llm: LLMClient, evidence: str, background: str = "", *,
@@ -528,6 +630,6 @@ def run_brief(llm: LLMClient, evidence: str, background: str = "", *,
     raw = llm.complete(system, build_brief_prompt(evidence, background),
                        model=model, fail_loud=fail_loud)
     if not raw:
-        return BriefResult()
+        return BriefResult()   # brief_status mặc định "FAILED" (LLM rỗng/lỗi/timeout)
     return facts_from_llm_output(raw, evidence, background,
                                  entity_types=entity_types, entity_salience=entity_salience)

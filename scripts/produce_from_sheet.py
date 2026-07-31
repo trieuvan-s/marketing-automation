@@ -149,11 +149,24 @@ def _allowed_output_types(output_type: list[str]) -> set[str] | None:
     return {_OUTPUT_TYPE_TO_CONTENT_TYPE[t] for t in output_type if t in _OUTPUT_TYPE_TO_CONTENT_TYPE}
 
 
-def _channel_skip_reason(ch: str, decision, output_type_excluded: set[str]) -> str:
+_NO_USABLE_CONTENT_REASON = (
+    "NO_USABLE_CONTENT: Brief đọc được nguồn nhưng KHÔNG tìm thấy nội dung thực "
+    "chất nào (không phải lỗi hạ tầng, không phải tin thuần định tính đã xác "
+    "nhận) — nghi nguồn boilerplate/trang điều hướng/placeholder. SKIP cả 3 "
+    "tuyến, KHÔNG cần người can thiệp (xem agents/brief.BriefResult.brief_status, Phase C)."
+)
+
+
+def _channel_skip_reason(ch: str, decision, output_type_excluded: set[str], *,
+                         no_usable_content: bool = False) -> str:
     """Notes giải thích ĐÚNG nguyên nhân SKIPPED — phân biệt router (nội dung
-    không hợp tuyến) với Output Type (người không chọn tuyến, dù router có
-    thể đã đồng ý) — 2 nguyên nhân KHÁC NHAU, gộp làm 1 thông điệp sẽ đánh
-    lừa người đọc Notes khi tra vì sao thiếu 1 loại."""
+    không hợp tuyến), Output Type (người không chọn tuyến, dù router có thể
+    đã đồng ý), và Phase C `no_usable_content` (Brief xác nhận nguồn KHÔNG có
+    nội dung thực chất — ưu tiên CAO NHẤT, kiểm TRƯỚC 2 nhánh kia vì đây là lý
+    do THẬT SỰ khiến router/Output Type không còn ý nghĩa để xét) — gộp làm 1
+    thông điệp sẽ đánh lừa người đọc Notes khi tra vì sao thiếu 1 loại."""
+    if no_usable_content:
+        return _NO_USABLE_CONTENT_REASON
     if ch in output_type_excluded:
         return f"Output Type không chọn tuyến {ch} cho chủ đề này (người giới hạn qua cột Output Type)."
     return (f"Router quyết định tuyến {ch} không hợp tin này: "
@@ -388,6 +401,11 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
         # Phase 4.12: run_brief() trả BriefResult (facts + no_numeric_content)
         # — phân biệt facts=[] RỖNG-HỢP-LỆ (Brief chạy trọn vẹn, xác nhận tin
         # thuần định tính) vs RỖNG-DO-HỎNG (LLM lỗi/timeout — cờ luôn False).
+        # Phase C (2026-07-3x): BriefResult giờ CÒN có `brief_status` (OK|
+        # NO_USABLE_CONTENT|FAILED, xem agents/brief.py) — dùng ngay dưới đây
+        # để chặn nguồn boilerplate/rỗng tuếch TRƯỚC khi tới Writer/Composer
+        # (biến `no_usable_content`, sau khi tính `channels`). `.facts` vẫn đọc
+        # được qua property tương thích ngược (HẠN CỨNG 2026-08-10).
         brief_result = (run_brief(route_llm, evidence, model=factory.step_model(settings, "brief"),
                                   fail_loud=factory.is_fail_loud_step(settings, "brief"),
                                   settings=settings)
@@ -420,6 +438,32 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
         # đầu của router (đóng băng CÙNG decision), THAY nhánh "SKIPPED-vì-rỗng"
         # phản ứng-sau của Phase 4.12 (xem nhánh infographic bên dưới).
         channels = dict(decision.output_channels)
+        # Phase C — brief_status=NO_USABLE_CONTENT (Brief chạy TRỌN VẸN, đọc
+        # được nguồn nhưng KHÔNG tìm thấy nội dung thực chất nào -- không phải
+        # lỗi hạ tầng [FAILED], không phải tin thuần định tính đã XÁC NHẬN
+        # [no_numeric_content=True, OK] -- nghi boilerplate/trang điều hướng/
+        # placeholder, xem agents/brief.BriefResult docstring) -> ÉP CẢ 3
+        # TUYẾN false NGAY Ở ĐÂY, TRƯỚC khi Writer/Composer có cơ hội chạy.
+        # TRƯỚC Phase C: facts=[]+no_numeric_content=False (chữ ký boilerplate)
+        # không phân biệt được với "Brief hỏng thật" hay "router/brief bất
+        # đồng" -> Article vẫn được Writer viết BỊA từ trang rỗng, Execute=
+        # DONE -- xác nhận THẬT qua tests/test_pipeline.py::test_regression_
+        # row11_boilerplate_source_currently_produces_fabricated_article_
+        # known_gap (Phase B, SẼ chuyển PASS sau thay đổi này).
+        # CHỈ đè tuyến Router ĐỂ MẶC ĐỊNH true (fallback/không có ý kiến riêng)
+        # -- tuyến Router đã CHỦ ĐỘNG tắt kèm rationale riêng (vd "tin bảng-số
+        # không hợp hình") GIỮ NGUYÊN lý do gốc, KHÔNG ghi đè bằng
+        # NO_USABLE_CONTENT (2 nguyên nhân khác nhau, dù cùng ra SKIPPED —
+        # router có thể thấy channel không hợp VÌ LÝ DO KHÁC dù Brief vẫn có
+        # verify được content_units, xem 2 test Phase 4.13 channel-false/
+        # article-false vốn dùng evidence rỗng/placeholder trong fixture,
+        # KHÔNG phải nguồn boilerplate thật -- không nên bị gán nhầm lý do).
+        no_usable_content_channels: set[str] = set()
+        if write_article and brief_result.brief_status == "NO_USABLE_CONTENT":
+            for ch in ("article", "video", "infographic"):
+                if channels.get(ch, True):
+                    channels[ch] = False
+                    no_usable_content_channels.add(ch)
         # Bước 4 — Output Type AND với quyết định router (xem docstring
         # _allowed_output_types/_channel_skip_reason): output_type rỗng/AUTO
         # -> KHÔNG đổi channels (hành vi router-only như trước Bước 4).
@@ -450,7 +494,8 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
             # này, nên vẫn cần 1 dòng giải thích vì sao hệ thống từ chối.
             skipped += 1
         elif not channels.get("article", True):
-            reason = _channel_skip_reason("article", decision, output_type_excluded)
+            reason = _channel_skip_reason("article", decision, output_type_excluded,
+                                          no_usable_content="article" in no_usable_content_channels)
             _write_content(topic_key, "article", status="SKIPPED", output="", notes=reason, facts_json=facts_json)
             written += 1
             seen.add((topic_key, "article"))
@@ -514,7 +559,8 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                 if (topic_key, type_key) in seen:
                     skipped += 1
                     continue
-                reason = _channel_skip_reason(ch, decision, output_type_excluded)
+                reason = _channel_skip_reason(ch, decision, output_type_excluded,
+                                              no_usable_content=ch in no_usable_content_channels)
                 _write_content(topic_key, type_key, status="SKIPPED", output="", notes=reason, facts_json=facts_json)
                 written += 1
                 seen.add((topic_key, type_key))
