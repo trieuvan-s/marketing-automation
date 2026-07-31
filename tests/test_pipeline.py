@@ -4246,6 +4246,56 @@ def test_regression_row1_row7_qualitative_article_done_infographic_skipped_video
     assert len(article_rows) == 1 and article_rows[0][3] == "DONE"
 
 
+def test_regression_row2_row3_process_timeline_units_real_qualitative_extraction_ok():
+    """§7 dòng 2 ("Quy trình năm bước" -> Article DONE, Infographic Explanatory
+    DONE) + dòng 3 ("Timeline nhiều mốc không tiền/%" -> Article DONE,
+    Infographic Explanatory DONE) — BỔ SUNG sau khi Bước 3 (trích content_unit
+    ĐỊNH TÍNH thật) hoàn tất, đúng yêu cầu Lead "xác nhận Phase B đủ 10 ca §7,
+    bổ sung ca thiếu trước Bước 4". Lúc viết Phase B gốc, 2 dòng này CHƯA viết
+    được test tất định vì chưa có parser content_unit định tính (chỉ có type=
+    "numeric" mặc định) — giờ ĐÃ CÓ (_parse_qualitative_unit, Bước 3).
+
+    Test Ở TẦNG BRIEF trực tiếp (content_units_from_llm_output), KHÔNG qua
+    _run_produce_scenario/produce_from_sheet.run() -- lý do: harness đó luôn
+    fallback evidence về "hook gợi ý" (item["source"]="" -> fetch_full_
+    evidence trả fallback=item["hook"], xem _approved_row/fetch_full_evidence)
+    khi không có source/URL thật, nên KHÔNG mô phỏng được 1 văn bản dài có
+    source câu THẬT để content_unit định tính verify — hành vi "article/video
+    không bị loại khi content_units non-empty bất kể type" đã được khoá ở
+    tầng produce_from_sheet bởi test_regression_row1_row7_... (dùng no_
+    numeric_content=true) VÀ 2 test Phase 4.13 channel-false/article-false
+    (dùng content_units type=numeric) — CƠ CHẾ ĐÓ không phân biệt theo `type`
+    (chỉ kiểm `content_units` rỗng hay không, xem produce_from_sheet.py
+    `no_usable_content_channels`), nên không cần lặp lại ở đây.
+
+    VẪN CHƯA ĐẠT (giữ nguyên biên giới đã nêu ở Phase B, KHÔNG đổi): Infographic
+    "Explanatory" là 1 KIỂU INFOGRAPHIC RIÊNG (P1, chưa xây)."""
+    import json as _json
+    from twmkt.agents.brief import content_units_from_llm_output
+
+    evidence = ("Doanh nghiệp phải nộp hồ sơ, chờ thẩm định, rồi mới được cấp phép. "
+               "Dự án dự kiến khởi công trong quý 3 và hoàn thành vào quý 1 năm sau.")
+    raw = _json.dumps({
+        "content_units": [
+            {"shape": "qualitative", "type": "process", "subject": "Doanh nghiệp",
+             "claim": "Doanh nghiệp phải nộp hồ sơ, chờ thẩm định, rồi mới được cấp phép",
+             "source": "Doanh nghiệp phải nộp hồ sơ, chờ thẩm định, rồi mới được cấp phép.",
+             "evidence": "direct_quote"},
+            {"shape": "qualitative", "type": "timeline", "subject": "Dự án",
+             "claim": "Dự án khởi công quý 3 và hoàn thành vào quý 1 năm sau",
+             "source": "Dự án dự kiến khởi công trong quý 3 và hoàn thành vào quý 1 năm sau.",
+             "evidence": "paraphrase"},
+        ],
+        "no_numeric_content": False,
+    }, ensure_ascii=False)
+
+    br = content_units_from_llm_output(raw, evidence)
+    assert br.brief_status == "OK"
+    assert br.has_qualitative_units is True and br.has_numeric_units is False
+    assert {u.type for u in br.content_units} == {"process", "timeline"}
+    assert len(br.content_units) == 2, "cả 2 unit phải verify được (source substring văn bản thật)"
+
+
 def test_regression_row5_short_two_sentence_source_article_done_not_needs_human():
     """§7 dòng 5 ("Nguồn hai đoạn nhưng có sự kiện rõ" -> Article ngắn DONE,
     KHÔNG phải NEEDS_HUMAN). Đọc AnalysisWriterAgent.run() xác nhận KHÔNG có
@@ -4280,7 +4330,7 @@ def test_regression_row9_composer_empty_subtitle_is_auto_filled_known_bug():
 
     brief = ProductionBrief(title="Tiêu đề Brief gốc KHÁC hẳn", hook="Hook khác nữa",
                             url="https://cafef.vn/x.chn", evidence="Doanh thu tăng 40%.",
-                            facts=_infographic_test_facts())
+                            content_units=_infographic_test_content_units())
     data = {
         "title": "FPT lãi kỷ lục", "subtitle": "",
         "hero": [{"label": "Tăng trưởng doanh thu", "value": "+40%"}],
@@ -4301,7 +4351,7 @@ def test_regression_row10_composer_empty_related_is_auto_filled_known_bug():
     KHÔNG tự chèn ticker) -- XÁC NHẬN LÀ BUG THẬT đang tồn tại, TRÁI với báo
     cáo gốc §8.5 (báo cáo nói "lượt 3 đã đổi sang tôn trọng mảng rỗng" -- đọc
     code hiện tại cho thấy CHƯA đúng). `infographic_spec_from_data()`:
-    `data.get("related") or _entity_names_from_facts(...) or brief.tickers` --
+    `data.get("related") or _entity_names_from_content_units(...) or brief.tickers` --
     `[]` là falsy trong Python nên `or` CHUYỂN SANG nhánh kế dù Composer đã
     trả rỗng TƯỜNG MINH, không phân biệt được "rỗng có chủ đích" với "thiếu
     field". Test set brief.tickers khác rỗng để lộ rõ bug -- hiện tại SẼ FAIL."""
@@ -4309,7 +4359,7 @@ def test_regression_row10_composer_empty_related_is_auto_filled_known_bug():
 
     brief = ProductionBrief(title="t", hook="h", tickers=["FPT", "HPG"],
                             url="https://cafef.vn/x.chn", evidence="Doanh thu tăng 40%.",
-                            facts=_infographic_test_facts())
+                            content_units=_infographic_test_content_units())
     data = {
         "title": "FPT lãi kỷ lục", "subtitle": "Góc nhìn",
         "hero": [{"label": "Tăng trưởng doanh thu", "value": "+40%"}],
