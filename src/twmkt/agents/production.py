@@ -6,9 +6,9 @@ JSON theo SCHEMA cố định (xem docs/production_agents_design.md):
   • AnalysisWriterAgent  — bài phân tích (LLM). Schema: title/sapo/sections/disclaimer/sources.
   • VideoScriptAgent     — kịch bản video ~60s (LLM). Schema: CONTENT.Output video
     (schema_version/title/scenes[{role,visual_kind,payload,narration}]/source/
-    disclaimer/facts — xem docs/CONTENT_OUTPUT_SCHEMA.md, hợp đồng CHÉO REPO).
+    disclaimer/content_units — xem docs/CONTENT_OUTPUT_SCHEMA.md, hợp đồng CHÉO REPO).
   • InfographicSpecAgent — spec JSON (TẤT ĐỊNH, $0 — theo CLAUDE.md: infographic ở
-    Tầng 0/free). Số liệu đọc THẲNG từ ProductionBrief.facts[] (Phase 4.10 — trước
+    Tầng 0/free). Số liệu đọc THẲNG từ ProductionBrief.content_units[] (Phase 4.10 — trước
     đó trích thô bằng regex trên evidence, không qua LLM nên không thể bịa).
 
 HAI CÁCH điền JSON cho Analysis/Video (cùng schema, cùng guardrail, khác "ai viết"):
@@ -40,10 +40,10 @@ GUARDRAIL (chạy SAU khi sinh, TRƯỚC khi ghi CONTENT, xem apply_guardrails()
 
 PHASE 4.8 MỤC C — SỐ CANONICAL: số trong body KHÔNG khớp NGUYÊN VĂN evidence
 (vd Writer viết "gần 600 tỷ" trong khi evidence chỉ có "585 tỷ đồng") KHÔNG còn
-tự động bị flag — nếu `facts` (agents/brief.py) có 1 fact.canonical_value lệch
+tự động bị flag — nếu `content_units` (agents/brief.py) có 1 fact.canonical_value lệch
 ≤ dung sai (0% mặc định, nới ≤ guardrail.approx_tolerance_pct% CHỈ KHI số
 trong body đi kèm từ xấp xỉ ngay trước nó) thì coi là HỢP LỆ. Đây vẫn là PHÉP
-TÍNH SỐ HỌC TẤT ĐỊNH (agents/_numeric.py) — KHÔNG gọi LLM để phán. `facts`
+TÍNH SỐ HỌC TẤT ĐỊNH (agents/_numeric.py) — KHÔNG gọi LLM để phán. `content_units`
 rỗng/không truyền (đa số call site hiện tại CHƯA wire agents/brief.run_brief())
 -> cơ chế này no-op hoàn toàn, lùi về hành vi CŨ (chỉ so khớp evidence trực
 tiếp) — KHÔNG đổi hành vi các đường sản xuất hiện có.
@@ -79,7 +79,7 @@ from ..config import data_path, load_brand, load_settings
 from ..guardrails import compliance
 from ..media_factory.numbers import find_spelled_number_phrases
 from ..media_factory.spec import DEFERRED_VISUAL_KINDS, VISUAL_KINDS
-from ..models import ContentDraft, ContentFormat, Fact
+from ..models import ContentDraft, ContentFormat, ContentUnit
 from .base import Agent, LLMClient
 from .voice import assemble_voice
 
@@ -373,11 +373,11 @@ _BRAND_NAME = str(load_brand().get("name") or "").strip() or "đội ngũ phân 
 # (composer), tránh trôi giữa 2 nơi. Xem docstring module đầu file.
 _NUMBER_DISCIPLINE = (
     "\nKỶ LUẬT SỐ (BẮT BUỘC, Phase 4.13 — giảm NEEDS_HUMAN oan do tự chế số):\n"
-    "- MỌI số bạn viết PHẢI Y NGUYÊN VĂN như trong facts[].raw (hoặc evidence "
-    "nếu không có facts) — KHÔNG tự CỘNG/GỘP nhiều số RIÊNG LẺ thành 1 số MỚI "
+    "- MỌI số bạn viết PHẢI Y NGUYÊN VĂN như trong content_units[].raw (hoặc evidence "
+    "nếu không có content_units) — KHÔNG tự CỘNG/GỘP nhiều số RIÊNG LẺ thành 1 số MỚI "
     "(vd evidence có '89.000 tỷ đồng' và '125.000 tỷ đồng' ở 2 câu KHÁC NHAU -> "
     "CẤM tự cộng ra '214.000 tỷ đồng' hay bất kỳ số tổng nào KHÔNG có sẵn "
-    "nguyên văn trong facts[]/evidence).\n"
+    "nguyên văn trong content_units[]/evidence).\n"
     "- KHÔNG tự đổi/rớt ĐƠN VỊ hay BẬC SỐ (vd evidence viết '357.000 tỷ đồng' -> "
     "PHẢI giữ đúng '357.000 tỷ đồng' hoặc '357 nghìn tỷ đồng' — TUYỆT ĐỐI KHÔNG "
     "viết thành '357 tỷ' vì đã làm mất 3 chữ số 0, sai lệch 1.000 LẦN).\n"
@@ -387,7 +387,7 @@ _NUMBER_DISCIPLINE = (
     "NGHÌN); dấu PHẨY (,) = phân cách PHẦN THẬP PHÂN sau hàng đơn vị (vd "
     "'8,18%' = tám phẩy mười tám phần trăm, KHÔNG phải 818%).\n"
     "- Muốn dùng SỐ TỔNG (vd tổng nhiều khoản) -> CHỈ dùng nếu con số tổng đó "
-    "ĐÃ có sẵn NGUYÊN VĂN trong facts[]/evidence (ai đó đã tính sẵn và công bố) "
+    "ĐÃ có sẵn NGUYÊN VĂN trong content_units[]/evidence (ai đó đã tính sẵn và công bố) "
     "— KHÔNG tự làm phép cộng/trừ/nhân/chia rồi trình bày như số THẬT của nguồn."
 )
 
@@ -408,8 +408,8 @@ class ProductionBrief:
     url: str = ""                                # CONTEXT.Source (bài chính)
     evidence: str = ""                           # thân bài (full-fetch) để LLM bám + chống bịa số
     background: str = ""                         # bối cảnh/tiền lệ research THÊM (Claude Code tự tìm)
-    facts: list[Fact] = field(default_factory=list)  # số liệu đã gắn nhãn (agents/brief.py, Phase 2)
-    no_numeric_content: bool = False   # Phase 4.12: Brief xác nhận CHẮC CHẮN tin không có số (facts=[] hợp lệ, khác facts=[] do Brief hỏng — xem agents/brief.BriefResult)
+    content_units: list[ContentUnit] = field(default_factory=list)  # số liệu đã gắn nhãn (agents/brief.py, Phase 2)
+    no_numeric_content: bool = False   # Phase 4.12: Brief xác nhận CHẮC CHẮN tin không có số (content_units=[] hợp lệ, khác content_units=[] do Brief hỏng — xem agents/brief.BriefResult)
 
 
 def _tickers_line(brief: ProductionBrief) -> str:
@@ -453,7 +453,7 @@ _DEFAULT_APPROX_TOLERANCE = 0.05   # Mục C: nới ≤5% CHỈ KHI số TRONG B
 _APPROX_LOOKBACK = 12               # số ký tự nhìn NGƯỢC trước token để tìm từ xấp xỉ
 
 
-def _matches_canonical_fact(tok: str, body: str, start: int, facts: list[Fact],
+def _matches_canonical_fact(tok: str, body: str, start: int, content_units: list[ContentUnit],
                             tolerance: float) -> bool:
     """Mục C (Phase 4.8; mở rộng Content Factory Phase 1 — range/delta): số
     TRONG BÀI (`tok`, tại vị trí `start`) HỢP LỆ nếu khớp BẤT KỲ trường
@@ -473,7 +473,7 @@ def _matches_canonical_fact(tok: str, body: str, start: int, facts: list[Fact],
     if val is None:
         return False
     effective_tolerance = tolerance if has_approx_word(body[max(0, start - _APPROX_LOOKBACK):start]) else 0.0
-    for f in facts:
+    for f in content_units:
         if f.canonical_value is not None and f.canonical_value != 0:
             if abs(val - f.canonical_value) / abs(f.canonical_value) <= effective_tolerance:
                 return True
@@ -491,11 +491,11 @@ def _matches_canonical_fact(tok: str, body: str, start: int, facts: list[Fact],
     return False
 
 
-def unsupported_numbers(body: str, source_text: str, facts: list[Fact] | None = None, *,
+def unsupported_numbers(body: str, source_text: str, content_units: list[ContentUnit] | None = None, *,
                         approx_tolerance: float = _DEFAULT_APPROX_TOLERANCE) -> list[str]:
     """Số liệu tài chính (%, tỷ, triệu...) xuất hiện trong `body` nhưng KHÔNG có
     trong `source_text` (evidence + background gộp lại) VÀ không khớp canonical
-    nào trong `facts` -> nghi bịa số. Hàm THUẦN, dùng bởi apply_guardrails().
+    nào trong `content_units` -> nghi bịa số. Hàm THUẦN, dùng bởi apply_guardrails().
     Thứ tự kiểm (dừng ở bước đầu tiên khớp):
       1. So khớp CHÍNH XÁC trong evidence.
       2. Sau khi chuẩn hoá dấu thập phân (_normalize_number, Phase 4.6 fix 1) —
@@ -503,10 +503,10 @@ def unsupported_numbers(body: str, source_text: str, facts: list[Fact] | None = 
          Việt) mà KHÔNG coi là bịa số, miễn CHỮ SỐ giống hệt.
       3. Mục C (Phase 4.8): khớp SỐ HỌC với 1 fact.canonical_value trong dung
          sai (0% mặc định; ≤ approx_tolerance nếu số trong bài đi kèm từ xấp
-         xỉ) — `facts` rỗng/None -> bước này no-op, hành vi y hệt trước Mục C."""
+         xỉ) — `content_units` rỗng/None -> bước này no-op, hành vi y hệt trước Mục C."""
     low = source_text.lower()
     evidence_norm = {_normalize_number(m.group(0)) for m in _MAGNITUDE_RE.finditer(source_text)}
-    facts = facts or []
+    content_units = content_units or []
     bad, seen = [], set()
     for m in _MAGNITUDE_RE.finditer(body):
         tok = m.group(0)
@@ -515,7 +515,7 @@ def unsupported_numbers(body: str, source_text: str, facts: list[Fact] | None = 
             continue
         if _normalize_number(tok) in evidence_norm:
             continue   # khớp sau khi chuẩn hoá dấu thập phân -> KHÔNG nghi bịa
-        if facts and _matches_canonical_fact(tok, body, m.start(), facts, approx_tolerance):
+        if content_units and _matches_canonical_fact(tok, body, m.start(), content_units, approx_tolerance):
             continue   # khớp canonical (đúng số hoặc làm tròn hợp lý) -> KHÔNG nghi bịa
         seen.add(key)
         bad.append(tok)
@@ -523,18 +523,18 @@ def unsupported_numbers(body: str, source_text: str, facts: list[Fact] | None = 
 
 
 def apply_guardrails(draft: ContentDraft, evidence: str, background: str = "",
-                     facts: list[Fact] | None = None, *,
+                     content_units: list[ContentUnit] | None = None, *,
                      approx_tolerance: float = _DEFAULT_APPROX_TOLERANCE) -> ContentDraft:
     """Chạy compliance.check (disclaimer/claim cấm) + chặn bịa số (evidence +
     background gộp lại — background = bối cảnh Claude Code research thêm khi
-    viết; `facts` (agents/brief.py, tuỳ chọn) cho phép số làm tròn hợp lý khớp
+    viết; `content_units` (agents/brief.py, tuỳ chọn) cho phép số làm tròn hợp lý khớp
     canonical, xem unsupported_numbers). Gắn draft.compliance_issues
     (Status=ERROR nếu vi phạm). Trả lại draft."""
     issues = compliance.check(draft)
     source_text = f"{evidence}\n{background}"
     if source_text.strip():   # infographic trích số THẲNG từ evidence -> luôn rỗng, bỏ qua vô ích
         issues += [f"Số liệu không thấy trong evidence/background: {t}" for t in
-                   unsupported_numbers(draft.body, source_text, facts, approx_tolerance=approx_tolerance)]
+                   unsupported_numbers(draft.body, source_text, content_units, approx_tolerance=approx_tolerance)]
     draft.compliance_issues = issues
     return draft
 
@@ -839,7 +839,7 @@ class InsufficientScenesError(ValueError):
 def video_fields_from_data(data: dict | None, brief: ProductionBrief):
     """JSON LLM (hoặc None/rỗng) -> (title, scenes, disclaimer) khớp
     ContentOutputVideo (docs/CONTENT_OUTPUT_SCHEMA.md) — `schema_version`/
-    `source`/`facts` KHÔNG lấy từ đây (tất định, gắn ở render_video()), cùng
+    `source`/`content_units` KHÔNG lấy từ đây (tất định, gắn ở render_video()), cùng
     nếp InfographicSpecAgent (source luôn domain_of(brief.url), KHÔNG tin LLM
     tự bịa domain). `cta` (dạng cũ) KHÔNG còn ở đây — nằm trong
     payload của scene cuối (visual_kind="outro"), xem _ensure_outro_scene."""
@@ -869,7 +869,7 @@ def video_fields_from_data(data: dict | None, brief: ProductionBrief):
                     f"{_VIDEO_SCENE_FLOOR} để video có hook+thân+outro) — KHÔNG bịa "
                     f"cảnh đệm cho đủ số. Đề xuất chuyển loại nội dung sang "
                     f"infographic/article cho chủ đề này (nguồn nghèo SCENE video, "
-                    f"KHÔNG có nghĩa nghèo SỐ LIỆU — 2 loại kia dùng chung facts[]).")
+                    f"KHÔNG có nghĩa nghèo SỐ LIỆU — 2 loại kia dùng chung content_units[]).")
             return title, scenes, disclaimer
     # LÙI MƯỢT: kịch bản tất định 4 cảnh (>= 1 "hook" + 1 "outro") từ dữ kiện
     # đã duyệt (KHÔNG cần Opus) — GIỮ nguyên nội dung/thứ tự ý tưởng đường cũ
@@ -901,17 +901,21 @@ def render_video(title, scenes, disclaimer, brief: ProductionBrief) -> str:
     đánh dấu cũ `[t] voiceover / On-screen: / Hình ảnh: / [CTA] / Nguồn:`).
     `source` TẤT ĐỊNH từ domain_of(brief.url) (giống dòng "Nguồn:" cũ, KHÔNG
     tin LLM tự bịa domain — cùng nếp InfographicSpecAgent.infographic_spec_
-    from_data). `facts` pass-through NGUYÊN VĂN brief.facts (đã verify sẵn ở
-    Brief/agents.brief.py, KHÔNG LLM sinh lại) — nguồn cho guardrail-2 phía
-    aigen-pipeline (facts[] là hợp đồng chéo repo, xem docs/ARCHITECTURE_
-    MODULES.md)."""
+    from_data). Khoá `"facts"` (JSON) pass-through NGUYÊN VĂN brief.
+    content_units (đã verify sẵn ở Brief/agents.brief.py, KHÔNG LLM sinh lại)
+    — nguồn cho guardrail-2 phía aigen-pipeline. TÊN KHOÁ JSON giữ NGUYÊN
+    "facts" (KHÔNG đổi thành "content_units") — hợp đồng chéo repo với aigen/
+    production-spec/guardrail/verify-spec.ts, đổi 1 bên là gãy luật đồng bộ 2
+    repo (xem docs/ARCHITECTURE_MODULES.md, comment tại điểm dựng dict dưới)."""
     output = {
         "schema_version": _CONTENT_OUTPUT_SCHEMA_VERSION,
         "title": title,
         "scenes": scenes,
         "source": domain_of(brief.url),
         "disclaimer": disclaimer,
-        "facts": [asdict(f) for f in brief.facts],
+        "facts": [asdict(f) for f in brief.content_units],   # Tên khoá trên dây giữ "facts" cho tương thích
+        # aigen/production-spec/guardrail/verify-spec.ts. Đổi cùng lượt 2 repo khi
+        # agent-B có quota. Nội bộ dùng content_units.
     }
     return json.dumps(output, ensure_ascii=False, indent=2)
 
@@ -923,20 +927,20 @@ def render_video(title, scenes, disclaimer, brief: ProductionBrief) -> str:
 _INFOGRAPHIC_EMPHASIS_KINDS = ("percent", "growth", "money")
 
 
-def _pick_emphasis_index(facts: list[Fact]) -> int:
-    """Fact ĐẦU TIÊN thuộc nhóm kind đáng lên hình nhất (percent/growth/money)
+def _pick_emphasis_index(content_units: list[ContentUnit]) -> int:
+    """ContentUnit ĐẦU TIÊN thuộc nhóm kind đáng lên hình nhất (percent/growth/money)
     -> emphasis=true; không có fact nào thuộc nhóm đó -> mặc định fact đầu
     tiên (giữ hành vi cũ i==0). Hàm THUẦN — test được không cần Brief thật."""
-    for i, f in enumerate(facts):
+    for i, f in enumerate(content_units):
         if f.kind in _INFOGRAPHIC_EMPHASIS_KINDS:
             return i
     return 0
 
 
-# PHASE 4.11 — INFOGRAPHIC COMPOSER: Phase 4.10 đọc facts[] nhưng DUMP thẳng
+# PHASE 4.11 — INFOGRAPHIC COMPOSER: Phase 4.10 đọc content_units[] nhưng DUMP thẳng
 # (value = nguyên câu evidence, label dài, takeaway cắt cụt 160 ký tự, subhead
 # lặp headline khi hook rỗng). Đây là việc CÔ ĐỌNG — cần LLM (Loại B/haiku,
-# KHÔNG còn $0 thuần T0 như trước), không phải chuỗi Python. Input = facts[] +
+# KHÔNG còn $0 thuần T0 như trước), không phải chuỗi Python. Input = content_units[] +
 # RouterDecision (khung bài, để composer biết nên nhấn số nào); output = spec
 # JSON 8 TRƯỜNG ổn định (title/subtitle/hero/market/highlights/related/
 # priority/source) + 1 khối render_hint TÁCH RIÊNG (gợi ý style mềm, KHÔNG
@@ -944,10 +948,10 @@ def _pick_emphasis_index(facts: list[Fact]) -> int:
 # xem CLAUDE.md nguyên tắc tách data/trình bày) — render/infographic.py (Phase
 # 5, chưa làm) sẽ tự gắn khi vẽ.
 _INFOGRAPHIC_COMPOSER_SYSTEM = (
-    "Bạn là Infographic Composer — nén facts[] (đã trích sẵn, có nhãn NGHĨA + "
+    "Bạn là Infographic Composer — nén content_units[] (đã trích sẵn, có nhãn NGHĨA + "
     "số nguyên văn) + khung bài (StructureRouter) thành spec JSON 8 TRƯỜNG cho "
     "1 tấm infographic. Đây là việc CÔ ĐỌNG (viết lại NGẮN hơn), KHÔNG phải "
-    "liệt kê nguyên văn facts.\n"
+    "liệt kê nguyên văn content_units.\n"
     "YÊU CẦU CÔ ĐỌNG:\n"
     "- value NÉN: bỏ chủ ngữ/động từ thừa trong câu, nhưng GIỮ NGUYÊN VĂN cả "
     "SỐ và ĐƠN VỊ như trong fact gốc (BẮT BUỘC, để còn đối chiếu được với dữ "
@@ -962,14 +966,14 @@ _INFOGRAPHIC_COMPOSER_SYSTEM = (
     "- highlights: 1-3 câu góc-nhìn NGẮN (KHÔNG phải 1 đoạn takeaway dài, "
     "KHÔNG cắt cụt giữa câu — mỗi câu phải TRỌN VẸN).\n"
     "- related: TÊN thực thể thật liên quan trực tiếp (địa danh/dự án/công ty/"
-    "mã CK/chính sách) — LẤY TỪ facts[] có [entity]/[entity_list] (xem nhãn "
+    "mã CK/chính sách) — LẤY TỪ content_units[] có [entity]/[entity_list] (xem nhãn "
     "[shape:salience] đầu mỗi dòng fact), GHÉP tên NGUYÊN VĂN. TUYỆT ĐỐI KHÔNG "
-    "tự bịa thêm tên nào KHÔNG có trong facts[] — dòng nào trong 'related' "
-    "không khớp facts[] SẼ BỊ GUARDRAIL LẦN 2 CHẶN (xem media_factory/spec.py). "
+    "tự bịa thêm tên nào KHÔNG có trong content_units[] — dòng nào trong 'related' "
+    "không khớp content_units[] SẼ BỊ GUARDRAIL LẦN 2 CHẶN (xem media_factory/spec.py). "
     "CHỈ LẤY entity/entity_list có salience=\"subject\" — TUYỆT ĐỐI KHÔNG lấy "
     "salience=\"context\" (Content Factory Phase 2b — lỗi THẬT đã gặp: related "
     "bị lấp bởi tên hội thảo/hiệp hội/viện nghiên cứu thay vì tên cảng/dự án "
-    "thật). facts[] không có entity/entity_list salience=subject nào -> để "
+    "thật). content_units[] không có entity/entity_list salience=subject nào -> để "
     "related rỗng [], KHÔNG lùi về mã CK/tên context khi không chắc chắn.\n"
     "- priority: {\"primary\": [...nhãn/tên quan trọng nhất...], \"secondary\": "
     "[...], \"minor\": [...]} — \"primary\" CHỈ được chứa nhãn (label) đã dùng "
@@ -996,7 +1000,7 @@ _INFOGRAPHIC_COMPOSER_SYSTEM = (
     "    · \"1:1\"  — NGẮN, 1-3 con số nổi bật, ít chữ. Khung vuông.\n"
     "  Đếm số mục THẬT trong hero/market/highlights rồi mới chọn — nhồi 10 mục "
     "vào khung 1:1 sẽ ra ảnh chữ nhỏ không đọc nổi.\n"
-    "- TUYỆT ĐỐI KHÔNG bịa số ngoài facts[] được cung cấp — MỌI số trong spec "
+    "- TUYỆT ĐỐI KHÔNG bịa số ngoài content_units[] được cung cấp — MỌI số trong spec "
     "PHẢI xuất phát từ 1 fact đã cho.\n"
     + _NUMBER_DISCIPLINE +
     '\nTrả về DUY NHẤT JSON: {"title": str, "subtitle": str, '
@@ -1014,7 +1018,7 @@ VALID_RATIOS: tuple[str, ...] = ("9:16", "4:5", "1:1")
 _DEFAULT_RENDER_HINT = {"theme": "dark", "palette": "navy-gold", "ratio": "4:5"}
 
 
-def _fact_display_value(f: Fact) -> str:
+def _content_unit_display_value(f: ContentUnit) -> str:
     """Số/tên hiển thị của 1 fact cho Composer đọc — Content Factory Phase 2:
     khác nhau THEO SHAPE (models.FACT_SHAPES), KHÔNG còn chỉ scalar. `raw`
     (nguyên văn evidence) ưu tiên cho scalar; range/delta ghép 2 đầu; entity_
@@ -1032,7 +1036,7 @@ def _fact_display_value(f: Fact) -> str:
     return f.raw or f"{f.value}{f.unit or ''}"   # shape == "scalar" (mặc định, dữ liệu cũ)
 
 
-def _fact_tag(f: Fact) -> str:
+def _content_unit_tag(f: ContentUnit) -> str:
     """Nhãn đầu dòng fact cho Composer đọc — [shape] (scalar/range/delta), hoặc
     [shape:salience] cho entity/entity_list (Content Factory Phase 2b — Composer
     PHẢI thấy salience ngay trên dòng để lọc related/priority.primary, không
@@ -1043,7 +1047,7 @@ def _fact_tag(f: Fact) -> str:
 
 
 def build_infographic_composer_prompt(brief: ProductionBrief, decision=None) -> str:
-    """Prompt (user turn) cho Infographic Composer — facts[] (KHÔNG phải
+    """Prompt (user turn) cho Infographic Composer — content_units[] (KHÔNG phải
     evidence thô) là NGUYÊN LIỆU chính, kèm khung bài (RouterDecision đã đóng
     băng, agents/route_once.py) để composer biết nhấn số nào theo đúng luận
     điểm article/video của CÙNG chủ đề đang dùng (nhất quán multi-content).
@@ -1054,7 +1058,7 @@ def build_infographic_composer_prompt(brief: ProductionBrief, decision=None) -> 
     [entity_list:context]) — Composer lọc related/priority.primary CHỈ theo
     subject, xem _INFOGRAPHIC_COMPOSER_SYSTEM."""
     facts_lines = "\n".join(
-        f"- [{_fact_tag(f)}] {f.label}: {_fact_display_value(f)}" for f in brief.facts
+        f"- [{_content_unit_tag(f)}] {f.label}: {_content_unit_display_value(f)}" for f in brief.content_units
     )
     structure = str(getattr(decision, "structure", None) or "S1").strip().upper()
     parts = [
@@ -1106,14 +1110,14 @@ def _parse_render_hint(raw) -> dict:
     return out
 
 
-def _stat_from_fact(f: Fact) -> dict:
-    return {"label": f.label, "value": _fact_display_value(f)}
+def _stat_from_content_unit(f: ContentUnit) -> dict:
+    return {"label": f.label, "value": _content_unit_display_value(f)}
 
 
-def _entity_names_from_facts(facts: list[Fact]) -> list[str]:
+def _entity_names_from_content_units(content_units: list[ContentUnit]) -> list[str]:
     """Content Factory Phase 2 (+ 2b — salience) — mọi TÊN thật CHỦ THỂ
     (salience="subject", KHÔNG phải "context"/phông nền — hội thảo/hiệp hội/
-    người phát biểu; xem models.Fact.salience) đã verify sẵn ở Brief (agents/
+    người phát biểu; xem models.ContentUnit.salience) đã verify sẵn ở Brief (agents/
     brief.py, KHÔNG bịa) — nguồn DUY NHẤT cho 'related' ở đường lùi mượt (KHÔNG
     LLM, xem _empty_infographic_spec/_fallback_infographic_spec). CỐ Ý loại
     salience="" (dữ liệu CŨ trước Phase 2b, chưa phân loại) — KHÔNG đủ chắc
@@ -1122,7 +1126,7 @@ def _entity_names_from_facts(facts: list[Fact]) -> list[str]:
     thích ngược CHỌN). Giữ thứ tự xuất hiện, khử trùng."""
     seen: set[str] = set()
     out: list[str] = []
-    for f in facts:
+    for f in content_units:
         if f.salience != "subject":
             continue
         names = f.entities if f.shape == "entity_list" else ([f.value] if f.shape == "entity" and f.value else [])
@@ -1134,15 +1138,15 @@ def _entity_names_from_facts(facts: list[Fact]) -> list[str]:
 
 
 def _empty_infographic_spec(brief: ProductionBrief) -> dict:
-    """facts[] RỖNG (Brief lỗi/timeout) -> spec RỖNG CÓ CHỦ Ý — KHÔNG bịa (giữ
+    """content_units[] RỖNG (Brief lỗi/timeout) -> spec RỖNG CÓ CHỦ Ý — KHÔNG bịa (giữ
     nguyên triết lý Phase 4.10; caller (scripts/produce_from_sheet.run) đánh
-    dấu NEEDS_HUMAN cho dòng này). facts[] rỗng -> _entity_names_from_facts
+    dấu NEEDS_HUMAN cho dòng này). content_units[] rỗng -> _entity_names_from_content_units
     cũng rỗng -> related lùi về brief.tickers (mã CK từ CONTEXT, KHÔNG phải
     bịa — vẫn là dữ liệu THẬT, chỉ là nguồn khác)."""
     return {
         "title": brief.hook or brief.title, "subtitle": "",
         "hero": [], "market": [], "highlights": [],
-        "related": _entity_names_from_facts(brief.facts) or list(brief.tickers),
+        "related": _entity_names_from_content_units(brief.content_units) or list(brief.tickers),
         "priority": {"primary": [], "secondary": [], "minor": []},
         "source": domain_of(brief.url), "render_hint": dict(_DEFAULT_RENDER_HINT),
     }
@@ -1150,22 +1154,22 @@ def _empty_infographic_spec(brief: ProductionBrief) -> dict:
 
 def _fallback_infographic_spec(brief: ProductionBrief) -> dict:
     """LÙI MƯỢT: composer LLM lỗi/JSON rỗng -> dựng spec TẤT ĐỊNH trực tiếp từ
-    facts[] (KHÔNG nén được chữ vì không có LLM ở bước lùi mượt — value dài
+    content_units[] (KHÔNG nén được chữ vì không có LLM ở bước lùi mượt — value dài
     hơn bản composer thật, nhưng vẫn ĐÚNG số/KHÔNG bịa, và vẫn đủ 8 trường +
-    title != subtitle). Fact ưu tiên (_pick_emphasis_index) lên `hero`; còn
+    title != subtitle). ContentUnit ưu tiên (_pick_emphasis_index) lên `hero`; còn
     lại (tối đa 5 fact) vào `market`. `related` (Content Factory Phase 2) lấy
     từ MỌI fact entity/entity_list (không chỉ 5 fact đầu — related không giới
     hạn như hero/market), lùi về brief.tickers nếu Brief không trích được tên nào."""
-    facts = brief.facts[:5]
-    idx = _pick_emphasis_index(facts)
-    hero = [_stat_from_fact(f) for i, f in enumerate(facts) if i == idx]
-    market = [_stat_from_fact(f) for i, f in enumerate(facts) if i != idx]
+    content_units = brief.content_units[:5]
+    idx = _pick_emphasis_index(content_units)
+    hero = [_stat_from_content_unit(f) for i, f in enumerate(content_units) if i == idx]
+    market = [_stat_from_content_unit(f) for i, f in enumerate(content_units) if i != idx]
     title = brief.hook or brief.title
-    subtitle = facts[idx].label if facts and facts[idx].label != title else ""
-    related = _entity_names_from_facts(brief.facts) or list(brief.tickers)
+    subtitle = content_units[idx].label if content_units and content_units[idx].label != title else ""
+    related = _entity_names_from_content_units(brief.content_units) or list(brief.tickers)
     return {
         "title": title, "subtitle": subtitle, "hero": hero, "market": market,
-        "highlights": [f"{f.label}: {_fact_display_value(f)}" for f in facts[:2]],
+        "highlights": [f"{f.label}: {_content_unit_display_value(f)}" for f in content_units[:2]],
         "related": related,
         "priority": {"primary": [s["label"] for s in hero],
                      "secondary": [s["label"] for s in market], "minor": []},
@@ -1189,7 +1193,7 @@ def infographic_spec_from_data(data: dict | None, brief: ProductionBrief) -> dic
                 subtitle = brief.title if brief.title != title else ""
             highlights = [str(h).strip() for h in (data.get("highlights") or []) if str(h).strip()]
             related = [str(t).strip() for t in
-                      (data.get("related") or _entity_names_from_facts(brief.facts) or brief.tickers)
+                      (data.get("related") or _entity_names_from_content_units(brief.content_units) or brief.tickers)
                       if str(t).strip()]
             return {
                 "title": title, "subtitle": subtitle, "hero": hero, "market": market,
@@ -1204,27 +1208,27 @@ def infographic_spec_from_data(data: dict | None, brief: ProductionBrief) -> dic
 class InfographicSpecAgent(Agent):
     """PHASE 4.11: KHÔNG còn TẤT ĐỊNH/$0 thuần — giờ là 1 bước LLM Loại B/rẻ
     (caller gán `self.model`/`self.llm` = alias 'composer'/haiku, xem
-    scripts/produce_from_sheet.run) để CÔ ĐỌNG facts[]+RouterDecision thành
+    scripts/produce_from_sheet.run) để CÔ ĐỌNG content_units[]+RouterDecision thành
     spec 8 trường (xem _INFOGRAPHIC_COMPOSER_SYSTEM). Đổi từ Phase 4.10 (đọc
-    thẳng facts[] nhưng DUMP nguyên văn — value cả câu, takeaway cắt cụt 160
+    thẳng content_units[] nhưng DUMP nguyên văn — value cả câu, takeaway cắt cụt 160
     ký tự, subhead lặp headline khi hook rỗng).
 
     AN TOÀN SỐ: composer chỉ được CÔ ĐỌNG CHỮ, KHÔNG được đổi giá trị — guard
-    chống bịa vẫn là facts[]-verify (agents/brief.py) TRƯỚC + guardrail-số-
+    chống bịa vẫn là content_units[]-verify (agents/brief.py) TRƯỚC + guardrail-số-
     canonical (Mục C, agents/production.apply_guardrails/unsupported_numbers)
     CHẠY LẠI SAU trên `draft.body` (spec JSON đầy đủ) như đã wire từ Phase 4.9
     — KHÔNG cần code MỚI ở đây, chỉ cần composer dùng ĐÚNG từ đơn vị mà
     agents/_numeric.parse_magnitude_token nhận diện được (%, tỷ, tỷ đồng,
     nghìn tỷ, triệu, usd, đồng) để số nén vẫn map được về canonical.
 
-    facts[] RỖNG -> _empty_infographic_spec (KHÔNG gọi LLM, KHÔNG bịa)."""
+    content_units[] RỖNG -> _empty_infographic_spec (KHÔNG gọi LLM, KHÔNG bịa)."""
     role = "InfographicComposer"
     prompt_name = "infographic"
     system = _INFOGRAPHIC_COMPOSER_SYSTEM
     uses_llm = True
 
     def run(self, brief: ProductionBrief, decision=None) -> ContentDraft:
-        if not brief.facts:
+        if not brief.content_units:
             spec = _empty_infographic_spec(brief)
         else:
             rules = _load_composer_rules("infographic", settings=self.rules_settings)

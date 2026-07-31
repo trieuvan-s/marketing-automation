@@ -741,7 +741,10 @@ def facts_from_json(raw: str) -> list:
     flag — an toàn, không bịa fact để lấp chỗ trống)."""
     import json as _json
 
-    from .models import Fact
+    # Fact -> ContentUnit (đổi tên dứt điểm, feature/content-units-complete) --
+    # sửa DUY NHẤT import này để module không vỡ, KHÔNG đổi hành vi/tên hàm
+    # facts_to_json/facts_from_json (sheets_board.py off-limits theo RANH GIỚI).
+    from .models import ContentUnit
 
     raw = (raw or "").strip()
     if not raw:
@@ -756,9 +759,9 @@ def facts_from_json(raw: str) -> list:
     for item in data:
         if isinstance(item, dict):
             try:
-                out.append(Fact(**item))
+                out.append(ContentUnit(**item))
             except TypeError:
-                continue   # field lạ/thiếu -> bỏ qua fact đó, KHÔNG vỡ cả danh sách
+                continue   # field lạ/thiếu -> bỏ qua đơn vị đó, KHÔNG vỡ cả danh sách
     return out
 
 

@@ -150,7 +150,12 @@ FACT_KINDS = ("percent", "money", "count", "growth", "date", "ranking", "target"
 # nghĩa field cũ âm thầm. `shape` mặc định "scalar" -> dữ liệu Fact cũ (không
 # field này trong JSON) tự hiểu là scalar, tương thích ngược 100% — xem
 # facts_from_json (sheets_board.py) và test_fact_scalar_shape_backward_compat.
-FACT_SHAPES = ("scalar", "range", "delta", "entity_list", "entity")
+FACT_SHAPES = ("scalar", "range", "delta", "entity_list", "entity", "qualitative")
+# "qualitative" (Phase C bước 3, THÊM sau 5 shape số gốc) — hình dạng dữ liệu
+# CHUNG cho content_unit ĐỊNH TÍNH (CONTENT_UNIT_TYPES trừ "numeric"): không
+# có value/unit số, dùng subject/claim/source/evidence — xem agents/brief.
+# _parse_qualitative_unit. Không tái dùng 1 trong 5 shape số ở trên vì cơ chế
+# verify hoàn toàn khác (substring-sau-chuẩn-hoá thay vì tìm-câu-chứa-số).
 
 # PHASE C (content_unit contract, 2026-07-3x, quyết định Lead — reports/
 # LEAD_DECISION_INPUT_STRICTNESS.md §4.1/§5, file đã xoá sau khi đọc xong, xem
@@ -173,37 +178,51 @@ CONTENT_UNIT_EVIDENCE_LEVELS = ("direct_quote", "paraphrase", "derived", "inferr
 
 
 @dataclass
-class Fact:
-    """1 dữ kiện đã trích + gắn NHÃN NGHĨA từ evidence thô — sinh bởi bước
-    Research/Brief (agents/brief.py, model alias 'brief' = Haiku, xem factory.
-    make_llm/step_model). THAY THẾ nhãn vô nghĩa "Số liệu N" của
+class ContentUnit:
+    """1 đơn vị nội dung đã trích + gắn NHÃN NGHĨA từ evidence thô — sinh bởi
+    bước Research/Brief (agents/brief.py, model alias 'brief' = Haiku, xem
+    factory.make_llm/step_model). THAY THẾ nhãn vô nghĩa "Số liệu N" của
     InfographicSpecAgent cũ (regex mù trên text thô).
 
+    ĐỔI TÊN dứt điểm (2026-07-3x, quyết định Lead 31/07 — content_units
+    complete): lớp này trước đây tên `Fact`, danh sách trước đây tên
+    `facts[]` (BriefResult.content_units/ProductionBrief.content_units) —
+    KHÔNG còn shim/property tương thích ngược cho tên cũ (dữ liệu hiện tại là
+    dữ liệu TEST, được phép đổi schema dứt điểm). NGOẠI LỆ DUY NHẤT: khoá
+    `"facts"` trong CONTENT.Output dict (agents/production.render_video) VÀ
+    trong payload content_output ghi vào store (scripts/produce_from_sheet._
+    write_content) GIỮ NGUYÊN TÊN — đây là hợp đồng CHÉO REPO (aigen/
+    production-spec/guardrail/verify-spec.ts) và hợp đồng với store/ (off-
+    limits, xem CLAUDE.md), không thể đổi 1 bên.
+
     KHÔNG hợp nhất với ResearchBrief (đường Hook/Luồng B RAG giữ nguyên, không
-    đụng) — Fact/facts[] CHỈ dùng cho ProductionBrief (agents/production.py).
+    đụng) — ContentUnit/content_units[] CHỈ dùng cho ProductionBrief (agents/
+    production.py).
 
-    Content Factory Phase 1 — 1 DATACLASS PHẲNG cho CẢ 5 `shape` (KHÔNG phải
-    Union kiểu-riêng-từng-shape/isinstance dispatch) — CỐ Ý: giữ nguyên phong
-    cách flat-dataclass + `dataclasses.asdict()`/`Fact(**item)` round-trip JSON
-    (facts_to_json/facts_from_json, sheets_board.py) đã dùng khắp codebase,
-    tránh 1 đợt refactor lớn/rủi ro chỉ để đổi hình dạng union. Field nào không
-    áp dụng cho `shape` hiện tại thì để rỗng/None — xem "field theo shape" dưới.
+    Content Factory Phase 1 — 1 DATACLASS PHẲNG cho CẢ 5 `shape` SỐ (KHÔNG
+    phải Union kiểu-riêng-từng-shape/isinstance dispatch) — CỐ Ý: giữ nguyên
+    phong cách flat-dataclass + `dataclasses.asdict()`/`ContentUnit(**item)`
+    round-trip JSON, tránh 1 đợt refactor lớn/rủi ro chỉ để đổi hình dạng
+    union. Field nào không áp dụng cho `shape`/`type` hiện tại thì để rỗng/
+    None — xem "field theo shape" dưới.
 
-    Ràng buộc chống bịa (MỌI shape): mỗi Fact PHẢI verify được — value chính
-    (value/value_low+value_high/from_value+to_value/entities[]/value tuỳ shape)
-    xuất hiện NGUYÊN VĂN trong `source`. Fact nào không verify được bị loại
-    ngay ở agents/brief.facts_from_llm_output(), KHÔNG bao giờ tồn tại instance
-    Fact "bịa".
+    Ràng buộc chống bịa (MỌI shape SỐ): mỗi ContentUnit PHẢI verify được —
+    value chính (value/value_low+value_high/from_value+to_value/entities[]/
+    value tuỳ shape) xuất hiện NGUYÊN VĂN trong `source`. ContentUnit nào
+    không verify được bị loại ngay ở agents/brief.content_units_from_llm_
+    output(), KHÔNG bao giờ tồn tại instance ContentUnit "bịa". Với đơn vị
+    ĐỊNH TÍNH (type != "numeric", Phase C bước 3): `source` PHẢI là substring
+    của văn bản nguồn sau chuẩn hoá khoảng trắng — cùng nguyên tắc, khác cơ
+    chế verify (không có value/unit số để đối chiếu).
 
     PHASE 4.8 MỤC C — SỐ CANONICAL: nguyên tắc "AI hiểu ở Brief, CODE phán ở
     Guardrail" — sự giòn với NGÔN NGỮ số ("gần 600 tỷ"/"585 tỉ"/"585 tỷ đồng"
     cùng 1 số thật) được xử ở khâu TRÍCH (agents/brief.py, AI nhận diện biến
-    thể cách viết); guardrail (agents/production.unsupported_numbers,
-    media_factory/spec.verify_spec) chỉ làm PHÉP TÍNH SỐ HỌC TẤT ĐỊNH trên các
-    trường canonical_* — KHÔNG BAO GIỜ để AI làm quan toà phán 1 số là an toàn.
-    Cùng nguyên tắc áp cho `shape="entity"/"entity_list"` — TÊN xuất hiện ở
-    Composer/Writer PHẢI khớp `value`/1 phần tử `entities[]` nào đó, tên lạ =
-    BỊA (nguy hiểm ngang bịa số, xem media_factory/spec.py).
+    thể cách viết); guardrail (agents/production.unsupported_numbers) chỉ làm
+    PHÉP TÍNH SỐ HỌC TẤT ĐỊNH trên các trường canonical_* — KHÔNG BAO GIỜ để
+    AI làm quan toà phán 1 số là an toàn. Cùng nguyên tắc áp cho `shape=
+    "entity"/"entity_list"` — TÊN xuất hiện ở Composer/Writer PHẢI khớp
+    `value`/1 phần tử `entities[]` nào đó, tên lạ = BỊA.
     """
     value: str             # scalar: "8,18"/"8"/"1.200" (nguyên văn số, KHÔNG kèm unit).
                             # entity: TÊN thực thể đơn ("SHS", "Nghị quyết 57", "Rottanak Keo").
@@ -213,22 +232,24 @@ class Fact:
     source: str = ""       # CÂU NGUYÊN VĂN trong bài chứa dữ kiện (audit/verify) — ĐÂY LÀ
                             # "source_sentence" bắt buộc theo Content Factory Phase 1, KHÔNG
                             # thêm field trùng tên — mọi shape đều BẮT BUỘC field này khác rỗng
-                            # (enforce ở agents/brief.facts_from_llm_output, không phải ở đây).
+                            # (enforce ở agents/brief.content_units_from_llm_output, không phải ở đây).
     kind: str = "other"    # DANH MỤC ngữ nghĩa — xem FACT_KINDS (percent|money|count|growth|
                             # date|ranking|target|other). KHÔNG đổi nghĩa Phase 1 — xem "shape"
                             # bên dưới cho HÌNH DẠNG dữ liệu (scalar|range|delta|entity_list|entity).
+                            # CHỈ áp dụng khi type="numeric" — đơn vị định tính không có "kind".
     shape: str = "scalar"   # Content Factory Phase 1 — xem FACT_SHAPES + docstring module.
+                            # CHỈ áp dụng khi type="numeric".
 
-    # --- PHASE C (content_unit contract) — field ADDITIVE, KHÔNG đổi tên/xoá
-    # field nào ở trên (Fact JSON đã lưu trong store TRƯỚC Phase C không có 3
-    # field này -> default áp dụng, round-trip Fact(**item) vẫn nguyên vẹn). ---
+    # --- PHASE C bước 3 (content_unit định tính) — type/subject/claim/evidence
+    # ÁP DỤNG CHO MỌI content_unit (không chỉ số). type="numeric" (mặc định)
+    # -> dùng value/unit/kind/shape/canonical_* như cũ; type khác -> dùng
+    # subject/claim/evidence, value/unit/kind/shape để rỗng/mặc định. ---
     type: str = "numeric"  # xem CONTENT_UNIT_TYPES — bản chất NỘI DUNG, KHÔNG
                             # phải "kind" (percent/money/...) hay "shape"
                             # (scalar/range/...) ở trên.
     subject: str = ""       # chủ thể của claim (vd tên công ty/cơ quan/chính
-                            # sách) — BẮT BUỘC khi Brief phát ra content_unit
-                            # kiểu MỚI (agents/brief.py enforce, KHÔNG enforce
-                            # ở dataclass này để không phá Fact cũ round-trip).
+                            # sách) — BẮT BUỘC khi type != "numeric" (agents/
+                            # brief.py enforce, xem _parse_qualitative_unit).
     claim: str = ""         # nội dung dữ kiện dạng câu — BẮT BUỘC cùng điều
                             # kiện với `subject` ở trên.
     evidence: str = ""      # xem CONTENT_UNIT_EVIDENCE_LEVELS — mức độ chắc
@@ -236,7 +257,7 @@ class Fact:
                             # ngầm từ có/không có số (nguyên tắc Phase C).
     raw: str = ""                          # cụm NGUYÊN VĂN (value+unit, kể cả từ xấp xỉ nếu có) —
                                             # PHẢI là substring THẬT của evidence+background, xem
-                                            # agents/brief.facts_from_llm_output (không thì LOẠI fact)
+                                            # agents/brief.content_units_from_llm_output (không thì LOẠI)
     canonical_value: float | None = None   # scalar: số máy đọc được, CODE tính từ value+unit
                                             # (agents/_numeric.parse_magnitude_token) — vd "585 tỷ" -> 585e9
     approx: bool = False                   # true nếu raw có từ xấp xỉ (gần/khoảng/xấp xỉ/hơn/

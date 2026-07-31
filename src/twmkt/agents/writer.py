@@ -145,12 +145,12 @@ def run_writer_with_retry(
             continue
 
         # LLM trả lời thành công -> guardrail. Reject = lỗi VĨNH VIỄN, KHÔNG retry.
-        # facts=brief.facts (Phase 4.8 Mục C) -> chấp nhận số làm tròn hợp lý
-        # khớp canonical; brief.facts=[] (chưa chạy agents/brief.run_brief())
-        # -> no-op, hành vi y hệt trước Mục C.
+        # content_units=brief.content_units (Phase 4.8 Mục C) -> chấp nhận số
+        # làm tròn hợp lý khớp canonical; brief.content_units=[] (chưa chạy
+        # agents/brief.run_brief()) -> no-op, hành vi y hệt trước Mục C.
         approx_tol = float(settings.get("guardrail.approx_tolerance_pct", 5)) / 100
         draft = apply_guardrails(draft, brief.evidence, brief.background,
-                                 brief.facts, approx_tolerance=approx_tol)
+                                 brief.content_units, approx_tolerance=approx_tol)
         if not draft.is_clean:
             reason = "; ".join(draft.compliance_issues)
             print(f"[ERROR] writer NEEDS_HUMAN (guardrail reject, KHÔNG retry): {reason}")

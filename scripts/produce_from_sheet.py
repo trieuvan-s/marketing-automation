@@ -6,10 +6,10 @@ Luồng:
     • ARTICLE (Phase 4.9 — Brief → route-once (đóng băng) → run_writer_with_retry,
       xem agents/brief.py + agents/route_once.py + agents/writer.py)
     • VideoScriptAgent     (kịch bản video, LLM, schema JSON — đường 3-agent cũ)
-    • InfographicSpecAgent (Phase 4.11 — Composer: LLM Loại B/haiku nén facts[]
+    • InfographicSpecAgent (Phase 4.11 — Composer: LLM Loại B/haiku nén content_units[]
       + RouterDecision thành spec 8 trường, KHÔNG còn tất định/$0 thuần)
   --guardrail-->  compliance (disclaimer/claim cấm) + chặn bịa số (so evidence,
-    Mục C: chấp nhận số làm tròn hợp lý khớp facts[].canonical_value)
+    Mục C: chấp nhận số làm tròn hợp lý khớp content_units[].canonical_value)
   --ghi-->  tab CONTENT (Context|Type|Status|Output) + <data_root>/output/<ngày>/
     (data_root NGOÀI repo, xem Phase DATA-ROOT / config.data_path())
   --> người duyệt xem & duyệt sản phẩm (cổng 2) --> Publish (giai đoạn sau).
@@ -26,7 +26,7 @@ này, agents/writer.run_writer_with_retry() (retry/backoff/FAILED/NEEDS_HUMAN,
 Phase 4.5) CHƯA từng được gọi bởi bất kỳ script sản xuất thật nào — chỉ được
 kiểm bằng script tạm khi validate Phase 4.6/4.7/4.8. `run()` (chế độ gọi API
 thật, KHÔNG phải --draft/--ingest) giờ dùng ĐÚNG pipeline này cho ARTICLE:
-  1. run_brief() trích facts[] (Mục C: raw/canonical_value/approx).
+  1. run_brief() trích content_units[] (Mục C: raw/canonical_value/approx).
   2. get_or_route() route-once — 1 chủ đề CHỈ route 1 lần, đóng băng (agents/
      route_once.RouterDecisionStore, storage theo router.decisions_path).
   3. run_writer_with_retry() -> WriterOutcome.DONE/FAILED/NEEDS_HUMAN, map vào
@@ -181,14 +181,14 @@ def _is_fully_produced_channels(topic_key: str, seen: set[tuple[str, str]], chan
     return all((topic_key, _CHANNEL_TO_TYPE[c]) in seen for c, enabled in channels.items() if enabled)
 
 
-def _write_content(topic_key: str, type_: str, *, status: str, output: str, notes: str, facts_json: str) -> None:
+def _write_content(topic_key: str, type_: str, *, status: str, output: str, notes: str, content_units_json: str) -> None:
     """P2 store-as-truth: ghi 1 sản phẩm MỚI (chưa từng có trong `seen` — caller
     đảm bảo) vào store -- 2 layer riêng: `content_output` (nội dung sinh ra,
     coi như bất biến) + `content_status` khởi tạo gate2=PENDING/gate3 để trống
     (INVARIANT gate3 không do máy ghi -- xem docstring content_row() cũ,
     write_content_status() merge-on-write nên không truyền gate3 = giữ trống)."""
     ps.write_content_output(topic_key, type_, {
-        "status": status, "output": output, "notes": notes, "facts": facts_json,
+        "status": status, "output": output, "notes": notes, "facts": content_units_json,  # khoá "facts" giữ nguyên cho store/sync_service.py (off-limits, đọc .get("facts"))
         # HAI MỐC THỜI GIAN, lưu TÁCH BẠCH (2026-07-29, quyết định Lead) —
         # DB phải đủ để khôi phục 100% Sheet UI, nên không được để mất mốc nào:
         #   `timestamp`    = NGÀY XỬ LÝ (sản xuất nội dung này). Là thứ hiển
@@ -398,13 +398,13 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
         # with-retry. Bỏ qua HOÀN TOÀN nếu đã có trong CONTENT (idempotent,
         # KHÔNG tốn thêm lượt Brief/Router/Writer cho bài đã DONE).
         write_article = (topic_key, "article") not in seen
-        # Phase 4.12: run_brief() trả BriefResult (facts + no_numeric_content)
-        # — phân biệt facts=[] RỖNG-HỢP-LỆ (Brief chạy trọn vẹn, xác nhận tin
+        # Phase 4.12: run_brief() trả BriefResult (content_units + no_numeric_content)
+        # — phân biệt content_units=[] RỖNG-HỢP-LỆ (Brief chạy trọn vẹn, xác nhận tin
         # thuần định tính) vs RỖNG-DO-HỎNG (LLM lỗi/timeout — cờ luôn False).
         # Phase C (2026-07-3x): BriefResult giờ CÒN có `brief_status` (OK|
         # NO_USABLE_CONTENT|FAILED, xem agents/brief.py) — dùng ngay dưới đây
         # để chặn nguồn boilerplate/rỗng tuếch TRƯỚC khi tới Writer/Composer
-        # (biến `no_usable_content`, sau khi tính `channels`). `.facts` vẫn đọc
+        # (biến `no_usable_content`, sau khi tính `channels`). `.content_units` vẫn đọc
         # được qua property tương thích ngược (HẠN CỨNG 2026-08-10).
         brief_result = (run_brief(route_llm, evidence, model=factory.step_model(settings, "brief"),
                                   fail_loud=factory.is_fail_loud_step(settings, "brief"),
@@ -413,17 +413,17 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
         brief = ProductionBrief(
             title=item["context"], hook=item["hook"], tickers=item["tickers"],
             group=item["group"], topic=item["topic"], url=item["source"],
-            evidence=evidence, facts=brief_result.facts,
+            evidence=evidence, content_units=brief_result.content_units,
             no_numeric_content=brief_result.no_numeric_content,
         )
-        # Production Factory Phase 1.3 — snapshot facts[] MÁY-SỞ-HỮU ghi vào MỌI
+        # Production Factory Phase 1.3 — snapshot content_units[] MÁY-SỞ-HỮU ghi vào MỌI
         # dòng CONTENT của chủ đề này (cột Facts, xem comment CONTENT_HEADER ở
         # sheets_board.py) — nguồn sự thật cho verify_spec() (guardrail lần 2,
         # media_factory/spec.py) chạy TRƯỚC KHI RENDER (Phase 1.3), TÁCH biệt
-        # facts[] còn trong RAM ở tiến trình này (không đồng bộ giữa nhiều máy —
+        # content_units[] còn trong RAM ở tiến trình này (không đồng bộ giữa nhiều máy —
         # đúng bug Fix (a) đã sửa cho CONTEXT, không lặp lại cho Production
         # Factory qua data_root).
-        facts_json = facts_to_json(brief.facts)
+        content_units_json = facts_to_json(brief.content_units)
 
         # route-once (Mục A): gọi KHÔNG ĐIỀU KIỆN cho MỌI item (kể cả khi
         # article đã DONE từ trước) — cache-hit tức thời khi đã đóng băng
@@ -444,7 +444,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
         # [no_numeric_content=True, OK] -- nghi boilerplate/trang điều hướng/
         # placeholder, xem agents/brief.BriefResult docstring) -> ÉP CẢ 3
         # TUYẾN false NGAY Ở ĐÂY, TRƯỚC khi Writer/Composer có cơ hội chạy.
-        # TRƯỚC Phase C: facts=[]+no_numeric_content=False (chữ ký boilerplate)
+        # TRƯỚC Phase C: content_units=[]+no_numeric_content=False (chữ ký boilerplate)
         # không phân biệt được với "Brief hỏng thật" hay "router/brief bất
         # đồng" -> Article vẫn được Writer viết BỊA từ trang rỗng, Execute=
         # DONE -- xác nhận THẬT qua tests/test_pipeline.py::test_regression_
@@ -496,7 +496,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
         elif not channels.get("article", True):
             reason = _channel_skip_reason("article", decision, output_type_excluded,
                                           no_usable_content="article" in no_usable_content_channels)
-            _write_content(topic_key, "article", status="SKIPPED", output="", notes=reason, facts_json=facts_json)
+            _write_content(topic_key, "article", status="SKIPPED", output="", notes=reason, content_units_json=content_units_json)
             written += 1
             seen.add((topic_key, "article"))
             skipped += 1
@@ -510,7 +510,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
             if r.outcome == WriterOutcome.DONE:
                 fn = out_dir / f"{_slug(item['context'])}-article.md"
                 fn.write_text(r.draft.body, encoding="utf-8")
-                _write_content(topic_key, "article", status="DONE", output=r.draft.body, notes="", facts_json=facts_json)
+                _write_content(topic_key, "article", status="DONE", output=r.draft.body, notes="", content_units_json=content_units_json)
                 written += 1
                 seen.add((topic_key, "article"))
                 produced += 1
@@ -521,7 +521,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                 note = "; ".join(r.draft.compliance_issues)
                 fn = out_dir / f"{_slug(item['context'])}-article.md"
                 fn.write_text(r.draft.body, encoding="utf-8")
-                _write_content(topic_key, "article", status="ERROR", output=r.draft.body, notes=note, facts_json=facts_json)
+                _write_content(topic_key, "article", status="ERROR", output=r.draft.body, notes=note, content_units_json=content_units_json)
                 written += 1
                 flagged += 1
                 notifier.notify("error", topic=item["context"], type="article", issues=note)
@@ -532,11 +532,11 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
         # --- VIDEO/INFOGRAPHIC: VIDEO tiêu thụ CÙNG RouterDecision đã đóng
         # băng (voice-lock động + §4 chuyển-thể, Phase 4.10, xem VideoScriptAgent
         # .run) — nhất quán khung với article của CÙNG chủ đề. INFOGRAPHIC
-        # (Phase 4.11 — Composer) CŨNG tiêu thụ decision + facts[], nhưng dùng
+        # (Phase 4.11 — Composer) CŨNG tiêu thụ decision + content_units[], nhưng dùng
         # LLM RIÊNG (route_llm, alias 'composer'/haiku — Loại B rẻ, KHÔNG dùng
         # content_llm/Sonnet như video/article) — swap .llm/.model NGAY TRƯỚC
         # khi gọi run(), giữ nguyên instance đã áp prompt_overrides ở trên.
-        # facts[] rỗng -> spec KHÔNG bịa nhãn, đánh dấu NEEDS_HUMAN (Status=
+        # content_units[] rỗng -> spec KHÔNG bịa nhãn, đánh dấu NEEDS_HUMAN (Status=
         # ERROR ở CONTENT, xem đoạn append issue bên dưới) — KHÔNG đụng Execute
         # cấp DÒNG (đó vẫn do riêng article_outcome quyết định, phạm vi 4.9).
         for agent in all_production_agents(content_llm, prompt_overrides=prompt_overrides):
@@ -546,7 +546,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
             # Phase 4.13 Mục A: router QUYẾT NGAY TỪ ĐẦU tuyến này không hợp
             # (channels[ch]=False, đóng băng cùng RouterDecision) -> SKIPPED
             # HỢP LỆ, KHÔNG gọi agent (khỏi tốn lượt LLM) — THAY nhánh phản
-            # ứng-sau "facts rỗng -> skip" của Phase 4.12 làm cơ chế CHÍNH.
+            # ứng-sau "content_units rỗng -> skip" của Phase 4.12 làm cơ chế CHÍNH.
             ch = ("infographic" if isinstance(agent, InfographicSpecAgent)
                  else "video" if isinstance(agent, VideoScriptAgent) else None)
             if ch is not None and ch in output_type_excluded:
@@ -561,7 +561,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                     continue
                 reason = _channel_skip_reason(ch, decision, output_type_excluded,
                                               no_usable_content=ch in no_usable_content_channels)
-                _write_content(topic_key, type_key, status="SKIPPED", output="", notes=reason, facts_json=facts_json)
+                _write_content(topic_key, type_key, status="SKIPPED", output="", notes=reason, content_units_json=content_units_json)
                 written += 1
                 seen.add((topic_key, type_key))
                 skipped += 1
@@ -570,13 +570,13 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
 
             # Phase 4.12 (thu hẹp phạm vi ở 4.13 — chỉ còn xử lý CA BẤT ĐỒNG):
             # router chọn infographic:true (đã qua cổng ở trên) NHƯNG Brief xác
-            # nhận no_numeric_content=True (facts=[] hợp lệ, tin thuần định
+            # nhận no_numeric_content=True (content_units=[] hợp lệ, tin thuần định
             # tính) -> router "tưởng" có số nhưng Brief đọc kỹ hơn thấy không
             # có -> vẫn SKIP (không có gì để trình bày), NHƯNG log WARN để
-            # tinh chỉnh prompt router (mục 3, "để tinh chỉnh"). facts[] rỗng
+            # tinh chỉnh prompt router (mục 3, "để tinh chỉnh"). content_units[] rỗng
             # mà KHÔNG có cờ (Brief hỏng thật) vẫn giữ nguyên đường NEEDS_HUMAN
             # cũ bên dưới (Mục B item 3, KHÔNG đổi).
-            if isinstance(agent, InfographicSpecAgent) and not brief.facts and brief.no_numeric_content:
+            if isinstance(agent, InfographicSpecAgent) and not brief.content_units and brief.no_numeric_content:
                 if (topic_key, "infographic") in seen:
                     skipped += 1
                     continue
@@ -585,7 +585,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                      f"'{item['context'][:60]}' -> vẫn SKIP, cần tinh chỉnh prompt router.")
                 reason = ("Router chọn infographic:true nhưng Brief xác nhận không có số "
                          "liệu (no_numeric_content=true) -> bất đồng router/brief, tạm SKIP")
-                _write_content(topic_key, "infographic", status="SKIPPED", output="", notes=reason, facts_json=facts_json)
+                _write_content(topic_key, "infographic", status="SKIPPED", output="", notes=reason, content_units_json=content_units_json)
                 written += 1
                 seen.add((topic_key, "infographic"))
                 skipped += 1
@@ -605,7 +605,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                     if (topic_key, "video") in seen:
                         skipped += 1
                         continue
-                    _write_content(topic_key, "video", status="NEEDS_HUMAN", output="", notes=str(e), facts_json=facts_json)
+                    _write_content(topic_key, "video", status="NEEDS_HUMAN", output="", notes=str(e), content_units_json=content_units_json)
                     written += 1
                     seen.add((topic_key, "video"))
                     flagged += 1
@@ -618,13 +618,13 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
             else:
                 raw_draft = agent.run(brief)
             draft = apply_guardrails(raw_draft, brief.evidence, brief.background,
-                                     brief.facts, approx_tolerance=approx_tol)
-            if isinstance(agent, InfographicSpecAgent) and not brief.facts:
-                # Tới được đây nghĩa là no_numeric_content=False -> facts rỗng
+                                     brief.content_units, approx_tolerance=approx_tol)
+            if isinstance(agent, InfographicSpecAgent) and not brief.content_units:
+                # Tới được đây nghĩa là no_numeric_content=False -> content_units rỗng
                 # DO Brief HỎNG THẬT (timeout/lỗi/parse hỏng), KHÔNG phải tin
                 # định tính (nhánh đó đã "continue" ở trên) -> vẫn NEEDS_HUMAN.
                 draft.compliance_issues.append(
-                    "facts[] rỗng (Brief chưa trích được số liệu) -> NEEDS_HUMAN, "
+                    "content_units[] rỗng (Brief chưa trích được số liệu) -> NEEDS_HUMAN, "
                     "không bịa nhãn 'Số liệu N'")
             type_ = draft.fmt.value
             if (topic_key, type_) in seen:
@@ -639,7 +639,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
             # sự thật, KHÔNG được chỉ có bản cắt như Sheet preview).
             fn = out_dir / f"{_slug(item['context'])}-{type_}.{_ext(type_)}"
             fn.write_text(draft.body, encoding="utf-8")
-            _write_content(topic_key, type_, status=status, output=draft.body, notes=note, facts_json=facts_json)
+            _write_content(topic_key, type_, status=status, output=draft.body, notes=note, content_units_json=content_units_json)
             written += 1
             seen.add((topic_key, type_))
             produced += 1
@@ -744,7 +744,7 @@ def _prompt_md(slug: str, type_: str, user_prompt: str) -> str:
 def draft_to_content_draft(type_: str, data: dict, brief: ProductionBrief, *,
                            approx_tolerance: float = 0.05) -> ContentDraft:
     """Chuyển JSON Claude Code đã viết (schema article/video) -> ContentDraft đã
-    qua guardrail (evidence + brief.background gộp lại; brief.facts (Mục C) cho
+    qua guardrail (evidence + brief.background gộp lại; brief.content_units (Mục C) cho
     phép số làm tròn hợp lý khớp canonical). Hàm THUẦN — DÙNG CHUNG bởi
     run_ingest() và test (không cần Sheets/mạng). `type_` = 'article' | 'video'."""
     if type_ == "article":
@@ -755,7 +755,7 @@ def draft_to_content_draft(type_: str, data: dict, brief: ProductionBrief, *,
         title, scenes, disclaimer = video_fields_from_data(data, brief)
         body = render_video(title, scenes, disclaimer, brief)
         draft = ContentDraft(fmt=ContentFormat.VIDEO_SCRIPT, title=title, body=body, brief_topic=brief.topic)
-    return apply_guardrails(draft, brief.evidence, brief.background, brief.facts,
+    return apply_guardrails(draft, brief.evidence, brief.background, brief.content_units,
                             approx_tolerance=approx_tolerance)
 
 
@@ -812,21 +812,21 @@ def run_draft(*, limit: int = 5, setup: bool = False) -> dict:
         slug = _slug(context)
 
         # Infographic: sinh NGAY (không cần Claude Code) — NGOÀI PHẠM VI Phase
-        # 4.9/4.10/4.11: đường --draft KHÔNG chạy run_brief() nên brief.facts
+        # 4.9/4.10/4.11: đường --draft KHÔNG chạy run_brief() nên brief.content_units
         # luôn rỗng ở đây -> InfographicSpecAgent (Phase 4.11 Composer) trả
         # spec RỖNG có chủ ý (_empty_infographic_spec, KHÔNG bịa), không phải
-        # bug — biết trước, chưa wire facts[]/route-once cho đường thủ công này.
+        # bug — biết trước, chưa wire content_units[]/route-once cho đường thủ công này.
         if (topic_key, "infographic") not in seen:
             approx_tol = float(settings.get("guardrail.approx_tolerance_pct", 5)) / 100
             draft = apply_guardrails(InfographicSpecAgent(None).run(brief), brief.evidence,
-                                     brief.background, brief.facts, approx_tolerance=approx_tol)
+                                     brief.background, brief.content_units, approx_tolerance=approx_tol)
             fn = out_dir / f"{slug}-infographic.json"
             fn.write_text(draft.body, encoding="utf-8")
             _write_content(topic_key, "infographic",
                           status="DONE" if draft.is_clean else "ERROR",
                           output=draft.body,
                           notes="; ".join(draft.compliance_issues),
-                          facts_json=facts_to_json(brief.facts))   # rỗng ở đường --draft (chưa wire run_brief())
+                          content_units_json=facts_to_json(brief.content_units))   # rỗng ở đường --draft (chưa wire run_brief())
             written += 1
             seen.add((topic_key, "infographic"))
             infographic_done += 1
@@ -943,7 +943,7 @@ def run_ingest() -> dict:
             fn.write_text(draft.body, encoding="utf-8")
             _write_content(topic_key, ctype, status="DONE" if draft.is_clean else "ERROR",
                           output=draft.body, notes="; ".join(draft.compliance_issues),
-                          facts_json=facts_to_json(brief.facts))   # rỗng ở đường --ingest (chưa wire run_brief())
+                          content_units_json=facts_to_json(brief.content_units))   # rỗng ở đường --ingest (chưa wire run_brief())
             written += 1
             seen.add((topic_key, ctype))
             ingested += 1
