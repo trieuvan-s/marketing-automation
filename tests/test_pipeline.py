@@ -3954,12 +3954,17 @@ def test_run_infographic_skipped_when_no_numeric_content_true_article_still_prod
     assert any(ctx.get("type") == "infographic" for ctx in skipped_events)
 
 
-def test_run_infographic_skipped_when_router_decides_channel_false_upfront():
-    """Phase 4.13 Mục A: router QUYẾT NGAY TỪ ĐẦU output_channels.infographic=
-    False (tin bảng-số/kém hợp hình, KHÔNG liên quan content_units rỗng hay không) ->
-    SKIPPED NGAY TRƯỚC KHI gọi composer (khỏi tốn lượt LLM), Notes chứa ĐÚNG
-    channel_rationale router cho — đây là cơ chế CHÍNH thay nhánh phản ứng-sau
-    của Phase 4.12. article/video (channels=True) vẫn sinh bình thường."""
+def test_run_infographic_skipped_by_code_count_ignoring_router_rationale():
+    """Phase 4.13 Mục A (SỬA kỳ vọng theo BƯỚC A, Router, quyết định Lead 31/07
+    "gỡ nốt cứng nhắc Infographic"): trước đây Router (LLM) TỰ quyết định
+    infographic=False qua channel_rationale riêng của nó — GIỜ tuyến infographic
+    ở chế độ AUTO do CODE quyết định HOÀN TOÀN (agents/brief.BriefResult.
+    infographic_worthy, đếm content_unit theo type), Ý KIẾN RIÊNG của Router
+    cho tuyến này KHÔNG CÒN Ý NGHĨA (dù Router vẫn có thể tự nói gì đó qua
+    channel_rationale, Notes GIỜ LÀ lý do đếm-số của CODE, không phải câu chữ
+    Router). Ca này chỉ có 1 content_unit numeric (dưới ngưỡng ≥2) -> vẫn
+    SKIPPED nhưng vì CODE đếm không đủ, không phải vì Router "thấy không hợp".
+    article/video (channels=True) vẫn sinh bình thường (không bị ảnh hưởng)."""
     import json as _json
 
     class _CleanWriterLLM:
@@ -4002,7 +4007,14 @@ def test_run_infographic_skipped_when_router_decides_channel_false_upfront():
     infographic_rows = [r for r in board.appended_content if r[2] == "infographic"]
     assert len(infographic_rows) == 1
     assert infographic_rows[0][3] == "SKIPPED"
-    assert "Tin bảng-số không đủ dữ liệu trình bày hình" in infographic_rows[0][5]
+    assert "FORMAT_MISMATCH" in infographic_rows[0][5]
+    assert "Tin bảng-số không đủ dữ liệu trình bày hình" not in infographic_rows[0][5], (
+        "Notes PHẢI là lý do đếm-số của CODE, KHÔNG phải câu chữ Router — "
+        "Router mất quyền quyết riêng tuyến infographic ở chế độ AUTO (Bước A)"
+    )
+
+    article_rows = [r for r in board.appended_content if r[2] == "article"]
+    assert len(article_rows) == 1 and article_rows[0][3] == "DONE"
 
     article_rows = [r for r in board.appended_content if r[2] == "article"]
     assert len(article_rows) == 1 and article_rows[0][3] == "DONE"
@@ -5100,22 +5112,30 @@ def test_vertical_slice_a_full_quantitative_topic_three_channels_clean():
 
 
 def test_vertical_slice_b_router_disables_one_channel_no_error():
-    """PHASE (a)-SEAL kịch bản (b): router quyết output_channels.infographic=
-    False (quyết-định-từ-đầu, KHÔNG liên quan content_units) -> tuyến đó KHÔNG được
-    sinh, Status=SKIPPED (KHÔNG phải ERROR/NEEDS_HUMAN), article/video vẫn
-    DONE bình thường, Execute KHÔNG bị kéo xuống FAILED/NEEDS_HUMAN."""
-    route_llm = _SliceRouteLLM(output_channels={"article": True, "infographic": False, "video": True})
+    """PHASE (a)-SEAL kịch bản (b) — ĐỔI TUYẾN sang VIDEO (BƯỚC A, Router,
+    quyết định Lead 31/07): bản gốc dùng infographic để chứng minh "Router
+    quyết-định-từ-đầu 1 tuyến false -> SKIPPED sạch, không lỗi" — nhưng từ
+    BƯỚC A, tuyến infographic ở chế độ AUTO do CODE quyết định HOÀN TOÀN
+    (agents/brief.BriefResult.infographic_worthy đếm content_unit), Ý KIẾN
+    RIÊNG của Router cho tuyến NÀY không còn ý nghĩa (2 content_unit numeric
+    của _slice_row() -> infographic_worthy=True, code SẼ ép bật lại bất kể
+    Router nói gì — xem test_run_infographic_skipped_by_code_count_ignoring_
+    router_rationale cho hành vi MỚI của tuyến infographic). Tuyến VIDEO
+    KHÔNG có cơ chế ép-bật tương tự (Bước 4/A chỉ chạm article + infographic)
+    nên vẫn giữ đúng Ý ĐỊNH GỐC của test này: router tự quyết 1 tuyến false ->
+    SKIPPED sạch, KHÔNG lỗi, các tuyến khác vẫn DONE."""
+    route_llm = _SliceRouteLLM(output_channels={"article": True, "infographic": True, "video": False})
     writer_llm = _SliceCleanWriterLLM()
     result, board, notifier = _run_produce_scenario(writer_llm, _slice_row(), route_llm=route_llm)
 
     types_status = {r[2]: r[3] for r in board.appended_content}
     assert types_status["article"] == "DONE"
-    assert types_status["video"] == "DONE"
-    assert types_status["infographic"] == "SKIPPED"           # KHÔNG phải ERROR
+    assert types_status["infographic"] == "DONE"
+    assert types_status["video"] == "SKIPPED"           # KHÔNG phải ERROR
 
-    infographic_row = next(r for r in board.appended_content if r[2] == "infographic")
-    assert infographic_row[4] == ""                            # Output rỗng (không gọi composer)
-    assert "không hợp tin này" in infographic_row[5]           # Notes = rationale router
+    video_row = next(r for r in board.appended_content if r[2] == "video")
+    assert video_row[4] == ""                            # Output rỗng (không gọi composer)
+    assert "không hợp tin này" in video_row[5]           # Notes = rationale router (video KHÔNG đổi cơ chế)
 
     assert board.execute_updates.get(2) == "DONE"              # KHÔNG bị SKIPPED cản DONE
     events = [e for e, _ in notifier.events]
@@ -6165,6 +6185,143 @@ def test_has_anchored_units_numeric_always_counts_qualitative_needs_direct_or_pa
     ])
     assert mixed_derived_plus_numeric.has_anchored_units is True, (
         "1 content_unit numeric BẤT KỲ trong danh sách vẫn đủ ép article=true"
+    )
+
+
+# =====================================================================
+# BƯỚC A (Router, gỡ nốt cứng nhắc Infographic, quyết định Lead 31/07) — A4:
+# 4 ca AUTO (đủ số/đủ process/chỉ 2 unit rời/toàn quote đơn lẻ) + 1 ca Output
+# Type chọn tường minh Infographic. A5: dựng content_units SẴN, KHÔNG cần LLM
+# thật — đây là logic Router THUẦN (đếm/so ngưỡng), không phải chất lượng
+# trích xuất (thứ ĐÃ kiểm bằng LLM thật ở chốt kiểm nội bộ riêng).
+# =====================================================================
+def test_infographic_worthy_auto_case_enough_numeric():
+    """A4 ca 1 — "đủ số": ≥2 content_unit type=numeric -> infographic_worthy=
+    True (Data Infographic, ngưỡng ≥2 — xem docstring property giải thích lý
+    do lệch so với đề xuất ban đầu ≥3: dữ liệu thật/test có sẵn cho thấy 2 số
+    đã đủ dùng từ trước)."""
+    from twmkt.agents.brief import BriefResult
+    from twmkt.models import ContentUnit
+
+    two_numeric = BriefResult(content_units=[
+        ContentUnit(value="45,6", label="Tăng trưởng doanh thu", type="numeric"),
+        ContentUnit(value="1.200", label="Doanh thu", type="numeric"),
+    ])
+    assert two_numeric.infographic_worthy is True
+    assert two_numeric.infographic_type_counts()["numeric"] == 2
+
+
+def test_infographic_worthy_auto_case_enough_process_or_timeline():
+    """A4 ca 2 — "đủ process": ≥3 content_unit type ∈ {process, timeline} ->
+    infographic_worthy=True (sơ đồ các bước / dòng thời gian, KHÔNG cần số
+    nào cả)."""
+    from twmkt.agents.brief import BriefResult
+    from twmkt.models import ContentUnit
+
+    three_process = BriefResult(content_units=[
+        ContentUnit(value="", label="s1", type="process", subject="Doanh nghiệp",
+                   claim="Nộp hồ sơ", source="src", evidence="direct_quote"),
+        ContentUnit(value="", label="s2", type="process", subject="Doanh nghiệp",
+                   claim="Chờ thẩm định", source="src", evidence="direct_quote"),
+        ContentUnit(value="", label="s3", type="timeline", subject="Doanh nghiệp",
+                   claim="Được cấp phép sau 30 ngày", source="src", evidence="paraphrase"),
+    ])
+    assert three_process.infographic_worthy is True
+    counts = three_process.infographic_type_counts()
+    assert counts["process_timeline"] == 3 and counts["numeric"] == 0
+
+
+def test_infographic_worthy_auto_case_only_two_isolated_units():
+    """A4 ca 3 — "chỉ 2 unit rời": 2 content_unit KHÁC type, mỗi nhóm không đạt
+    ngưỡng riêng (1 statement + 1 event, không phải numeric/process-timeline/
+    relation-state, tổng cũng chưa tới 4) -> infographic_worthy=False."""
+    from twmkt.agents.brief import BriefResult
+    from twmkt.models import ContentUnit
+
+    two_isolated = BriefResult(content_units=[
+        ContentUnit(value="", label="s1", type="statement", subject="A",
+                   claim="A tuyên bố X", source="src", evidence="direct_quote"),
+        ContentUnit(value="", label="s2", type="event", subject="B",
+                   claim="B xảy ra Y", source="src", evidence="direct_quote"),
+    ])
+    assert two_isolated.infographic_worthy is False, (
+        "2 unit rời rạc khác nhóm, không đạt bất kỳ ngưỡng nào -- KHÔNG đủ dựng Infographic"
+    )
+
+
+def test_infographic_worthy_auto_case_all_isolated_quotes():
+    """A4 ca 4 — "toàn quote đơn lẻ": nhiều content_unit type=quote nhưng KHÔNG
+    đạt ngưỡng tổng ≥4 (chỉ 2 quote) -> infographic_worthy=False ("quote" KHÔNG
+    nằm trong 2 nhóm ≥3 riêng [process/timeline, relation/state_change], chỉ
+    tính vào tổng ≥4 chung)."""
+    from twmkt.agents.brief import BriefResult
+    from twmkt.models import ContentUnit
+
+    two_quotes = BriefResult(content_units=[
+        ContentUnit(value="", label="q1", type="quote", subject="A",
+                   claim="Câu trích 1", source="src", evidence="direct_quote"),
+        ContentUnit(value="", label="q2", type="quote", subject="B",
+                   claim="Câu trích 2", source="src", evidence="direct_quote"),
+    ])
+    assert two_quotes.infographic_worthy is False
+
+    four_quotes = BriefResult(content_units=[
+        ContentUnit(value="", label=f"q{i}", type="quote", subject="A",
+                   claim=f"Câu trích {i}", source="src", evidence="direct_quote")
+        for i in range(4)
+    ])
+    assert four_quotes.infographic_worthy is True, (
+        "4 quote (dù toàn 1 type) vẫn đạt ngưỡng tổng ≥4 -- đủ dày để dựng cấu trúc thị giác"
+    )
+
+
+def test_run_output_type_explicit_infographic_on_qualitative_only_article_no_number():
+    """A4 ca 5 — Output Type chọn TƯỜNG MINH Infographic trên bài KHÔNG SỐ
+    (chỉ 2 content_unit type=statement, dưới MỌI ngưỡng infographic_worthy) ->
+    PHẢI THỰC THI (Router/CODE mất quyền phủ quyết khi user chọn tường minh,
+    cùng luật Bước 4.5 áp cho MỌI định dạng, giờ áp cả cho Infographic dù lý
+    do tắt là CODE đếm số chứ không phải Router LLM tự ý)."""
+    import json as _json
+
+    class _ComposerLLM:
+        def __init__(self):
+            from twmkt.agents.router import Usage
+            self.usage = Usage()
+
+        def complete(self, system, prompt, *, model=None):
+            return _json.dumps({
+                "title": "Chính sách mới", "subtitle": "Không có số liệu cụ thể",
+                "hero": [], "market": [], "highlights": ["Chính sách mới ban hành."],
+                "related": [], "priority": {"primary": [], "secondary": [], "minor": []},
+                "source": "ignored", "render_hint": {"ratio": "1:1"},
+            }, ensure_ascii=False)
+
+    class _QualitativeOnlyNoNumberRouteLLM:
+        """`source` PHẢI verify được trong evidence THẬT (fallback="hook gợi ý",
+        xem _approved_row/fetch_full_evidence)."""
+
+        def complete(self, system, prompt, *, model=None, fail_loud=False, **kw):
+            if "no_numeric_content" in system:
+                return _json.dumps({
+                    "content_units": [
+                        {"shape": "qualitative", "type": "statement", "subject": "Chính phủ",
+                         "claim": "Chính phủ tuyên bố chính sách mới", "source": "hook gợi ý",
+                         "evidence": "direct_quote"},
+                    ],
+                    "no_numeric_content": False,
+                }, ensure_ascii=False)
+            return ""
+
+    result, board, notifier = _run_produce_scenario(
+        _ComposerLLM(),
+        _approved_row("Chính sách mới, không có số liệu cụ thể", row=2, output_type=["Infographic"]),
+        route_llm=_QualitativeOnlyNoNumberRouteLLM(), content_llm=_ComposerLLM())
+
+    rows_by_type = {r[2]: r for r in board.appended_content}
+    assert set(rows_by_type) == {"infographic"}
+    assert rows_by_type["infographic"][3] == "DONE", (
+        f"Output Type chọn tường minh Infographic trên bài không số -- PHẢI thực thi, "
+        f"thực tế: {rows_by_type['infographic'][3]} | {rows_by_type['infographic'][5][:150]}"
     )
 
 

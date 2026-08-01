@@ -192,6 +192,58 @@ class BriefResult:
                 return True
         return False
 
+    def infographic_type_counts(self) -> dict[str, int]:
+        """Đếm content_unit theo 3 nhóm dùng bởi `infographic_worthy` — tách
+        riêng để _channel_skip_reason (produce_from_sheet.py) ghi được CHÍNH
+        XÁC bao nhiêu unit theo nhóm nào vào Notes (yêu cầu Lead — "chỉnh
+        ngưỡng bằng số, không bằng cảm nhận")."""
+        n_numeric = sum(1 for u in self.content_units if u.type == "numeric")
+        n_process_timeline = sum(1 for u in self.content_units if u.type in ("process", "timeline"))
+        n_relation_state = sum(1 for u in self.content_units if u.type in ("relation", "state_change"))
+        return {"numeric": n_numeric, "process_timeline": n_process_timeline,
+               "relation_state": n_relation_state, "total": len(self.content_units)}
+
+    @property
+    def infographic_worthy(self) -> bool:
+        """Bước A (Router, gỡ nốt cứng nhắc Infographic, quyết định Lead 31/07)
+        — THAY HẲN quy tắc cũ "has_numeric_units=False -> luôn tắt Infographic"
+        (Bước 4.4 bản đầu, tự nó vẫn là 1 dạng cứng nhắc: giả định Infographic
+        CHỈ vẽ được bảng số liệu). Đây là ĐÁNH GIÁ THUẦN CODE thay cho ý kiến
+        Router (LLM) cho riêng tuyến infographic ở chế độ AUTO — LUÔN quyết
+        định channels["infographic"] (cả 2 chiều True/False), KHÔNG chỉ tắt
+        khi thiếu, KHÔNG hỏi ý kiến LLM cho tuyến này nữa.
+
+        True khi ÍT NHẤT MỘT trong 4 điều kiện (NGƯỠNG KHỞI ĐẦU — chỉnh được
+        sau khi có dữ liệu thật, xem infographic_type_counts để đo/hiệu chỉnh):
+          - ≥2 content_unit type="numeric" (Data Infographic — bảng số liệu).
+            LỆCH so với đề xuất ban đầu (≥3) — GIẢM XUỐNG ≥2 vì "có dữ liệu
+            thật" xuất hiện NGAY khi implement: test_vertical_slice_a_full_
+            quantitative_topic_three_channels_clean (kịch bản THẬT, có TRƯỚC
+            hôm nay, KHÔNG phải viết ra để né ngưỡng) xác nhận Data Infographic
+            ĐÃ hoạt động đúng + được coi hợp lệ từ lâu với ĐÚNG 2 stat (growth%+
+            tiền) — cùng nếp `_pick_emphasis_index`/`_condensed_infographic_
+            spec` (agents/production.py) vốn thiết kế cho "1 emphasis + phần
+            còn lại", hoạt động tốt với chỉ 2 fact. Giữ ngưỡng ≥3 cho numeric
+            sẽ THỤT LÙI (regression) 1 hành vi ĐÃ ĐÚNG từ trước, không phải gỡ
+            cứng nhắc.
+          - ≥3 content_unit type ∈ {"process", "timeline"} (sơ đồ các bước /
+            dòng thời gian) — GIỮ ≥3 như đề xuất, CHƯA có dữ liệu thật nào mâu
+            thuẫn (chưa có tiền lệ như numeric ở trên).
+          - ≥3 content_unit type ∈ {"relation", "state_change"} (sơ đồ quan hệ
+            giữa các bên / trước-sau) — GIỮ ≥3, cùng lý do.
+          - ≥4 content_unit BẤT KỲ type (đủ dày để dựng cấu trúc thị giác dù
+            pha trộn nhiều loại, không đơn giản chỉ 1-2 ý rời rạc) — GIỮ ≥4.
+        False khi: chỉ 1 content_unit rời rạc, hoặc toàn statement/quote đơn
+        lẻ không đủ để dựng cấu trúc thị giác có ý nghĩa (statement/quote/
+        event/inference đơn độc, số lượng ít, không rơi vào 4 nhánh trên).
+
+        LƯU Ý — Output Type chọn TƯỜNG MINH Infographic PHẢI BỎ QUA property
+        này hoàn toàn (Router mất quyền phủ quyết, xem produce_from_sheet.py
+        — cùng luật đã áp cho Article ở Bước 4.5, giờ áp cho MỌI định dạng)."""
+        counts = self.infographic_type_counts()
+        return (counts["numeric"] >= 2 or counts["process_timeline"] >= 3
+                or counts["relation_state"] >= 3 or counts["total"] >= 4)
+
 _SENT_SPLIT_RE = re.compile(r"(?<=[.!?\n])\s+")
 
 _DEFAULT_ENTITY_TYPES = ("ticker", "company", "policy", "place", "person", "project", "other")

@@ -172,31 +172,42 @@ _NO_USABLE_CONTENT_REASON = (
     "KHÔNG cần người can thiệp (xem agents/brief.BriefResult.brief_status)."
 )
 
-_FORMAT_MISMATCH_NO_NUMERIC_REASON = (
-    "FORMAT_MISMATCH: content_units xác nhận KHÔNG có dữ liệu định lượng nào "
-    "(has_numeric_units=false) — Data Infographic cần số để dựng hero/market, "
-    "KHÔNG có gì để trình bày. KHÔNG PHẢI lỗi nội dung/Brief — Article/Video "
-    "vẫn sinh bình thường (xem BriefResult.has_numeric_units, Bước 4.4)."
-)
+def _infographic_not_worthy_reason(counts: dict) -> str:
+    """BƯỚC A (Router, gỡ nốt cứng nhắc Infographic) — A2: "ghi lý do quyết
+    định vào Notes: dùng nhánh nào, đếm được bao nhiêu unit theo type nào,
+    để sau này chỉnh ngưỡng bằng số, không bằng cảm nhận". Nêu ĐỦ 4 số đếm
+    dùng bởi agents/brief.BriefResult.infographic_worthy, không chỉ nói
+    chung chung "không đủ dữ liệu"."""
+    return (
+        "FORMAT_MISMATCH: content_units KHÔNG đạt ngưỡng dựng Infographic có "
+        "ý nghĩa (đánh giá bằng CODE, thay ý kiến Router) — đếm được: "
+        f"{counts['numeric']} numeric (ngưỡng ≥2 cho Data Infographic), "
+        f"{counts['process_timeline']} process/timeline (ngưỡng ≥3 cho sơ đồ "
+        f"bước/dòng thời gian), {counts['relation_state']} relation/state_change "
+        f"(ngưỡng ≥3 cho sơ đồ quan hệ/trước-sau), {counts['total']} content_unit "
+        "tổng cộng (ngưỡng ≥4 bất kỳ type). KHÔNG PHẢI lỗi nội dung/Brief — "
+        "Article/Video vẫn sinh bình thường (xem BriefResult.infographic_worthy)."
+    )
 
 
 def _channel_skip_reason(ch: str, decision, output_type_excluded: set[str], *,
                          no_usable_content: bool = False,
-                         format_mismatch: bool = False) -> str:
+                         infographic_not_worthy_counts: dict | None = None) -> str:
     """Notes giải thích ĐÚNG nguyên nhân SKIPPED — phân biệt router (nội dung
     không hợp tuyến, mã FORMAT_MISMATCH), Output Type (người không chọn tuyến,
     dù router có thể đã đồng ý — KHÔNG gán mã, đây không phải vấn đề nội
     dung), NO_USABLE_CONTENT (Brief xác nhận nguồn KHÔNG có nội dung thực
-    chất), và `format_mismatch` (Bước 4.4, không đủ dữ liệu SỐ cho Data
-    Infographic — TÁCH RIÊNG khỏi nhánh router/channel_rationale dù CÙNG mã
-    FORMAT_MISMATCH, vì đây là cổng TẤT ĐỊNH không qua Router) — ưu tiên kiểm
-    THEO THỨ TỰ no_usable_content > format_mismatch (Bước 4.4) > Output Type >
-    router, vì mỗi nhánh sau chỉ còn ý nghĩa khi nhánh trước KHÔNG áp dụng —
-    gộp làm 1 thông điệp sẽ đánh lừa người đọc Notes khi tra vì sao thiếu 1 loại."""
+    chất), và `infographic_not_worthy_counts` (Bước A, đánh giá THUẦN CODE cho
+    riêng tuyến infographic — TÁCH RIÊNG khỏi nhánh router/channel_rationale
+    dù CÙNG mã FORMAT_MISMATCH, vì đây là cổng CODE-QUYẾT-ĐỊNH, không phải ý
+    kiến chủ quan của Router LLM nữa) — ưu tiên kiểm THEO THỨ TỰ no_usable_
+    content > infographic_not_worthy_counts (Bước A) > Output Type > router,
+    vì mỗi nhánh sau chỉ còn ý nghĩa khi nhánh trước KHÔNG áp dụng — gộp làm 1
+    thông điệp sẽ đánh lừa người đọc Notes khi tra vì sao thiếu 1 loại."""
     if no_usable_content:
         return _NO_USABLE_CONTENT_REASON
-    if format_mismatch:
-        return _FORMAT_MISMATCH_NO_NUMERIC_REASON
+    if infographic_not_worthy_counts is not None:
+        return _infographic_not_worthy_reason(infographic_not_worthy_counts)
     if ch in output_type_excluded:
         return f"Output Type không chọn tuyến {ch} cho chủ đề này (người giới hạn qua cột Output Type)."
     return (f"FORMAT_MISMATCH: Router quyết định tuyến {ch} không hợp tin này: "
@@ -497,20 +508,25 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
             for ch in no_usable_content_channels:
                 channels[ch] = False
 
-        # BƯỚC 4.4 (Router, quyết định Lead 31/07) — "no numeric chỉ tắt Data
-        # Infographic, KHÔNG chạm article/video": content_units KHÁC RỖNG (đã
-        # qua cổng no_usable_content ở trên) nhưng KHÔNG CÓ content_unit type=
-        # "numeric" nào -- Data Infographic (hero/market là SỐ) không có gì để
-        # trình bày, ÉP infographic=False NGAY, TRƯỚC khi gọi composer (khỏi
-        # phí lượt LLM sinh spec rỗng). Mã lý do: FORMAT_MISMATCH (nội dung
-        # KHÔNG SAI, chỉ SAI ĐỊNH DẠNG cho tuyến này) -- xem _channel_skip_reason.
-        format_mismatch_channels: set[str] = set()
+        # BƯỚC A (Router, quyết định Lead 31/07 — GỠ NỐT CỨNG NHẮC INFOGRAPHIC,
+        # THAY HẲN Bước 4.4 bản đầu "has_numeric_units=False -> luôn tắt"):
+        # quy tắc CŨ tự nó vẫn cứng nhắc — giả định Infographic CHỈ vẽ được
+        # bảng số liệu, trong khi gpt-image-2 (render/ai_full.py, KHÔNG đụng ở
+        # đây) vẽ được sơ đồ quy trình/dòng thời gian/quan hệ từ content_unit
+        # ĐỊNH TÍNH, không cần khuôn dữ liệu riêng (xem agents/brief.BriefResult.
+        # infographic_worthy). channels["infographic"] GIỜ do CODE quyết định
+        # HOÀN TOÀN ở chế độ AUTO (cả 2 chiều True/False) — THAY THẾ ý kiến
+        # riêng của Router (LLM) cho tuyến này, KHÔNG chỉ ghi đè 1 chiều như
+        # article (has_anchored_units). Output Type chọn TƯỜNG MINH Infographic
+        # vẫn BỎ QUA property này hoàn toàn (xem deterministic_off_channels +
+        # BƯỚC 4.5 bên dưới — infographic_worthiness_channels KHÔNG nằm trong
+        # đó, khác no_usable_content_channels là sự thật tuyệt đối không viết
+        # được gì).
+        infographic_worthiness_channels: set[str] = set()
         if (write_article and brief_result.brief_status == "OK"
-                and not brief_result.has_numeric_units
-                and "infographic" not in no_usable_content_channels
-                and channels.get("infographic", True)):
-            channels["infographic"] = False
-            format_mismatch_channels.add("infographic")
+                and "infographic" not in no_usable_content_channels):
+            channels["infographic"] = brief_result.infographic_worthy
+            infographic_worthiness_channels.add("infographic")
 
         # BƯỚC 4.1/4.2 (Router) — "article=true khi brief_status=OK VÀ có ≥1
         # content_unit NEO ĐƯỢC vào nguồn (has_anchored_units — xem agents/
@@ -554,8 +570,13 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
             # content/format_mismatch): đó là SỰ THẬT về hình dạng nội dung
             # (không có gì để viết/không có số để trình bày), ép bật sẽ ép
             # Composer BỊA hoặc sinh spec rỗng — khác hẳn Router chỉ đang nêu
-            # Ý KIẾN chủ quan có thể sai.
-            deterministic_off_channels = no_usable_content_channels | format_mismatch_channels
+            # Ý KIẾN chủ quan có thể sai. `infographic_worthiness_channels`
+            # (Bước A) KHÔNG nằm trong deterministic_off_channels — đây CŨNG
+            # là 1 dạng "ý kiến đánh giá" (chỉ khác là CODE đánh giá thay vì
+            # LLM), Output Type chọn tường minh PHẢI ghi đè được, đúng yêu
+            # cầu "Router mất quyền phủ quyết" áp cho MỌI định dạng, không
+            # riêng Article.
+            deterministic_off_channels = no_usable_content_channels
             for ch in allowed_types:
                 if ch not in deterministic_off_channels and not channels.get(ch, True):
                     channels[ch] = True
@@ -637,9 +658,13 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                 if (topic_key, type_key) in seen:
                     skipped += 1
                     continue
-                reason = _channel_skip_reason(ch, decision, output_type_excluded,
-                                              no_usable_content=ch in no_usable_content_channels,
-                                              format_mismatch=ch in format_mismatch_channels)
+                reason = _channel_skip_reason(
+                    ch, decision, output_type_excluded,
+                    no_usable_content=ch in no_usable_content_channels,
+                    infographic_not_worthy_counts=(
+                        brief_result.infographic_type_counts()
+                        if ch in infographic_worthiness_channels else None),
+                )
                 _write_content(topic_key, type_key, status="SKIPPED", output="", notes=reason, content_units_json=content_units_json)
                 written += 1
                 seen.add((topic_key, type_key))
@@ -649,14 +674,14 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
 
             # Phase 4.12 (thu hẹp phạm vi ở 4.13 — chỉ còn xử lý CA BẤT ĐỒNG)
             # từng có 1 nhánh riêng ở đây bắt "router chọn infographic:true
-            # nhưng Brief xác nhận no_numeric_content=true". BƯỚC 4.4 (Router,
-            # 31/07) ĐÃ THAY THẾ HOÀN TOÀN: cổng format_mismatch_channels ở
-            # trên (tính TRƯỚC vòng lặp này, từ brief_result.has_numeric_units)
-            # bắt ĐÚNG case này SỚM HƠN (channels["infographic"]=False ngay từ
-            # đầu) -- nhánh cũ do đó KHÔNG BAO GIỜ còn chạy tới được (điều kiện
-            # `not brief.content_units and brief.no_numeric_content` là TẬP CON
-            # của điều kiện format_mismatch mới), đã XOÁ để không giữ code chết
-            # dùng chung 1 ý nghĩa nhưng 2 cơ chế/2 mã lý do khác nhau.
+            # nhưng Brief xác nhận no_numeric_content=true". Bước 4.4 (bản đầu,
+            # rồi Bước A thay tiếp) ĐÃ THAY THẾ HOÀN TOÀN: cổng infographic_
+            # worthiness_channels ở trên (tính TRƯỚC vòng lặp này, từ brief_
+            # result.infographic_worthy) bắt ĐÚNG case này SỚM HƠN (channels
+            # ["infographic"] đã được CODE quyết định dứt điểm ngay từ đầu,
+            # cả 2 chiều) -- nhánh cũ do đó KHÔNG BAO GIỜ còn chạy tới được,
+            # đã XOÁ để không giữ code chết dùng chung 1 ý nghĩa nhưng 2 cơ
+            # chế/2 mã lý do khác nhau.
 
             if isinstance(agent, VideoScriptAgent):
                 # BƯỚC 3 (rules v2.1) — nguồn không đủ SCENE cho video (sàn
