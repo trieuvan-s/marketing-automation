@@ -1,5 +1,5 @@
 """StructureRouterAgent (Phase 3, CLAUDE.md lộ trình v3) — "tim" của milestone
-voice-lock động. Đọc ProductionBrief (facts[]+kind từ agents/brief.py, Phase 2)
+voice-lock động. Đọc ProductionBrief (content_units[]+kind từ agents/brief.py, Phase 2)
 + classification/hotness (dict rời, tự do — group/topic/hot% từ CONTEXT) rồi
 CHỌN ĐÚNG 1 khung diễn giải S1-S5 + 1 hook H1-H3 khớp HÌNH DẠNG THẬT của thông
 tin, theo đúng menu ở docs/voice_examples.md §2/§2b (v3 — KHÔNG phải khung cố
@@ -220,8 +220,10 @@ def build_router_prompt(brief: ProductionBrief, classification: dict | None = No
     từ CONTEXT/curation.enrich) — ProductionBrief KHÔNG có field classification/
     hotness riêng nên truyền tách, gộp vào prompt cho router THAM KHẢO thêm."""
     facts_lines = "\n".join(
-        f"- [{f.kind}] {f.label}: {f.value}{f.unit or ''}" for f in brief.facts
-    ) or "(chưa có fact trích sẵn — xem thẳng evidence bên dưới)"
+        (f"- [{f.kind}] {f.label}: {f.value}{f.unit or ''}" if f.type == "numeric"
+         else f"- [{f.type}] {f.subject}: {f.claim}")
+        for f in brief.content_units
+    ) or "(chưa có content unit trích sẵn — xem thẳng evidence bên dưới)"
     parts = [f"Tiêu đề: {brief.title}"]
     if brief.hook:
         parts.append(f"Hook gợi ý (Cổng 1): {brief.hook}")

@@ -231,10 +231,20 @@ class Agent:
     system: str = "You are a helpful assistant."
     uses_llm: bool = True   # False = tất định, 0 token
     model: str | None = None
+    # PHASE A5 (rules loader, 2026-07-3x) — cho phép A/B rules Ở MỨC REQUEST:
+    # caller set `agent.rules_settings = <Settings riêng>` TRƯỚC khi gọi run()
+    # (CÙNG NẾP `agent.model = ...` ở trên), agents/production.py truyền
+    # xuống `_load_composer_rules(..., settings=self.rules_settings)`. None
+    # (mặc định) -> _load_composer_rules tự lùi về settings TOÀN CỤC
+    # (load_settings()), hành vi CŨ y hệt — KHÔNG BẮT BUỘC caller nào cũng set.
+    # Kiểu để "object" (không import Settings ở đây, tránh vòng import với
+    # config.py) — agents/production.py tự biết kiểu thật khi dùng.
+    rules_settings: object | None = None
 
     def __init__(self, llm: LLMClient | None = None, *, model: str | None = None):
         self.llm = llm or MockLLM()
         self.model = model
+        self.rules_settings = None
 
     def _ask(self, prompt: str, *, extra_system: str = "") -> str:
         sys = f"{self.role}\n{self.system}{extra_system}"

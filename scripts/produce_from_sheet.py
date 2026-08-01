@@ -6,10 +6,10 @@ Luồng:
     • ARTICLE (Phase 4.9 — Brief → route-once (đóng băng) → run_writer_with_retry,
       xem agents/brief.py + agents/route_once.py + agents/writer.py)
     • VideoScriptAgent     (kịch bản video, LLM, schema JSON — đường 3-agent cũ)
-    • InfographicSpecAgent (Phase 4.11 — Composer: LLM Loại B/haiku nén facts[]
+    • InfographicSpecAgent (Phase 4.11 — Composer: LLM Loại B/haiku nén content_units[]
       + RouterDecision thành spec 8 trường, KHÔNG còn tất định/$0 thuần)
   --guardrail-->  compliance (disclaimer/claim cấm) + chặn bịa số (so evidence,
-    Mục C: chấp nhận số làm tròn hợp lý khớp facts[].canonical_value)
+    Mục C: chấp nhận số làm tròn hợp lý khớp content_units[].canonical_value)
   --ghi-->  tab CONTENT (Context|Type|Status|Output) + <data_root>/output/<ngày>/
     (data_root NGOÀI repo, xem Phase DATA-ROOT / config.data_path())
   --> người duyệt xem & duyệt sản phẩm (cổng 2) --> Publish (giai đoạn sau).
@@ -26,7 +26,7 @@ này, agents/writer.run_writer_with_retry() (retry/backoff/FAILED/NEEDS_HUMAN,
 Phase 4.5) CHƯA từng được gọi bởi bất kỳ script sản xuất thật nào — chỉ được
 kiểm bằng script tạm khi validate Phase 4.6/4.7/4.8. `run()` (chế độ gọi API
 thật, KHÔNG phải --draft/--ingest) giờ dùng ĐÚNG pipeline này cho ARTICLE:
-  1. run_brief() trích facts[] (Mục C: raw/canonical_value/approx).
+  1. run_brief() trích content_units[] (Mục C: raw/canonical_value/approx).
   2. get_or_route() route-once — 1 chủ đề CHỈ route 1 lần, đóng băng (agents/
      route_once.RouterDecisionStore, storage theo router.decisions_path).
   3. run_writer_with_retry() -> WriterOutcome.DONE/FAILED/NEEDS_HUMAN, map vào
@@ -149,14 +149,68 @@ def _allowed_output_types(output_type: list[str]) -> set[str] | None:
     return {_OUTPUT_TYPE_TO_CONTENT_TYPE[t] for t in output_type if t in _OUTPUT_TYPE_TO_CONTENT_TYPE}
 
 
-def _channel_skip_reason(ch: str, decision, output_type_excluded: set[str]) -> str:
+# BƯỚC 4.3 (Router, quyết định Lead 31/07) — CHUẨN HOÁ mã SKIP ghi vào Notes:
+# SOURCE_BROKEN | DUPLICATE | BOILERPLATE | NO_USABLE_CONTENT | FORMAT_MISMATCH.
+# 5 mã này mô tả NGUYÊN NHÂN NỘI DUNG (content-driven) — KHÁC "Output Type
+# không chọn" (đó là NGƯỜI chủ động loại, không phải nội dung có vấn đề, giữ
+# nguyên câu riêng, không gán mã). SOURCE_BROKEN dùng cho nhánh NEEDS_HUMAN
+# "Brief hỏng thật" (facts[] rỗng do lỗi hạ tầng — xem nhánh isinstance(agent,
+# InfographicSpecAgent) and not brief.content_units bên dưới, KHÔNG phải nhánh
+# này). DUPLICATE hiện KHÔNG có Notes riêng (chủ đề đã DONE trước đó -> không
+# ghi dòng nào cả, xem write_article/_is_fully_produced_channels — im lặng
+# CÓ CHỦ Ý, không phải thiếu sót, không cần gán mã cho thứ không ghi ra).
+# BOILERPLATE dùng CHUNG cơ chế phát hiện với NO_USABLE_CONTENT (content_units
+# rỗng + no_numeric_content=False sau khi Brief chạy trọn vẹn) — CHƯA có bộ
+# phát hiện MẪU boilerplate riêng (vd nhận diện văn bản kiểu menu/điều hướng)
+# nên 2 mã này hiện là 1 -- không tách giả tạo khi chưa có tín hiệu phân biệt
+# thật, xem _NO_USABLE_CONTENT_REASON.
+_NO_USABLE_CONTENT_REASON = (
+    "NO_USABLE_CONTENT: Brief đọc được nguồn nhưng KHÔNG tìm thấy nội dung thực "
+    "chất nào (không phải lỗi hạ tầng, không phải tin thuần định tính đã xác "
+    "nhận) — nghi nguồn boilerplate/trang điều hướng/placeholder (BOILERPLATE "
+    "dùng chung mã này — chưa có bộ nhận diện mẫu riêng). SKIP cả 3 tuyến, "
+    "KHÔNG cần người can thiệp (xem agents/brief.BriefResult.brief_status)."
+)
+
+def _infographic_not_worthy_reason(counts: dict) -> str:
+    """BƯỚC A (Router, gỡ nốt cứng nhắc Infographic) — A2: "ghi lý do quyết
+    định vào Notes: dùng nhánh nào, đếm được bao nhiêu unit theo type nào,
+    để sau này chỉnh ngưỡng bằng số, không bằng cảm nhận". Nêu ĐỦ 4 số đếm
+    dùng bởi agents/brief.BriefResult.infographic_worthy, không chỉ nói
+    chung chung "không đủ dữ liệu"."""
+    return (
+        "FORMAT_MISMATCH: content_units KHÔNG đạt ngưỡng dựng Infographic có "
+        "ý nghĩa (đánh giá bằng CODE, thay ý kiến Router) — đếm được: "
+        f"{counts['numeric']} numeric (ngưỡng ≥2 cho Data Infographic), "
+        f"{counts['process_timeline']} process/timeline (ngưỡng ≥3 cho sơ đồ "
+        f"bước/dòng thời gian), {counts['relation_state']} relation/state_change "
+        f"(ngưỡng ≥3 cho sơ đồ quan hệ/trước-sau), {counts['total']} content_unit "
+        "tổng cộng (ngưỡng ≥4 bất kỳ type). KHÔNG PHẢI lỗi nội dung/Brief — "
+        "Article/Video vẫn sinh bình thường (xem BriefResult.infographic_worthy)."
+    )
+
+
+def _channel_skip_reason(ch: str, decision, output_type_excluded: set[str], *,
+                         no_usable_content: bool = False,
+                         infographic_not_worthy_counts: dict | None = None) -> str:
     """Notes giải thích ĐÚNG nguyên nhân SKIPPED — phân biệt router (nội dung
-    không hợp tuyến) với Output Type (người không chọn tuyến, dù router có
-    thể đã đồng ý) — 2 nguyên nhân KHÁC NHAU, gộp làm 1 thông điệp sẽ đánh
-    lừa người đọc Notes khi tra vì sao thiếu 1 loại."""
+    không hợp tuyến, mã FORMAT_MISMATCH), Output Type (người không chọn tuyến,
+    dù router có thể đã đồng ý — KHÔNG gán mã, đây không phải vấn đề nội
+    dung), NO_USABLE_CONTENT (Brief xác nhận nguồn KHÔNG có nội dung thực
+    chất), và `infographic_not_worthy_counts` (Bước A, đánh giá THUẦN CODE cho
+    riêng tuyến infographic — TÁCH RIÊNG khỏi nhánh router/channel_rationale
+    dù CÙNG mã FORMAT_MISMATCH, vì đây là cổng CODE-QUYẾT-ĐỊNH, không phải ý
+    kiến chủ quan của Router LLM nữa) — ưu tiên kiểm THEO THỨ TỰ no_usable_
+    content > infographic_not_worthy_counts (Bước A) > Output Type > router,
+    vì mỗi nhánh sau chỉ còn ý nghĩa khi nhánh trước KHÔNG áp dụng — gộp làm 1
+    thông điệp sẽ đánh lừa người đọc Notes khi tra vì sao thiếu 1 loại."""
+    if no_usable_content:
+        return _NO_USABLE_CONTENT_REASON
+    if infographic_not_worthy_counts is not None:
+        return _infographic_not_worthy_reason(infographic_not_worthy_counts)
     if ch in output_type_excluded:
         return f"Output Type không chọn tuyến {ch} cho chủ đề này (người giới hạn qua cột Output Type)."
-    return (f"Router quyết định tuyến {ch} không hợp tin này: "
+    return (f"FORMAT_MISMATCH: Router quyết định tuyến {ch} không hợp tin này: "
            f"{decision.channel_rationale.get(ch) or '(router không cho lý do)'}")
 
 
@@ -168,14 +222,14 @@ def _is_fully_produced_channels(topic_key: str, seen: set[tuple[str, str]], chan
     return all((topic_key, _CHANNEL_TO_TYPE[c]) in seen for c, enabled in channels.items() if enabled)
 
 
-def _write_content(topic_key: str, type_: str, *, status: str, output: str, notes: str, facts_json: str) -> None:
+def _write_content(topic_key: str, type_: str, *, status: str, output: str, notes: str, content_units_json: str) -> None:
     """P2 store-as-truth: ghi 1 sản phẩm MỚI (chưa từng có trong `seen` — caller
     đảm bảo) vào store -- 2 layer riêng: `content_output` (nội dung sinh ra,
     coi như bất biến) + `content_status` khởi tạo gate2=PENDING/gate3 để trống
     (INVARIANT gate3 không do máy ghi -- xem docstring content_row() cũ,
     write_content_status() merge-on-write nên không truyền gate3 = giữ trống)."""
     ps.write_content_output(topic_key, type_, {
-        "status": status, "output": output, "notes": notes, "facts": facts_json,
+        "status": status, "output": output, "notes": notes, "facts": content_units_json,  # khoá "facts" giữ nguyên cho store/sync_service.py (off-limits, đọc .get("facts"))
         # HAI MỐC THỜI GIAN, lưu TÁCH BẠCH (2026-07-29, quyết định Lead) —
         # DB phải đủ để khôi phục 100% Sheet UI, nên không được để mất mốc nào:
         #   `timestamp`    = NGÀY XỬ LÝ (sản xuất nội dung này). Là thứ hiển
@@ -385,9 +439,14 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
         # with-retry. Bỏ qua HOÀN TOÀN nếu đã có trong CONTENT (idempotent,
         # KHÔNG tốn thêm lượt Brief/Router/Writer cho bài đã DONE).
         write_article = (topic_key, "article") not in seen
-        # Phase 4.12: run_brief() trả BriefResult (facts + no_numeric_content)
-        # — phân biệt facts=[] RỖNG-HỢP-LỆ (Brief chạy trọn vẹn, xác nhận tin
+        # Phase 4.12: run_brief() trả BriefResult (content_units + no_numeric_content)
+        # — phân biệt content_units=[] RỖNG-HỢP-LỆ (Brief chạy trọn vẹn, xác nhận tin
         # thuần định tính) vs RỖNG-DO-HỎNG (LLM lỗi/timeout — cờ luôn False).
+        # Phase C (2026-07-3x): BriefResult giờ CÒN có `brief_status` (OK|
+        # NO_USABLE_CONTENT|FAILED, xem agents/brief.py) — dùng ngay dưới đây
+        # để chặn nguồn boilerplate/rỗng tuếch TRƯỚC khi tới Writer/Composer
+        # (biến `no_usable_content`, sau khi tính `channels`). `.content_units` vẫn đọc
+        # được qua property tương thích ngược (HẠN CỨNG 2026-08-10).
         brief_result = (run_brief(route_llm, evidence, model=factory.step_model(settings, "brief"),
                                   fail_loud=factory.is_fail_loud_step(settings, "brief"),
                                   settings=settings)
@@ -395,17 +454,17 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
         brief = ProductionBrief(
             title=item["context"], hook=item["hook"], tickers=item["tickers"],
             group=item["group"], topic=item["topic"], url=item["source"],
-            evidence=evidence, facts=brief_result.facts,
+            evidence=evidence, content_units=brief_result.content_units,
             no_numeric_content=brief_result.no_numeric_content,
         )
-        # Production Factory Phase 1.3 — snapshot facts[] MÁY-SỞ-HỮU ghi vào MỌI
+        # Production Factory Phase 1.3 — snapshot content_units[] MÁY-SỞ-HỮU ghi vào MỌI
         # dòng CONTENT của chủ đề này (cột Facts, xem comment CONTENT_HEADER ở
         # sheets_board.py) — nguồn sự thật cho verify_spec() (guardrail lần 2,
         # media_factory/spec.py) chạy TRƯỚC KHI RENDER (Phase 1.3), TÁCH biệt
-        # facts[] còn trong RAM ở tiến trình này (không đồng bộ giữa nhiều máy —
+        # content_units[] còn trong RAM ở tiến trình này (không đồng bộ giữa nhiều máy —
         # đúng bug Fix (a) đã sửa cho CONTEXT, không lặp lại cho Production
         # Factory qua data_root).
-        facts_json = facts_to_json(brief.facts)
+        content_units_json = facts_to_json(brief.content_units)
 
         # route-once (Mục A): gọi KHÔNG ĐIỀU KIỆN cho MỌI item (kể cả khi
         # article đã DONE từ trước) — cache-hit tức thời khi đã đóng băng
@@ -420,9 +479,74 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
         # đầu của router (đóng băng CÙNG decision), THAY nhánh "SKIPPED-vì-rỗng"
         # phản ứng-sau của Phase 4.12 (xem nhánh infographic bên dưới).
         channels = dict(decision.output_channels)
-        # Bước 4 — Output Type AND với quyết định router (xem docstring
-        # _allowed_output_types/_channel_skip_reason): output_type rỗng/AUTO
-        # -> KHÔNG đổi channels (hành vi router-only như trước Bước 4).
+        # Phase C — brief_status=NO_USABLE_CONTENT (Brief chạy TRỌN VẸN, đọc
+        # được nguồn nhưng KHÔNG tìm thấy nội dung thực chất nào -- không phải
+        # lỗi hạ tầng [FAILED], không phải tin thuần định tính đã XÁC NHẬN
+        # [no_numeric_content=True, OK] -- nghi boilerplate/trang điều hướng/
+        # placeholder, xem agents/brief.BriefResult docstring) -> ÉP CẢ 3
+        # TUYẾN false NGAY Ở ĐÂY, TRƯỚC khi Writer/Composer có cơ hội chạy.
+        # TRƯỚC Phase C: content_units=[]+no_numeric_content=False (chữ ký boilerplate)
+        # không phân biệt được với "Brief hỏng thật" hay "router/brief bất
+        # đồng" -> Article vẫn được Writer viết BỊA từ trang rỗng, Execute=
+        # DONE -- xác nhận THẬT qua tests/test_pipeline.py::test_regression_
+        # row11_boilerplate_source_currently_produces_fabricated_article_
+        # known_gap (Phase B, SẼ chuyển PASS sau thay đổi này).
+        # BƯỚC 4.3 (Router, quyết định Lead 31/07, SỬA lại quyết định Phase C
+        # ban đầu) — ÉP CẢ 3 TUYẾN vào no_usable_content_channels VÔ ĐIỀU KIỆN
+        # khi brief_status=NO_USABLE_CONTENT, KỂ CẢ tuyến Router đã tự tắt kèm
+        # rationale riêng (khác Phase C bản đầu: từng CHỈ đè tuyến Router để
+        # mặc định true, giữ nguyên rationale Router cho tuyến router đã tắt
+        # sẵn). LÝ DO ĐỔI: Bước 4.3 chuẩn hoá 5 mã SKIP — NO_USABLE_CONTENT là
+        # sự thật NỀN TẢNG (không có gì để làm việc), PHẢI thắng mọi ý kiến chủ
+        # quan của Router về TỪNG tuyến riêng lẻ, để Notes nhất quán thay vì
+        # tuỳ tiện theo tuyến nào Router tình cờ tự tắt trước. Xem test_run_
+        # article_skipped_when_router_decides_channel_false_upfront (đã cập
+        # nhật kỳ vọng theo thay đổi này).
+        no_usable_content_channels: set[str] = set()
+        if write_article and brief_result.brief_status == "NO_USABLE_CONTENT":
+            no_usable_content_channels = {"article", "video", "infographic"}
+            for ch in no_usable_content_channels:
+                channels[ch] = False
+
+        # BƯỚC A (Router, quyết định Lead 31/07 — GỠ NỐT CỨNG NHẮC INFOGRAPHIC,
+        # THAY HẲN Bước 4.4 bản đầu "has_numeric_units=False -> luôn tắt"):
+        # quy tắc CŨ tự nó vẫn cứng nhắc — giả định Infographic CHỈ vẽ được
+        # bảng số liệu, trong khi gpt-image-2 (render/ai_full.py, KHÔNG đụng ở
+        # đây) vẽ được sơ đồ quy trình/dòng thời gian/quan hệ từ content_unit
+        # ĐỊNH TÍNH, không cần khuôn dữ liệu riêng (xem agents/brief.BriefResult.
+        # infographic_worthy). channels["infographic"] GIỜ do CODE quyết định
+        # HOÀN TOÀN ở chế độ AUTO (cả 2 chiều True/False) — THAY THẾ ý kiến
+        # riêng của Router (LLM) cho tuyến này, KHÔNG chỉ ghi đè 1 chiều như
+        # article (has_anchored_units). Output Type chọn TƯỜNG MINH Infographic
+        # vẫn BỎ QUA property này hoàn toàn (xem deterministic_off_channels +
+        # BƯỚC 4.5 bên dưới — infographic_worthiness_channels KHÔNG nằm trong
+        # đó, khác no_usable_content_channels là sự thật tuyệt đối không viết
+        # được gì).
+        infographic_worthiness_channels: set[str] = set()
+        if (write_article and brief_result.brief_status == "OK"
+                and "infographic" not in no_usable_content_channels):
+            channels["infographic"] = brief_result.infographic_worthy
+            infographic_worthiness_channels.add("infographic")
+
+        # BƯỚC 4.1/4.2 (Router) — "article=true khi brief_status=OK VÀ có ≥1
+        # content_unit NEO ĐƯỢC vào nguồn (has_anchored_units — xem agents/
+        # brief.BriefResult), BẤT KỂ type; KHÔNG BAO GIỜ đặt article=false vì
+        # thiếu số/nguồn ngắn": Router (LLM) VẪN được quyền tự phán qua prompt
+        # (_SYSTEM structure_router.py), NHƯNG khi Brief đã xác nhận có chất
+        # liệu neo nguồn thật, CODE ÉP article=True — Router MẤT quyền phủ
+        # quyết article trong trường hợp này (khác hẳn trước đây, Router có
+        # thể tắt article vì "tin quá vụn" dù Brief đã trích được content_unit
+        # thật, xem test_run_article_skipped_when_router_decides_channel_
+        # false_upfront -- ca đó brief_status=NO_USABLE_CONTENT nên KHÔNG bị
+        # ép ở đây, giữ nguyên hành vi cũ, không phá test).
+        if (write_article and brief_result.brief_status == "OK"
+                and brief_result.has_anchored_units
+                and not channels.get("article", True)):
+            channels["article"] = True
+
+        # Bước 4 (2026-07-28, Output Type AND với quyết định router) — xem
+        # docstring _allowed_output_types/_channel_skip_reason: output_type
+        # rỗng/AUTO -> KHÔNG đổi channels (hành vi router-only như trước).
         allowed_types = _allowed_output_types(item.get("output_type") or [])
         output_type_excluded: set[str] = set()
         if allowed_types is not None:
@@ -437,6 +561,25 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                 if ch not in allowed_types:
                     output_type_excluded.add(ch)
                     channels[ch] = False
+            # BƯỚC 4.5 (Router, quyết định Lead 31/07) — "người chọn TƯỜNG
+            # MINH một loại -> Router MẤT quyền phủ quyết": tuyến người CHỌN
+            # (trong allowed_types) mà Router TỰ Ý tắt (channel_rationale
+            # riêng, vd "tin quá vụn"/"không đủ dữ liệu trình bày hình") ->
+            # BỎ QUA ý kiến Router, ép bật lại. CHỈ áp cho quyết định RIÊNG
+            # CỦA ROUTER — KHÔNG ghi đè 2 cổng TẤT ĐỊNH ở trên (no_usable_
+            # content/format_mismatch): đó là SỰ THẬT về hình dạng nội dung
+            # (không có gì để viết/không có số để trình bày), ép bật sẽ ép
+            # Composer BỊA hoặc sinh spec rỗng — khác hẳn Router chỉ đang nêu
+            # Ý KIẾN chủ quan có thể sai. `infographic_worthiness_channels`
+            # (Bước A) KHÔNG nằm trong deterministic_off_channels — đây CŨNG
+            # là 1 dạng "ý kiến đánh giá" (chỉ khác là CODE đánh giá thay vì
+            # LLM), Output Type chọn tường minh PHẢI ghi đè được, đúng yêu
+            # cầu "Router mất quyền phủ quyết" áp cho MỌI định dạng, không
+            # riêng Article.
+            deterministic_off_channels = no_usable_content_channels
+            for ch in allowed_types:
+                if ch not in deterministic_off_channels and not channels.get(ch, True):
+                    channels[ch] = True
 
         article_outcome = None
         if not write_article:
@@ -450,8 +593,9 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
             # này, nên vẫn cần 1 dòng giải thích vì sao hệ thống từ chối.
             skipped += 1
         elif not channels.get("article", True):
-            reason = _channel_skip_reason("article", decision, output_type_excluded)
-            _write_content(topic_key, "article", status="SKIPPED", output="", notes=reason, facts_json=facts_json)
+            reason = _channel_skip_reason("article", decision, output_type_excluded,
+                                          no_usable_content="article" in no_usable_content_channels)
+            _write_content(topic_key, "article", status="SKIPPED", output="", notes=reason, content_units_json=content_units_json)
             written += 1
             seen.add((topic_key, "article"))
             skipped += 1
@@ -465,7 +609,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
             if r.outcome == WriterOutcome.DONE:
                 fn = out_dir / f"{_slug(item['context'])}-article.md"
                 fn.write_text(r.draft.body, encoding="utf-8")
-                _write_content(topic_key, "article", status="DONE", output=r.draft.body, notes="", facts_json=facts_json)
+                _write_content(topic_key, "article", status="DONE", output=r.draft.body, notes="", content_units_json=content_units_json)
                 written += 1
                 seen.add((topic_key, "article"))
                 produced += 1
@@ -476,7 +620,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                 note = "; ".join(r.draft.compliance_issues)
                 fn = out_dir / f"{_slug(item['context'])}-article.md"
                 fn.write_text(r.draft.body, encoding="utf-8")
-                _write_content(topic_key, "article", status="ERROR", output=r.draft.body, notes=note, facts_json=facts_json)
+                _write_content(topic_key, "article", status="ERROR", output=r.draft.body, notes=note, content_units_json=content_units_json)
                 written += 1
                 flagged += 1
                 notifier.notify("error", topic=item["context"], type="article", issues=note)
@@ -487,11 +631,11 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
         # --- VIDEO/INFOGRAPHIC: VIDEO tiêu thụ CÙNG RouterDecision đã đóng
         # băng (voice-lock động + §4 chuyển-thể, Phase 4.10, xem VideoScriptAgent
         # .run) — nhất quán khung với article của CÙNG chủ đề. INFOGRAPHIC
-        # (Phase 4.11 — Composer) CŨNG tiêu thụ decision + facts[], nhưng dùng
+        # (Phase 4.11 — Composer) CŨNG tiêu thụ decision + content_units[], nhưng dùng
         # LLM RIÊNG (route_llm, alias 'composer'/haiku — Loại B rẻ, KHÔNG dùng
         # content_llm/Sonnet như video/article) — swap .llm/.model NGAY TRƯỚC
         # khi gọi run(), giữ nguyên instance đã áp prompt_overrides ở trên.
-        # facts[] rỗng -> spec KHÔNG bịa nhãn, đánh dấu NEEDS_HUMAN (Status=
+        # content_units[] rỗng -> spec KHÔNG bịa nhãn, đánh dấu NEEDS_HUMAN (Status=
         # ERROR ở CONTENT, xem đoạn append issue bên dưới) — KHÔNG đụng Execute
         # cấp DÒNG (đó vẫn do riêng article_outcome quyết định, phạm vi 4.9).
         for agent in all_production_agents(content_llm, prompt_overrides=prompt_overrides):
@@ -501,7 +645,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
             # Phase 4.13 Mục A: router QUYẾT NGAY TỪ ĐẦU tuyến này không hợp
             # (channels[ch]=False, đóng băng cùng RouterDecision) -> SKIPPED
             # HỢP LỆ, KHÔNG gọi agent (khỏi tốn lượt LLM) — THAY nhánh phản
-            # ứng-sau "facts rỗng -> skip" của Phase 4.12 làm cơ chế CHÍNH.
+            # ứng-sau "content_units rỗng -> skip" của Phase 4.12 làm cơ chế CHÍNH.
             ch = ("infographic" if isinstance(agent, InfographicSpecAgent)
                  else "video" if isinstance(agent, VideoScriptAgent) else None)
             if ch is not None and ch in output_type_excluded:
@@ -514,37 +658,30 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                 if (topic_key, type_key) in seen:
                     skipped += 1
                     continue
-                reason = _channel_skip_reason(ch, decision, output_type_excluded)
-                _write_content(topic_key, type_key, status="SKIPPED", output="", notes=reason, facts_json=facts_json)
+                reason = _channel_skip_reason(
+                    ch, decision, output_type_excluded,
+                    no_usable_content=ch in no_usable_content_channels,
+                    infographic_not_worthy_counts=(
+                        brief_result.infographic_type_counts()
+                        if ch in infographic_worthiness_channels else None),
+                )
+                _write_content(topic_key, type_key, status="SKIPPED", output="", notes=reason, content_units_json=content_units_json)
                 written += 1
                 seen.add((topic_key, type_key))
                 skipped += 1
                 notifier.notify("skipped", topic=item["context"], type=ch, reason=reason)
                 continue
 
-            # Phase 4.12 (thu hẹp phạm vi ở 4.13 — chỉ còn xử lý CA BẤT ĐỒNG):
-            # router chọn infographic:true (đã qua cổng ở trên) NHƯNG Brief xác
-            # nhận no_numeric_content=True (facts=[] hợp lệ, tin thuần định
-            # tính) -> router "tưởng" có số nhưng Brief đọc kỹ hơn thấy không
-            # có -> vẫn SKIP (không có gì để trình bày), NHƯNG log WARN để
-            # tinh chỉnh prompt router (mục 3, "để tinh chỉnh"). facts[] rỗng
-            # mà KHÔNG có cờ (Brief hỏng thật) vẫn giữ nguyên đường NEEDS_HUMAN
-            # cũ bên dưới (Mục B item 3, KHÔNG đổi).
-            if isinstance(agent, InfographicSpecAgent) and not brief.facts and brief.no_numeric_content:
-                if (topic_key, "infographic") in seen:
-                    skipped += 1
-                    continue
-                print(f"[CẢNH BÁO] router/brief bất đồng: router chọn infographic:true "
-                     f"nhưng Brief xác nhận no_numeric_content=true (không có số) cho "
-                     f"'{item['context'][:60]}' -> vẫn SKIP, cần tinh chỉnh prompt router.")
-                reason = ("Router chọn infographic:true nhưng Brief xác nhận không có số "
-                         "liệu (no_numeric_content=true) -> bất đồng router/brief, tạm SKIP")
-                _write_content(topic_key, "infographic", status="SKIPPED", output="", notes=reason, facts_json=facts_json)
-                written += 1
-                seen.add((topic_key, "infographic"))
-                skipped += 1
-                notifier.notify("skipped", topic=item["context"], type="infographic", reason=reason)
-                continue
+            # Phase 4.12 (thu hẹp phạm vi ở 4.13 — chỉ còn xử lý CA BẤT ĐỒNG)
+            # từng có 1 nhánh riêng ở đây bắt "router chọn infographic:true
+            # nhưng Brief xác nhận no_numeric_content=true". Bước 4.4 (bản đầu,
+            # rồi Bước A thay tiếp) ĐÃ THAY THẾ HOÀN TOÀN: cổng infographic_
+            # worthiness_channels ở trên (tính TRƯỚC vòng lặp này, từ brief_
+            # result.infographic_worthy) bắt ĐÚNG case này SỚM HƠN (channels
+            # ["infographic"] đã được CODE quyết định dứt điểm ngay từ đầu,
+            # cả 2 chiều) -- nhánh cũ do đó KHÔNG BAO GIỜ còn chạy tới được,
+            # đã XOÁ để không giữ code chết dùng chung 1 ý nghĩa nhưng 2 cơ
+            # chế/2 mã lý do khác nhau.
 
             if isinstance(agent, VideoScriptAgent):
                 # BƯỚC 3 (rules v2.1) — nguồn không đủ SCENE cho video (sàn
@@ -559,7 +696,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                     if (topic_key, "video") in seen:
                         skipped += 1
                         continue
-                    _write_content(topic_key, "video", status="NEEDS_HUMAN", output="", notes=str(e), facts_json=facts_json)
+                    _write_content(topic_key, "video", status="NEEDS_HUMAN", output="", notes=str(e), content_units_json=content_units_json)
                     written += 1
                     seen.add((topic_key, "video"))
                     flagged += 1
@@ -572,13 +709,14 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
             else:
                 raw_draft = agent.run(brief)
             draft = apply_guardrails(raw_draft, brief.evidence, brief.background,
-                                     brief.facts, approx_tolerance=approx_tol)
-            if isinstance(agent, InfographicSpecAgent) and not brief.facts:
-                # Tới được đây nghĩa là no_numeric_content=False -> facts rỗng
+                                     brief.content_units, approx_tolerance=approx_tol)
+            if isinstance(agent, InfographicSpecAgent) and not brief.content_units:
+                # Tới được đây nghĩa là no_numeric_content=False -> content_units rỗng
                 # DO Brief HỎNG THẬT (timeout/lỗi/parse hỏng), KHÔNG phải tin
                 # định tính (nhánh đó đã "continue" ở trên) -> vẫn NEEDS_HUMAN.
                 draft.compliance_issues.append(
-                    "facts[] rỗng (Brief chưa trích được số liệu) -> NEEDS_HUMAN, "
+                    "SOURCE_BROKEN: content_units[] rỗng (Brief chưa trích được số liệu, "
+                    "brief_status=FAILED — lỗi hạ tầng thật) -> NEEDS_HUMAN, "
                     "không bịa nhãn 'Số liệu N'")
             type_ = draft.fmt.value
             if (topic_key, type_) in seen:
@@ -593,7 +731,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
             # sự thật, KHÔNG được chỉ có bản cắt như Sheet preview).
             fn = out_dir / f"{_slug(item['context'])}-{type_}.{_ext(type_)}"
             fn.write_text(draft.body, encoding="utf-8")
-            _write_content(topic_key, type_, status=status, output=draft.body, notes=note, facts_json=facts_json)
+            _write_content(topic_key, type_, status=status, output=draft.body, notes=note, content_units_json=content_units_json)
             written += 1
             seen.add((topic_key, type_))
             produced += 1
@@ -698,7 +836,7 @@ def _prompt_md(slug: str, type_: str, user_prompt: str) -> str:
 def draft_to_content_draft(type_: str, data: dict, brief: ProductionBrief, *,
                            approx_tolerance: float = 0.05) -> ContentDraft:
     """Chuyển JSON Claude Code đã viết (schema article/video) -> ContentDraft đã
-    qua guardrail (evidence + brief.background gộp lại; brief.facts (Mục C) cho
+    qua guardrail (evidence + brief.background gộp lại; brief.content_units (Mục C) cho
     phép số làm tròn hợp lý khớp canonical). Hàm THUẦN — DÙNG CHUNG bởi
     run_ingest() và test (không cần Sheets/mạng). `type_` = 'article' | 'video'."""
     if type_ == "article":
@@ -709,7 +847,7 @@ def draft_to_content_draft(type_: str, data: dict, brief: ProductionBrief, *,
         title, scenes, disclaimer = video_fields_from_data(data, brief)
         body = render_video(title, scenes, disclaimer, brief)
         draft = ContentDraft(fmt=ContentFormat.VIDEO_SCRIPT, title=title, body=body, brief_topic=brief.topic)
-    return apply_guardrails(draft, brief.evidence, brief.background, brief.facts,
+    return apply_guardrails(draft, brief.evidence, brief.background, brief.content_units,
                             approx_tolerance=approx_tolerance)
 
 
@@ -766,21 +904,21 @@ def run_draft(*, limit: int = 5, setup: bool = False) -> dict:
         slug = _slug(context)
 
         # Infographic: sinh NGAY (không cần Claude Code) — NGOÀI PHẠM VI Phase
-        # 4.9/4.10/4.11: đường --draft KHÔNG chạy run_brief() nên brief.facts
+        # 4.9/4.10/4.11: đường --draft KHÔNG chạy run_brief() nên brief.content_units
         # luôn rỗng ở đây -> InfographicSpecAgent (Phase 4.11 Composer) trả
         # spec RỖNG có chủ ý (_empty_infographic_spec, KHÔNG bịa), không phải
-        # bug — biết trước, chưa wire facts[]/route-once cho đường thủ công này.
+        # bug — biết trước, chưa wire content_units[]/route-once cho đường thủ công này.
         if (topic_key, "infographic") not in seen:
             approx_tol = float(settings.get("guardrail.approx_tolerance_pct", 5)) / 100
             draft = apply_guardrails(InfographicSpecAgent(None).run(brief), brief.evidence,
-                                     brief.background, brief.facts, approx_tolerance=approx_tol)
+                                     brief.background, brief.content_units, approx_tolerance=approx_tol)
             fn = out_dir / f"{slug}-infographic.json"
             fn.write_text(draft.body, encoding="utf-8")
             _write_content(topic_key, "infographic",
                           status="DONE" if draft.is_clean else "ERROR",
                           output=draft.body,
                           notes="; ".join(draft.compliance_issues),
-                          facts_json=facts_to_json(brief.facts))   # rỗng ở đường --draft (chưa wire run_brief())
+                          content_units_json=facts_to_json(brief.content_units))   # rỗng ở đường --draft (chưa wire run_brief())
             written += 1
             seen.add((topic_key, "infographic"))
             infographic_done += 1
@@ -897,7 +1035,7 @@ def run_ingest() -> dict:
             fn.write_text(draft.body, encoding="utf-8")
             _write_content(topic_key, ctype, status="DONE" if draft.is_clean else "ERROR",
                           output=draft.body, notes="; ".join(draft.compliance_issues),
-                          facts_json=facts_to_json(brief.facts))   # rỗng ở đường --ingest (chưa wire run_brief())
+                          content_units_json=facts_to_json(brief.content_units))   # rỗng ở đường --ingest (chưa wire run_brief())
             written += 1
             seen.add((topic_key, ctype))
             ingested += 1
