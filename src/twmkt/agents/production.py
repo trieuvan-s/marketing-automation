@@ -975,6 +975,10 @@ _INFOGRAPHIC_COMPOSER_SYSTEM = (
     "bị lấp bởi tên hội thảo/hiệp hội/viện nghiên cứu thay vì tên cảng/dự án "
     "thật). content_units[] không có entity/entity_list salience=subject nào -> để "
     "related rỗng [], KHÔNG lùi về mã CK/tên context khi không chắc chắn.\n"
+    "- RỖNG TƯỜNG MINH (Lead 02/08): nếu THẬT SỰ không có subtitle/related phù "
+    "hợp, hãy trả rỗng tường minh (subtitle: \"\", related: []) — hệ thống GIỮ "
+    "NGUYÊN rỗng, KHÔNG tự điền lại. TUYỆT ĐỐI KHÔNG bịa 1 câu/tên nào chỉ để "
+    "'cho đủ trường'.\n"
     "- priority: {\"primary\": [...nhãn/tên quan trọng nhất...], \"secondary\": "
     "[...], \"minor\": [...]} — \"primary\" CHỈ được chứa nhãn (label) đã dùng "
     "ở hero/market VÀ/HOẶC tên thực thể salience=\"subject\" đã đưa vào "
@@ -1185,16 +1189,30 @@ def infographic_spec_from_data(data: dict | None, brief: ProductionBrief) -> dic
         market = _parse_stat_list(data.get("market"))
         if hero or market:
             title = str(data.get("title") or brief.hook or brief.title).strip()
-            subtitle = str(data.get("subtitle") or "").strip()
-            if not subtitle or subtitle == title:
-                # RÀNG BUỘC CỨNG (không tin mù LLM): title != subtitle luôn —
-                # composer lỡ lặp/để trống thì CODE tự chọn subtitle khác,
-                # cùng triết lý "không tin field rời LLM" như driver_count.
+            subtitle_raw = data.get("subtitle")
+            if subtitle_raw is None:
+                # Key VẮNG MẶT/None -> Composer "quên điền", CODE tự chọn subtitle
+                # khác title (không tin mù LLM, cùng triết lý driver_count).
                 subtitle = brief.title if brief.title != title else ""
+            else:
+                subtitle = str(subtitle_raw).strip()
+                if subtitle == title:
+                    # RÀNG BUỘC CỨNG: title != subtitle luôn — composer lỡ LẶP
+                    # (không phải để rỗng) thì CODE tự sửa.
+                    subtitle = brief.title if brief.title != title else ""
+                # subtitle == "" (Composer TRẢ RỖNG có chủ đích, khác title) ->
+                # GIỮ NGUYÊN, KHÔNG tự điền brief.title (Lead 02/08 — "code đang
+                # BỊA dữ liệu vào ảnh" khi coi "" giống "quên điền").
             highlights = [str(h).strip() for h in (data.get("highlights") or []) if str(h).strip()]
-            related = [str(t).strip() for t in
-                      (data.get("related") or _entity_names_from_content_units(brief.content_units) or brief.tickers)
-                      if str(t).strip()]
+            related_raw = data.get("related")
+            if related_raw is None:
+                related = [str(t).strip() for t in
+                          (_entity_names_from_content_units(brief.content_units) or brief.tickers)
+                          if str(t).strip()]
+            else:
+                # Key có mặt (kể cả [] có chủ đích) -> TÔN TRỌNG nguyên văn,
+                # KHÔNG lùi về nguồn khác (Lead 02/08, cùng lý do subtitle).
+                related = [str(t).strip() for t in related_raw if str(t).strip()]
             return {
                 "title": title, "subtitle": subtitle, "hero": hero, "market": market,
                 "highlights": highlights, "related": related,

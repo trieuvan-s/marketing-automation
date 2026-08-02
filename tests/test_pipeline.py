@@ -4519,16 +4519,13 @@ def test_regression_row5_short_two_sentence_source_article_done_not_needs_human(
     )
 
 
-def test_regression_row9_composer_empty_subtitle_is_auto_filled_known_bug():
+def test_regression_row9_composer_empty_subtitle_kept_empty_not_auto_filled():
     """§7 dòng 9 ("Composer trả subtitle: ''" -> Infographic PHẢI giữ nguyên
-    theo schema, KHÔNG tự điền) -- XÁC NHẬN LÀ BUG THẬT đang tồn tại (khớp
-    §8.2 báo cáo gốc: "parser có thể tự điền từ brief.title"). Đọc
-    `infographic_spec_from_data()` (agents/production.py): khi Composer trả
-    subtitle="" (rỗng), code LUÔN thay bằng `brief.title` (coi rỗng = "Composer
-    quên điền", KHÔNG phân biệt được với "Composer CHỦ ĐỘNG để rỗng"). Test
-    này set brief.title KHÁC brief.hook để phân biệt rõ 2 nguồn -- hiện tại
-    SẼ FAIL (subtitle bị điền brief.title thay vì giữ ""), đúng như dự kiến
-    của Phase B (case CHƯA sửa, để dành Phase D/schema fix)."""
+    theo schema, KHÔNG tự điền) -- ĐÃ SỬA (Lead 02/08, "code đang BỊA dữ liệu
+    vào ảnh"). `infographic_spec_from_data()` (agents/production.py) giờ chỉ
+    thay subtitle bằng `brief.title` khi key VẮNG MẶT/None (Composer thật sự
+    không điền); subtitle="" (Composer TRẢ RỖNG tường minh) được GIỮ NGUYÊN.
+    Test set brief.title KHÁC brief.hook để phân biệt rõ 2 nguồn."""
     from twmkt.agents.production import infographic_spec_from_data, ProductionBrief
 
     brief = ProductionBrief(title="Tiêu đề Brief gốc KHÁC hẳn", hook="Hook khác nữa",
@@ -4543,21 +4540,18 @@ def test_regression_row9_composer_empty_subtitle_is_auto_filled_known_bug():
     }
     spec = infographic_spec_from_data(data, brief)
     assert spec["subtitle"] == "", (
-        f"BUG XÁC NHẬN (§7 dòng 9): Composer trả subtitle rỗng có chủ đích nhưng code tự "
-        f"điền lại thành {spec['subtitle']!r} (brief.title) -- chưa phân biệt được "
-        f"'rỗng có chủ đích' với 'Composer quên điền'."
+        f"Composer trả subtitle rỗng có chủ đích nhưng code lại điền thành "
+        f"{spec['subtitle']!r} (brief.title) -- phải GIỮ RỖNG."
     )
 
 
-def test_regression_row10_composer_empty_related_is_auto_filled_known_bug():
+def test_regression_row10_composer_empty_related_kept_empty_not_auto_filled():
     """§7 dòng 10 ("Composer trả related: []" -> Infographic PHẢI giữ rỗng,
-    KHÔNG tự chèn ticker) -- XÁC NHẬN LÀ BUG THẬT đang tồn tại, TRÁI với báo
-    cáo gốc §8.5 (báo cáo nói "lượt 3 đã đổi sang tôn trọng mảng rỗng" -- đọc
-    code hiện tại cho thấy CHƯA đúng). `infographic_spec_from_data()`:
-    `data.get("related") or _entity_names_from_content_units(...) or brief.tickers` --
-    `[]` là falsy trong Python nên `or` CHUYỂN SANG nhánh kế dù Composer đã
-    trả rỗng TƯỜNG MINH, không phân biệt được "rỗng có chủ đích" với "thiếu
-    field". Test set brief.tickers khác rỗng để lộ rõ bug -- hiện tại SẼ FAIL."""
+    KHÔNG tự chèn ticker) -- ĐÃ SỬA (Lead 02/08). `infographic_spec_from_data()`
+    giờ chỉ lùi về `_entity_names_from_content_units()`/`brief.tickers` khi key
+    "related" VẮNG MẶT/None; related=[] (Composer trả rỗng tường minh) được
+    GIỮ NGUYÊN, KHÔNG còn coi [] falsy giống thiếu field. Test set
+    brief.tickers khác rỗng để lộ rõ hành vi đúng."""
     from twmkt.agents.production import infographic_spec_from_data, ProductionBrief
 
     brief = ProductionBrief(title="t", hook="h", tickers=["FPT", "HPG"],
@@ -4572,9 +4566,32 @@ def test_regression_row10_composer_empty_related_is_auto_filled_known_bug():
     }
     spec = infographic_spec_from_data(data, brief)
     assert spec["related"] == [], (
-        f"BUG XÁC NHẬN (§7 dòng 10): Composer trả related=[] tường minh nhưng code tự chèn "
-        f"lại {spec['related']!r} (từ facts/tickers) -- coi [] falsy giống thiếu field."
+        f"Composer trả related=[] tường minh nhưng code lại chèn lại "
+        f"{spec['related']!r} (từ facts/tickers) -- phải GIỮ RỖNG."
     )
+
+
+def test_regression_row9_row10_composer_missing_keys_still_get_fallback():
+    """Đối chứng cho 2 test trên (Lead 02/08, 1.4): khi Composer KHÔNG trả key
+    "subtitle"/"related" (thiếu hẳn, KHÔNG phải rỗng tường minh) thì code VẪN
+    phải lùi về mặc định như cũ (brief.title / entity_names-hoặc-tickers) --
+    phân biệt đúng "rỗng có chủ đích" (giữ) với "thiếu field" (lùi mượt)."""
+    from twmkt.agents.production import infographic_spec_from_data, ProductionBrief
+
+    brief = ProductionBrief(title="Tiêu đề Brief gốc KHÁC hẳn", hook="Hook khác nữa",
+                            tickers=["FPT", "HPG"],
+                            url="https://cafef.vn/x.chn", evidence="Doanh thu tăng 40%.",
+                            content_units=_infographic_test_content_units())
+    data = {
+        "title": "FPT lãi kỷ lục",
+        "hero": [{"label": "Tăng trưởng doanh thu", "value": "+40%"}],
+        "market": [], "highlights": [],
+        "priority": {"primary": [], "secondary": [], "minor": []},
+        "render_hint": {"ratio": "1:1"},
+    }   # KHÔNG có "subtitle"/"related" trong JSON -- khác hẳn "" và [] tường minh.
+    spec = infographic_spec_from_data(data, brief)
+    assert spec["subtitle"] == brief.title
+    assert spec["related"] == ["FPT", "HPG"]
 
 
 def test_regression_row11_boilerplate_source_currently_produces_fabricated_article_known_gap():
@@ -5375,12 +5392,10 @@ def test_infographic_poor_source_title_plus_2_stat_passes_full_pipeline_no_paddi
     spec = _json.loads(draft.body)
     assert spec["title"] == "Doanh thu và lợi nhuận cùng tăng"
     # PHÁT HIỆN (không sửa — ngoài phạm vi BƯỚC 2, chỉ báo cáo): khi Composer cố
-    # ý để subtitle rỗng (đúng §3.1), ràng buộc "title != subtitle" có sẵn trong
-    # infographic_spec_from_data() TỰ ĐIỀN subtitle bằng brief.title thay vì giữ
-    # rỗng — lệch nhẹ tinh thần "không đệm cấu trúc" của §3.1/§8.2, NHƯNG dùng
-    # TEXT THẬT (brief.title, không bịa fact/số) nên KHÔNG phải fabrication
-    # nghiêm trọng. Xem STOP-REPORT §"Phát hiện phụ".
-    assert spec["subtitle"] == brief.title
+    # ý để subtitle rỗng (đúng §3.1) -- ĐÃ SỬA (Lead 02/08): infographic_spec_
+    # from_data() giờ TÔN TRỌNG subtitle="" tường minh, KHÔNG còn tự điền
+    # brief.title (đúng tinh thần "không đệm cấu trúc" của §3.1/§8.2).
+    assert spec["subtitle"] == ""
     assert spec["hero"] == [{"label": "Tăng trưởng doanh thu", "value": "+40%"}]
     assert spec["market"] == [{"label": "Lợi nhuận kỷ lục", "value": "1,2 nghìn tỷ"}]
     assert spec["highlights"] == []                # KHÔNG bịa highlight
@@ -9043,9 +9058,18 @@ def test_queue_worker_run_once_ingests_sheet_approval_before_claiming(monkeypatc
     monkeypatch.setenv("DOCUMENT_STORE_PATH", str(db_path))
     ds.init_db(db_path)
 
+    # Timestamp = HÔM NAY (không hard-code ngày cụ thể): render_context_to_sheet()
+    # lọc qua _visible_rows() (store/sync_service.py) -- chỉ giữ dòng trong
+    # `sheets.display_days` ngày gần nhất (mặc định 7). Test gốc hard-code
+    # "24/07/2026", trôi ra ngoài cửa sổ 7 ngày khi chạy sau đó vài ngày ->
+    # dòng bị lọc mất khỏi Sheet render, StopIteration ở dưới (Lead 02/08,
+    # Phần 2: đây là hành vi ĐÚNG của Sheet thật/_visible_rows, KHÔNG phải bug
+    # queue_worker -- sửa test cho khớp, không đụng code production).
+    from datetime import datetime as _dt
+    today_ddmmyyyy = _dt.now().strftime("%d/%m/%Y")
     board = _FakeBoard([
         CONTEXT_HEADER,
-        ["24/07/2026", "0.0", "0", "", "", "Bài vừa duyệt", "h", "u1",
+        [today_ddmmyyyy, "0.0", "0", "", "", "Bài vừa duyệt", "h", "u1",
          "APPROVE", "", "", "", "", "tk-vua-duyet"],
     ])
 
@@ -9067,12 +9091,18 @@ def test_queue_worker_run_once_ingests_sheet_approval_before_claiming(monkeypatc
     i_tk = header.index("TopicKey")
     row = next(r for r in rendered[1:] if r[i_tk] == "tk-vua-duyet")
     # 2026-07-28: worker ghi "Running..." NGAY sau claim; NHƯNG `_sync_sheet()`
-    # cuối lượt ingest LẠI Sheet trước khi render, mà Sheet (fake) vẫn còn
-    # Gate1=APPROVE trong khi store đã APPROVE -> không có chuyển tiếp, không
-    # reset. Giá trị cuối là "Waiting" vì lượt ingest ĐẦU (khi store chưa có
-    # gate1) đã đặt Waiting, rồi `run` bị stub nên không ghi outcome nào đè lên
-    # "Running...". Điều test này khoá là Sheet PHẢI phản ánh store, không phải
-    # đứng hình ở giá trị lúc duyệt.
+    # cuối lượt ingest LẠI Sheet trước khi render (ingest thứ 2 đọc lại Sheet
+    # giả vẫn còn Execute="" từ fixture gốc, không phải giá trị "Running..."
+    # vừa ghi) -> giá trị cuối quan sát được là "Waiting" (mặc định
+    # EXECUTE_WAITING khi gate_status.execute rỗng), không phải "Running...".
+    # Test CHỈ khoá "Sheet PHẢI phản ánh store, KHÔNG đứng hình ở giá trị lúc
+    # duyệt (APPROVE)" -- chấp nhận CẢ 2 giá trị vì race ingest/render 2 lượt
+    # liên tiếp trong 1 lượt gọi produce=stub là hành vi biết trước của test
+    # double, KHÔNG phải điều cần khoá chặt ở đây. Cần XÁC NHẬN BẰNG LƯỢT
+    # CHẠY THẬT (Lead 02/08, Phần 2.2): bấm APPROVE trên Sheet thật, cột
+    # Execute phải đi Waiting -> Running -> DONE; nếu đứng hình ở Waiting mãi
+    # (không đi tiếp) thì ĐÓ MỚI là bug thật trong run_once()/_sync_sheet(),
+    # quay lại sửa production code.
     assert row[i_ex] in ("Running...", "Waiting")
 
     row = qs.list_queue(db_path=db_path)[0]
