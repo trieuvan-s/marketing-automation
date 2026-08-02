@@ -5476,6 +5476,65 @@ def test_analysis_fields_overwrites_llm_disclaimer_that_differs_from_canonical()
     assert "Đây là câu LLM tự viết lại" not in body   # bản LLM KHÔNG còn sót trong output
 
 
+def test_analysis_fields_from_data_empty_sections_needs_human_not_auto_written():
+    """Nhóm B (Lead 02/08, "dạng NẶNG NHẤT" của bug subtitle/related) —
+    Composer trả JSON HỢP LỆ nhưng sections RỖNG (tường minh "sections": []
+    HOẶC thiếu hẳn key) KHÔNG còn được LÙI MƯỢT tự dựng lại 100% bài từ
+    brief.evidence/brief.background -- phải EmptySectionsError, KHÁC hẳn
+    data=None (case đó VẪN LÙI MƯỢT, xem test_production_agent_graceful_
+    empty_llm -- KHÔNG đụng)."""
+    import pytest
+    from twmkt.agents.production import (
+        EmptySectionsError, ProductionBrief, analysis_fields_from_data,
+    )
+
+    brief = ProductionBrief(title="Bài có content_units verified", hook="h",
+                            url="https://cafef.vn/x.chn", evidence="Doanh thu tăng 40%.")
+
+    # (a) sections: [] tường minh.
+    with pytest.raises(EmptySectionsError) as ei:
+        analysis_fields_from_data(
+            {"title": "T", "sapo": "s", "sections": [], "disclaimer": "d", "sources": []}, brief)
+    assert "sections rỗng" in str(ei.value)
+
+    # (b) THIẾU hẳn key "sections" -- CÙNG outcome (B4: phân biệt rõ với rỗng
+    # tường minh nhưng cùng NEEDS_HUMAN, KHÔNG tự viết đè).
+    with pytest.raises(EmptySectionsError):
+        analysis_fields_from_data({"title": "T", "sapo": "s"}, brief)
+
+    # Đối chứng: data=None (LLM/composer lỗi hạ tầng thật) VẪN LÙI MƯỢT như cũ,
+    # KHÔNG bị đụng bởi thay đổi này.
+    title, sapo, sections, disclaimer, sources = analysis_fields_from_data(None, brief)
+    assert sections and title
+
+
+def test_run_writer_with_retry_empty_sections_needs_human_no_fabricated_body():
+    """Nhóm B (Lead 02/08) — tích hợp qua đường SỐNG THẬT (agents/writer.py:
+    run_writer_with_retry): Writer trả JSON hợp lệ nhưng sections=[] -> outcome
+    NEEDS_HUMAN NGAY (KHÔNG retry -- đây là lỗi VĨNH VIỄN về nội dung, giống
+    guardrail reject, KHÁC LLMCallError hạ tầng), draft.body RỖNG (KHÔNG có
+    bài tự dựng từ evidence), Notes/compliance_issues nêu rõ "sections rỗng"."""
+    import json as _json
+    from twmkt.agents.production import ProductionBrief
+    from twmkt.agents.writer import WriterOutcome, run_writer_with_retry
+
+    class _EmptySectionsWriterLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            return _json.dumps({
+                "title": "T", "sapo": "s", "sections": [],
+                "disclaimer": "d", "sources": [],
+            }, ensure_ascii=False)
+
+    brief = ProductionBrief(title="Bài có content_units verified", hook="h",
+                            url="https://cafef.vn/x.chn", evidence="Doanh thu tăng 40%.")
+    result = run_writer_with_retry(_EmptySectionsWriterLLM(), brief, settings=_writer_retry_settings())
+
+    assert result.outcome == WriterOutcome.NEEDS_HUMAN
+    assert result.attempts == 1   # KHÔNG retry -- lỗi nội dung, không phải hạ tầng
+    assert "sections rỗng" in result.reason
+    assert result.draft.body == ""   # KHÔNG có bài tự dựng thay Composer
+
+
 def test_render_analysis_and_video_use_dynamic_cta_not_hardcoded_brand():
     """Regression trực tiếp cho sự cố THẬT: render_analysis (article) VÀ
     video_fields_from_data (video, cả đường LLM-thiếu-cta LẪN đường lùi mượt
@@ -5611,6 +5670,32 @@ def test_video_fields_from_data_rejects_fewer_than_3_scenes_no_padding():
     ]
     _t, scenes, _d = video_fields_from_data(three_scenes, brief)
     assert len(scenes) == 3
+
+
+def test_video_fields_from_data_empty_scenes_needs_human_not_auto_built():
+    """Nhóm B (Lead 02/08) — Composer trả JSON HỢP LỆ nhưng scenes RỖNG (tường
+    minh "scenes": [] HOẶC thiếu hẳn key "scenes") KHÔNG còn được LÙI MƯỢT tự
+    dựng 4 cảnh mặc định (bug "bịa cả video từ JSON rỗng") -- phải
+    InsufficientScenesError (LƯỚI CÓ SẴN, produce_from_sheet.run() đã bắt
+    riêng -> NEEDS_HUMAN), nêu rõ "rỗng"/0 cảnh, KHÁC hẳn data=None (case đó
+    VẪN LÙI MƯỢT, xem test ngay trên -- video_fields_from_data(None, ...))."""
+    import pytest
+    from twmkt.agents.production import (
+        InsufficientScenesError, ProductionBrief, video_fields_from_data,
+    )
+
+    brief = ProductionBrief(title="Tin có content_units verified", hook="h",
+                            url="https://cafef.vn/x.chn", evidence="Một câu tin.")
+
+    # (a) scenes: [] tường minh.
+    with pytest.raises(InsufficientScenesError) as ei:
+        video_fields_from_data({"title": "T", "scenes": []}, brief)
+    assert "rỗng" in str(ei.value) and "0 cảnh" in str(ei.value)
+
+    # (b) THIẾU hẳn key "scenes" -- PHẢI cùng hành vi (B4: phân biệt rõ với
+    # rỗng tường minh nhưng CÙNG outcome NEEDS_HUMAN, KHÔNG tự viết đè).
+    with pytest.raises(InsufficientScenesError):
+        video_fields_from_data({"title": "T"}, brief)
 
 
 def test_produce_from_sheet_insufficient_scenes_marks_needs_human_no_crash():

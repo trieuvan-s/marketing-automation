@@ -50,7 +50,7 @@ from typing import Callable
 from ._jsonparse import try_json_object
 from .base import LLMCallError, LLMClient
 from .production import (
-    AnalysisWriterAgent, ProductionBrief, _load_content_writer_rules,
+    AnalysisWriterAgent, EmptySectionsError, ProductionBrief, _load_content_writer_rules,
     analysis_fields_from_data, apply_guardrails, build_analysis_prompt,
     render_analysis,
 )
@@ -143,6 +143,22 @@ def run_writer_with_retry(
             if attempt < max_attempts:
                 sleep(backoff_s)
             continue
+        except EmptySectionsError as e:
+            # Lead 02/08 (Nhóm B): Composer trả JSON hợp lệ nhưng sections rỗng
+            # -- tín hiệu CÓ Ý NGHĨA (KHÁC LLMCallError/lỗi hạ tầng), KHÔNG
+            # retry (thử lại không giúp gì — vấn đề ở NỘI DUNG Composer trả,
+            # giống lỗi VĨNH VIỄN guardrail reject bên dưới), KHÔNG tự viết đè
+            # bài thay Composer (xem EmptySectionsError). Bỏ qua apply_guardrails
+            # (không có body để kiểm) — ghi thẳng lý do vào compliance_issues.
+            reason = str(e)
+            print(f"[ERROR] writer NEEDS_HUMAN (composer sections rỗng, KHÔNG retry): {reason}")
+            notify("needs_human", {"reason": reason, "attempt": attempt})
+            draft = ContentDraft(fmt=ContentFormat.ARTICLE, title=brief.title, body="",
+                                 brief_topic=brief.topic, compliance_issues=[reason])
+            if state is not None and key is not None:
+                state[key] = WriterOutcome.NEEDS_HUMAN.value
+            return WriterResult(outcome=WriterOutcome.NEEDS_HUMAN, draft=draft,
+                                attempts=attempt, reason=reason)
 
         # LLM trả lời thành công -> guardrail. Reject = lỗi VĨNH VIỄN, KHÔNG retry.
         # content_units=brief.content_units (Phase 4.8 Mục C) -> chấp nhận số

@@ -576,7 +576,14 @@ class AnalysisWriterAgent(Agent):
         if rules:
             extra += f"\n\n---\n\nCONTENT_WRITER_RULES (bắt buộc, nguồn chuẩn):\n{rules}"
         data = try_json_object(self._ask(build_analysis_prompt(brief), extra_system=extra))
-        title, sapo, sections, disclaimer, sources = analysis_fields_from_data(data, brief)
+        try:
+            title, sapo, sections, disclaimer, sources = analysis_fields_from_data(data, brief)
+        except EmptySectionsError as e:
+            # Đường LEGACY (không qua run_writer_with_retry) -- KHÔNG tự dựng
+            # bài thay Composer (xem EmptySectionsError), trả draft rỗng kèm lý
+            # do trong compliance_issues để caller thấy NEEDS_HUMAN (is_clean=False).
+            return ContentDraft(fmt=ContentFormat.ARTICLE, title=brief.title, body="",
+                                brief_topic=brief.topic, compliance_issues=[str(e)])
         body = render_analysis(title, sapo, sections, disclaimer, sources, brief)
         return ContentDraft(fmt=ContentFormat.ARTICLE, title=title, body=body,
                             brief_topic=brief.topic)
@@ -597,6 +604,23 @@ def build_analysis_prompt(brief: ProductionBrief) -> str:
     )
 
 
+class EmptySectionsError(ValueError):
+    """Lead 02/08 (Nhóm B, cùng loại bug với subtitle/related nhưng NẶNG NHẤT:
+    bịa CẢ BÀI thay vì 1 trường) — Composer (Writer) trả JSON HỢP LỆ nhưng
+    sections RỖNG (tường minh "sections": [] HOẶC thiếu hẳn key), KHÁC HẲN
+    data=None/lỗi hạ tầng (case đó vẫn LÙI MƯỢT, xem test_production_agent_
+    graceful_empty_llm — KHÔNG đụng).
+
+    Trước đây: coi sections rỗng = "Composer fail cần cứu", tự dựng lại 100%
+    bài từ brief.evidence/brief.background — chính cơ chế "bịa cả bài từ
+    trang rỗng" đã ghi trong báo cáo content_units. Với content_units mới,
+    tới được đây nghĩa là Brief đã xác nhận có chất liệu neo nguồn + Router đã
+    bật tuyến article (has_anchored_units) — sections rỗng lúc này là tín hiệu
+    Composer THỰC SỰ không viết được gì, CÓ Ý NGHĨA, không phải input rỗng cần
+    cứu -> PHẢI NEEDS_HUMAN, KHÔNG tự viết đè (agents/writer.py:
+    run_writer_with_retry bắt riêng exception này, KHÁC LLMCallError)."""
+
+
 def analysis_fields_from_data(data: dict | None, brief: ProductionBrief):
     if data:
         title = str(data.get("title") or brief.hook or brief.title).strip()
@@ -609,8 +633,14 @@ def analysis_fields_from_data(data: dict | None, brief: ProductionBrief):
         sources = [str(u).strip() for u in (data.get("sources") or []) if str(u).strip()]
         if sections:
             return title, sapo, sections, disclaimer, sources
-    # LÙI MƯỢT: dựng schema tất định từ dữ kiện đã duyệt (không LLM/parse lỗi).
-    # LUÔN giữ tiêu đề gốc trong Bối cảnh (dù có hook/evidence riêng) -> truy vết được.
+        raise EmptySectionsError(
+            "Composer trả sections rỗng (JSON hợp lệ, không có thân bài) — "
+            "content_units đã verified + Router đã bật tuyến article, cần "
+            "người xem lại, không phải lỗi hạ tầng.")
+    # LÙI MƯỢT: CHỈ còn cho data=None/rỗng HOÀN TOÀN (Composer/LLM lỗi hạ tầng
+    # thật, KHÔNG parse được JSON gì cả). "data hợp lệ nhưng sections rỗng"
+    # KHÔNG còn rơi xuống đây (raise EmptySectionsError ở trên thay vì fall
+    # through) — LUÔN giữ tiêu đề gốc trong Bối cảnh (dù có hook/evidence riêng) -> truy vết được.
     # _soft_truncate (Phase 4.11, item 6): cắt về giới hạn nhưng KHÔNG cắt GIỮA
     # 1 từ (lùi về khoảng trắng gần nhất) — trước đây cắt cứng [:N] có thể đứt
     # ngang chữ.
@@ -852,29 +882,49 @@ def video_fields_from_data(data: dict | None, brief: ProductionBrief):
             for i, sc in enumerate(raw_scenes)
         ]
         disclaimer = str(data.get("disclaimer") or _default_disclaimer()).strip()
-        if scenes:
-            scenes[0]["role"] = "hook"
-            scenes[-1] = _ensure_outro_scene(scenes[-1], brief)
-            # VIỆC 0.3 — CONTRACT CHECK tất định trên OUTPUT COMPOSER (chỉ đường
-            # LLM này, KHÔNG áp fallback bên dưới): số bằng chữ -> THROW ngay.
-            _assert_scenes_narration_use_digits(scenes)
-            # BƯỚC 3 (rules v2.1) — sàn scene RENDERER, xem InsufficientScenesError.
-            # Đặt SAU digit-check có chủ đích: lỗi ĐỊNH DẠNG (voice_text hỏng) là
-            # vấn đề TOÀN VẸN dữ liệu, ưu tiên lộ ra trước lỗi SỐ LƯỢNG (khả thi
-            # video) — cũng giữ nguyên hành vi test_video_narration_contract_
-            # rejects_spelled_out_numbers (2 scene, cố ý test riêng digit-check).
-            if len(scenes) < _VIDEO_SCENE_FLOOR:
-                raise InsufficientScenesError(
-                    f"Nguồn chỉ đủ dựng {len(scenes)} cảnh (cần tối thiểu "
-                    f"{_VIDEO_SCENE_FLOOR} để video có hook+thân+outro) — KHÔNG bịa "
-                    f"cảnh đệm cho đủ số. Đề xuất chuyển loại nội dung sang "
-                    f"infographic/article cho chủ đề này (nguồn nghèo SCENE video, "
-                    f"KHÔNG có nghĩa nghèo SỐ LIỆU — 2 loại kia dùng chung content_units[]).")
-            return title, scenes, disclaimer
-    # LÙI MƯỢT: kịch bản tất định 4 cảnh (>= 1 "hook" + 1 "outro") từ dữ kiện
-    # đã duyệt (KHÔNG cần Opus) — GIỮ nguyên nội dung/thứ tự ý tưởng đường cũ
-    # (hook -> tiêu đề -> bối cảnh (nếu có) -> mã liên quan -> CTA), chỉ đổi
-    # VỎ ĐỰNG sang scene có kiểu.
+        if not scenes:
+            # Lead 02/08 (Nhóm B, cùng sửa với sections=[] article): Composer
+            # trả JSON HỢP LỆ nhưng scenes RỖNG (tường minh "scenes": [] HOẶC
+            # thiếu hẳn key) -- KHÁC data=None/lỗi hạ tầng (case đó vẫn LÙI
+            # MƯỢT bên dưới, xem test_production_agent_graceful_empty_llm).
+            # Tới được đây, content_units đã verified + Router đã bật tuyến
+            # video -- scenes rỗng là Composer THỰC SỰ không viết được gì, tín
+            # hiệu CÓ Ý NGHĨA, KHÔNG còn coi là "cần cứu" để tự dựng 4 cảnh mặc
+            # định (chính cơ chế "bịa cả video từ JSON rỗng" đã ghi trong báo
+            # cáo content_units) -- ném qua LƯỚI InsufficientScenesError CÓ SẴN
+            # (produce_from_sheet.run() đã bắt riêng -> NEEDS_HUMAN + Notes).
+            raise InsufficientScenesError(
+                "Composer trả scenes rỗng (0 cảnh, cần tối thiểu "
+                f"{_VIDEO_SCENE_FLOOR} để video có hook+thân+outro) — KHÔNG tự "
+                "dựng 4 cảnh mặc định thay Composer. content_units đã verified + "
+                "Router đã bật tuyến video, cần người xem lại, không phải lỗi "
+                "hạ tầng.")
+        scenes[0]["role"] = "hook"
+        scenes[-1] = _ensure_outro_scene(scenes[-1], brief)
+        # VIỆC 0.3 — CONTRACT CHECK tất định trên OUTPUT COMPOSER (chỉ đường
+        # LLM này, KHÔNG áp fallback bên dưới): số bằng chữ -> THROW ngay.
+        _assert_scenes_narration_use_digits(scenes)
+        # BƯỚC 3 (rules v2.1) — sàn scene RENDERER, xem InsufficientScenesError.
+        # Đặt SAU digit-check có chủ đích: lỗi ĐỊNH DẠNG (voice_text hỏng) là
+        # vấn đề TOÀN VẸN dữ liệu, ưu tiên lộ ra trước lỗi SỐ LƯỢNG (khả thi
+        # video) — cũng giữ nguyên hành vi test_video_narration_contract_
+        # rejects_spelled_out_numbers (2 scene, cố ý test riêng digit-check).
+        if len(scenes) < _VIDEO_SCENE_FLOOR:
+            raise InsufficientScenesError(
+                f"Nguồn chỉ đủ dựng {len(scenes)} cảnh (cần tối thiểu "
+                f"{_VIDEO_SCENE_FLOOR} để video có hook+thân+outro) — KHÔNG bịa "
+                f"cảnh đệm cho đủ số. Đề xuất chuyển loại nội dung sang "
+                f"infographic/article cho chủ đề này (nguồn nghèo SCENE video, "
+                f"KHÔNG có nghĩa nghèo SỐ LIỆU — 2 loại kia dùng chung content_units[]).")
+        return title, scenes, disclaimer
+    # LÙI MƯỢT: CHỈ còn cho data=None/rỗng HOÀN TOÀN (Composer/LLM lỗi hạ tầng
+    # thật, KHÔNG parse được JSON gì cả — xem test_production_agent_graceful_
+    # empty_llm). "data hợp lệ nhưng scenes rỗng" KHÔNG còn rơi xuống đây từ
+    # Lead 02/08 (đã raise InsufficientScenesError ở nhánh `if data:` trên).
+    # Kịch bản tất định 4 cảnh (>= 1 "hook" + 1 "outro") từ dữ kiện đã duyệt
+    # (KHÔNG cần Opus) — GIỮ nguyên nội dung/thứ tự ý tưởng đường cũ (hook ->
+    # tiêu đề -> bối cảnh (nếu có) -> mã liên quan -> CTA), chỉ đổi VỎ ĐỰNG
+    # sang scene có kiểu.
     title = brief.hook or brief.title
     scenes = [
         {"role": "hook", "visual_kind": "statement",
