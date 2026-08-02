@@ -502,6 +502,58 @@ def test_render_context_to_sheet_includes_output_type(board, db_path):
     assert row[_header_index(header, OUTPUT_TYPE_COL)] == "Infographic, Video"
 
 
+def test_write_rows_skips_unchanged_rows_touches_only_changed_ones(board, db_path):
+    """Lead 02/08 ("Output Type bị khoá") — `_write_rows()` giờ SO KHỚP từng
+    dòng với Sheet hiện tại, CHỈ gọi update() cho dòng THẬT SỰ đổi. Dòng không
+    đổi giữa 2 lần render KHÔNG được đụng tới ô nào (tránh ghi đè ô "dropdown
+    chip multi-select" Output Type Lead tự bật tay qua UI — mỗi lần ghi giá
+    trị thô qua API vào ô chip, kể cả giá trị giống hệt, có thể làm rớt trạng
+    thái UI chip đó, xem docstring _write_rows())."""
+    ps.write_raw("tk-1", {"context": "Bài 1", "hook": "h", "source": "u1",
+                          "tickers": [], "group": "", "topic": ""}, db_path=db_path)
+    ps.write_gate_status("tk-1", gate1="APPROVE", output_type=["Article"], db_path=db_path)
+    ps.write_raw("tk-2", {"context": "Bài 2", "hook": "h", "source": "u2",
+                          "tickers": [], "group": "", "topic": ""}, db_path=db_path)
+    ps.write_gate_status("tk-2", gate1="APPROVE", output_type=["Video"], db_path=db_path)
+
+    ss.render_context_to_sheet(board, db_path=db_path)
+    ws = board._tab("CONTEXT")
+    baseline = ws.get_all_values()
+
+    calls: list[str] = []
+    orig_update = ws.update
+
+    def _spy_update(range_str, values, value_input_option="RAW"):
+        calls.append(range_str)
+        return orig_update(range_str, values, value_input_option=value_input_option)
+
+    ws.update = _spy_update
+
+    # Chỉ đổi tk-2 (Execute) -- tk-1 giữ nguyên hệt.
+    ps.write_gate_status("tk-2", execute="DONE", db_path=db_path)
+    ss.render_context_to_sheet(board, db_path=db_path)
+
+    header = baseline[0]
+    i_key = _header_index(header, "TopicKey")
+    row_of = {r[i_key]: i for i, r in enumerate(baseline[1:], start=2)}   # +2 = số dòng Sheet (1-based, có header)
+
+    # KHÔNG lệnh update() nào chạm dòng tk-1 (không đổi).
+    tk1_row_num = row_of["tk-1"]
+    for rng in calls:
+        start = int(rng[1:])
+        assert start != tk1_row_num, f"dòng tk-1 (không đổi) bị đụng: {rng}"
+
+    # Dòng tk-2 (CÓ đổi) phải được ghi lại.
+    tk2_row_num = row_of["tk-2"]
+    assert any(int(rng[1:]) == tk2_row_num for rng in calls), \
+        f"dòng tk-2 (có đổi) PHẢI được ghi, calls={calls}"
+
+    grid = ws.get_all_values()
+    i_ex = _header_index(header, "Execute")
+    new_row_of = {r[i_key]: r for r in grid[1:]}
+    assert new_row_of["tk-2"][i_ex] == "DONE"
+
+
 def test_render_context_to_sheet_output_type_shows_auto_when_never_set(board, db_path):
     """Sửa 2026-07-27 (Lead): ô Output Type rỗng gây khó hiểu cho người nhìn
     Sheet dù xử lý tương đương AUTO — context_row() giờ hiển thị CHỮ "AUTO"

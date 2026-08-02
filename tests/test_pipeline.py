@@ -3941,7 +3941,7 @@ def test_run_infographic_skipped_when_no_numeric_content_true_article_still_prod
 
     infographic_rows = [r for r in board.appended_content if r[2] == "infographic"]
     assert len(infographic_rows) == 1
-    assert infographic_rows[0][3] == "SKIPPED"          # Status
+    assert infographic_rows[0][3] == "BỎ QUA"           # Status (nhãn VI, xem sheets_board._display_status)
     assert "FORMAT_MISMATCH" in infographic_rows[0][5]  # Notes mã chuẩn hoá (Bước 4.3)
 
     article_rows = [r for r in board.appended_content if r[2] == "article"]
@@ -4006,7 +4006,7 @@ def test_run_infographic_skipped_by_code_count_ignoring_router_rationale():
 
     infographic_rows = [r for r in board.appended_content if r[2] == "infographic"]
     assert len(infographic_rows) == 1
-    assert infographic_rows[0][3] == "SKIPPED"
+    assert infographic_rows[0][3] == "BỎ QUA"
     assert "FORMAT_MISMATCH" in infographic_rows[0][5]
     assert "Tin bảng-số không đủ dữ liệu trình bày hình" not in infographic_rows[0][5], (
         "Notes PHẢI là lý do đếm-số của CODE, KHÔNG phải câu chữ Router — "
@@ -4059,7 +4059,7 @@ def test_run_article_skipped_when_router_decides_channel_false_upfront():
         route_llm=_ArticleFalseRouteLLM())
 
     article_rows = [r for r in board.appended_content if r[2] == "article"]
-    assert len(article_rows) == 1 and article_rows[0][3] == "SKIPPED"
+    assert len(article_rows) == 1 and article_rows[0][3] == "BỎ QUA"
     assert "NO_USABLE_CONTENT" in article_rows[0][5]
 
 
@@ -4173,13 +4173,13 @@ def test_run_infographic_format_mismatch_when_no_numeric_units_article_video_unt
         route_llm=_QualitativeOnlyRouteLLM(), content_llm=_QualitativeVideoContentLLM())
 
     infographic_rows = [r for r in board.appended_content if r[2] == "infographic"]
-    assert len(infographic_rows) == 1 and infographic_rows[0][3] == "SKIPPED"
+    assert len(infographic_rows) == 1 and infographic_rows[0][3] == "BỎ QUA"
     assert "FORMAT_MISMATCH" in infographic_rows[0][5]
 
     article_rows = [r for r in board.appended_content if r[2] == "article"]
     assert len(article_rows) == 1 and article_rows[0][3] == "DONE"
     video_rows = [r for r in board.appended_content if r[2] == "video"]
-    assert len(video_rows) == 1 and video_rows[0][3] != "SKIPPED"
+    assert len(video_rows) == 1 and video_rows[0][3] != "BỎ QUA"
 
 
 def test_run_output_type_explicit_choice_overrides_router_veto():
@@ -4273,7 +4273,7 @@ def test_run_boilerplate_source_now_skipped_not_fabricated_article_phase_c():
         route_llm=_BoilerplateRouteLLM())
 
     statuses = {r[2]: r[3] for r in board.appended_content}
-    assert statuses.get("article") == "SKIPPED", f"kỳ vọng SKIPPED, thực tế: {statuses}"
+    assert statuses.get("article") == "BỎ QUA", f"kỳ vọng BỎ QUA (SKIPPED), thực tế: {statuses}"
     for r in board.appended_content:
         if r[2] == "article":
             assert "NO_USABLE_CONTENT" in r[5]
@@ -5148,7 +5148,7 @@ def test_vertical_slice_b_router_disables_one_channel_no_error():
     types_status = {r[2]: r[3] for r in board.appended_content}
     assert types_status["article"] == "DONE"
     assert types_status["infographic"] == "DONE"
-    assert types_status["video"] == "SKIPPED"           # KHÔNG phải ERROR
+    assert types_status["video"] == "BỎ QUA"            # KHÔNG phải ERROR
 
     video_row = next(r for r in board.appended_content if r[2] == "video")
     assert video_row[4] == ""                            # Output rỗng (không gọi composer)
@@ -5742,7 +5742,7 @@ def test_produce_from_sheet_insufficient_scenes_marks_needs_human_no_crash():
     # (không có content_row nào type="video" với Status=DONE).
     video_rows = [r for r in board.appended_content if r[2] == "video"]
     assert len(video_rows) == 1
-    assert video_rows[0][3] == "NEEDS_HUMAN"
+    assert video_rows[0][3] == "Cần người review lại nội dung"   # nhãn VI cho NEEDS_HUMAN
     assert "chuyển loại" in video_rows[0][5]   # Notes
 
 
@@ -9335,6 +9335,33 @@ def test_format_message_escapes_html_special_chars():
     assert "⏳" in msg   # emoji đúng event
 
 
+def test_format_message_uses_vietnamese_labels_for_known_events_and_keys():
+    """Yêu cầu Trung 02/08 — nhãn tiếng Việt CHỈ ở tầng hiển thị (build text
+    gửi Telegram), KHÔNG đổi string "event"/key ctx dùng làm định danh nội bộ
+    (notify() call site vẫn gọi "start"/"skipped"/"error"/"draft_changed"/
+    "topic"/"reason" y hệt, xem _EMOJI/notifier.events trong các test khác)."""
+    from twmkt.utils.telegram_notifier import format_message
+
+    msg = format_message("start", {"topic": "Bài test"})
+    assert "Bắt đầu xử lý nội dung" in msg and "Chủ đề:" in msg
+
+    msg = format_message("new_topic", {"topic": "Bài mới", "reason": "vì X"})
+    assert "Chủ đề mới" in msg and "Chủ đề:" in msg and "Lý do:" in msg
+
+    msg = format_message("skipped", {"topic": "t", "reason": "vì Y"})
+    assert "Bỏ qua" in msg and "Lý do:" in msg
+
+    msg = format_message("error", {"topic": "t", "reason": "vì Z"})
+    assert "Lỗi xử lý" in msg
+
+    msg = format_message("draft_changed", {"topic": "t"})
+    assert "Cập nhật nội dung" in msg
+
+    # Event/key LẠ (không trong bảng dịch) giữ NGUYÊN tiếng Anh.
+    msg = format_message("gate2_done", {"written": 3, "approved": 2})
+    assert "gate2_done" in msg and "written:" in msg and "approved:" in msg
+
+
 def test_format_message_maps_writer_retry_events_to_error_emoji():
     """Phase 4.6+4.7: failed/needs_human (lỗi CUỐI, event thật run_writer_with_
     retry bắn ra, Phase 4.5) PHẢI dùng emoji 🚨; retry (còn đang thử lại, độ khẩn
@@ -10250,7 +10277,7 @@ def test_execute_column_has_one_color_rule_per_state_and_no_dropdown():
     (read-only với người). Khoá cả 2 mặt để không ai vô tình thêm lại dropdown
     hay bỏ sót màu khi thêm trạng thái mới."""
     from twmkt.sheets_board import (
-        CONTEXT_HEADER, EXECUTE_VALUES, TabMeta, _tab_requests,
+        CONTEXT_HEADER, EXECUTE_VALUES, TabMeta, _display_status, _tab_requests,
     )
 
     t = TabMeta(name="CONTEXT", header=list(CONTEXT_HEADER), sheet_id=1, n_rows=3)
@@ -10266,7 +10293,12 @@ def test_execute_column_has_one_color_rule_per_state_and_no_dropdown():
         vals = rule.get("booleanRule", {}).get("condition", {}).get("values", [])
         if vals:
             colored.add(vals[0]["userEnteredValue"])
-    assert set(EXECUTE_VALUES) <= colored, f"thiếu màu cho: {set(EXECUTE_VALUES) - colored}"
+    # Rule khớp CHỮ THẬT SỰ ghi lên ô (context_row() dịch NEEDS_HUMAN -> nhãn
+    # VI, xem _display_status()) — so bằng giá trị ĐÃ DỊCH, không phải hằng số
+    # nội bộ trần (chỉ NEEDS_HUMAN có nhãn khác; còn lại _display_status trả
+    # nguyên giá trị đầu vào).
+    expected = {_display_status(v) for v in EXECUTE_VALUES}
+    assert expected <= colored, f"thiếu màu cho: {expected - colored}"
 
     for r in reqs:
         sd = r.get("setDataValidation")

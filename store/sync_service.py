@@ -137,19 +137,29 @@ def _num(v: str) -> float:
 def _write_rows(board: SheetsBoard, tab: str, header: list[str], rows: list[list[str]]) -> None:
     """Ghi GIÁ TRỊ vào tab — KHÔNG `clear()` cả bảng.
 
-    ⚠️ ĐÂY LÀ THAY ĐỔI CỐT LÕI 2026-07-29 (Lead: "thiết lập của user bị ghi đè",
+    ⚠️ THAY ĐỔI CỐT LÕI 2026-07-29 (Lead: "thiết lập của user bị ghi đè",
     "block dữ liệu theo ngày chưa có"). Bản cũ gọi `ws.clear()` rồi ghi lại tất
     cả — mà `clear()` XOÁ CẢ ĐỊNH DẠNG: băng màu, viền, mọi thiết lập hiển thị
     người dựng tay đều bay sau MỖI lượt render (worker render sau mỗi job).
     Không có cách nào "tô lại cho kịp" — cứ tô xong lại bị xoá ở lượt sau.
 
+    ⚠️ THAY ĐỔI TIẾP 2026-08-02 (Lead — sự cố "Output Type bị khoá"): bản
+    2026-07-29 vẫn `ws.update("A2", TOÀN BỘ rows, ...)` MỖI LẦN render (chạy
+    SAU MỌI job worker xử lý xong — rất thường xuyên), dù tuyệt đại đa số dòng
+    KHÔNG đổi gì. `Output Type` là ô "dropdown chip multi-select" Lead tự bật
+    TAY qua UI Sheets (API v4 không tạo/đọc được kiểu ô này, xem sheets_board.
+    OUTPUT_TYPE_COL) — ghi giá trị thô qua API vào ô đang ở dạng chip đó,
+    ngay cả khi giá trị GIỐNG HỆT, là thao tác Google không cam kết giữ
+    nguyên trạng thái UI chip. Giờ SO KHỚP từng dòng với Sheet HIỆN TẠI
+    (đã có sẵn trong `current`, không tốn thêm lượt đọc) — dòng giống hệt
+    KHÔNG đụng tới (không gọi update() lên range của nó), CHỈ ghi dòng
+    thật sự đổi. Các dòng đổi LIÊN TIẾP được gộp thành 1 khối/1 lệnh update
+    (tránh nổ N lệnh API rời rạc khi nhiều dòng cùng đổi, vd lần render đầu
+    hoặc sắp lại thứ tự theo ngày).
+
     `values.update` KHÔNG đụng tới format, nên chỉ ghi giá trị là định dạng
     sống nguyên. Dòng THỪA (bảng co lại) được `batch_clear` RIÊNG phần đuôi —
-    hẹp nhất có thể, không chạm vùng còn dữ liệu.
-
-    Đây cũng chính là cơ chế "chỉ cập nhật phần thay đổi" Lead hỏi: ta ghi đè
-    vùng dữ liệu bằng 1 lệnh values (rẻ, 1 API call) thay vì clear+ghi (2 lệnh
-    + mất format). Diff từng ô là bước tối ưu tiếp theo, chưa cần ở quy mô này."""
+    hẹp nhất có thể, không chạm vùng còn dữ liệu."""
     ws = board._tab(tab)
     ncols = len(header)
     current = ws.get_all_values()
@@ -157,8 +167,26 @@ def _write_rows(board: SheetsBoard, tab: str, header: list[str], rows: list[list
     # hàng tiêu đề — đúng thứ vừa sửa ở dưới.
     if not current or [c.strip() for c in current[0]] != list(header):
         ws.update("A1", [list(header)], value_input_option="USER_ENTERED")
-    if rows:
-        ws.update("A2", rows, value_input_option="USER_ENTERED")
+    current_rows = current[1:] if len(current) > 1 else []
+
+    diff_idx = []
+    for i, new_row in enumerate(rows):
+        old_row = current_rows[i] if i < len(current_rows) else []
+        padded_old = list(old_row) + [""] * max(0, ncols - len(old_row))
+        if padded_old[:ncols] != list(new_row):
+            diff_idx.append(i)
+
+    block_start = None
+    for j, i in enumerate(diff_idx):
+        if block_start is None:
+            block_start = i
+        is_last = j == len(diff_idx) - 1
+        next_is_contiguous = (not is_last) and (diff_idx[j + 1] == i + 1)
+        if not next_is_contiguous:
+            block = rows[block_start:i + 1]
+            ws.update(f"A{block_start + 2}", block, value_input_option="USER_ENTERED")
+            block_start = None
+
     old_n = max(len(current) - 1, 0)
     if old_n > len(rows):
         last_col = _col_a1(ncols)

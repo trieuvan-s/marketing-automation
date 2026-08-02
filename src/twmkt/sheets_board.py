@@ -288,6 +288,30 @@ EXECUTE_VALUES = (EXECUTE_WAITING, EXECUTE_RUNNING, EXECUTE_DONE,
 # KHÔNG BAO GIỜ ghi mới 2 giá trị này.
 EXECUTE_PENDING_STATES = frozenset({EXECUTE_WAITING, EXECUTE_FAILED, "", "RUN"})
 
+# NHÃN TIẾNG VIỆT HIỂN THỊ TRÊN SHEET (yêu cầu Trung 02/08) — CHỈ đổi CHỮ
+# NGƯỜI NHÌN THẤY khi ghi vào ô (context_row()/content_row() dưới), TUYỆT ĐỐI
+# KHÔNG đổi hằng số nội bộ (EXECUTE_NEEDS_HUMAN/"SKIPPED" vẫn tiếng Anh xuyên
+# suốt store/produce_from_sheet.py/WriterOutcome/test — token đó KHÔNG được
+# đọc ngược từ Sheet, xem ingest_context_from_sheet()/ingest_content_from_
+# sheet(): Execute/Status là MỘT CHIỀU store->Sheet, dịch ở đây an toàn tuyệt
+# đối, không làm gãy logic nào). `_display_status()` dùng CHUNG cho cả
+# context_row() (cột Execute) LẪN conditional-formatting rule (xem
+# _tab_requests() — rule màu đỏ NEEDS_HUMAN phải khớp ĐÚNG chữ đã dịch, không
+# thì mất màu) để không lệch nhau giữa 2 nơi.
+_VI_STATUS_LABELS = {
+    "SKIPPED": "BỎ QUA",
+    EXECUTE_NEEDS_HUMAN: "Cần người review lại nội dung",
+}
+
+
+def _display_status(value: str) -> str:
+    """Giá trị NỘI BỘ (tiếng Anh, dùng xuyên suốt code/test) -> nhãn tiếng
+    Việt hiển thị trên Sheet. Giá trị không có trong bảng dịch (Waiting/
+    Running.../DONE/FAILED/ERROR/PENDING/APPROVE/REJECT...) giữ NGUYÊN —
+    Trung chỉ yêu cầu dịch đúng 2 nhãn này, không mở rộng thêm."""
+    return _VI_STATUS_LABELS.get(value, value)
+
+
 CONTEXT_HEADER = ["Timestamp", "Hot%", "Score", "Group", "Topic", "Context", "Hook",
                   "Source", GATE1_COL, OUTPUT_TYPE_COL, "Execute", "tickers", "Notes", "TopicKey"]
 # "engine" TẠM (haiku|sonnet|mock) — đối chiếu model NÀO thực sự chạy cho mỗi
@@ -687,7 +711,7 @@ def context_row(*, title: str, hook_line: str, source_url: str, score: int, hot_
         _source_cell(source_url, other_sources),                  # Source (gộp báo khác)
         status,                                                     # Status (Duyệt Context)
         ", ".join(output_type or ["AUTO"]),                          # Output Type (mặc định hiển thị AUTO)
-        execute,                                                      # Execute
+        _display_status(execute),                                     # Execute (nhãn VI cho NEEDS_HUMAN)
         ", ".join(tickers or []),                                     # tickers
         notes,                                                         # Notes
         topic_key,                                                      # TopicKey (Lớp 5, cuối)
@@ -720,7 +744,7 @@ def content_row(*, context: str, type_: str, status: str, output: str,
     người tự đổi qua dropdown khi thật sự duyệt asset. Xem
     test_no_machine_write_path_touches_gate3 (tests/test_pipeline.py) — khoá
     bất biến này VĨNH VIỄN, KHÔNG thêm lại tham số gate3 ở đây dù có lý do gì."""
-    return [ts or _now_ddmmyyyy(), context, type_, status, output, notes, approve,
+    return [ts or _now_ddmmyyyy(), context, type_, _display_status(status), output, notes, approve,
            topic_key, facts, asset_path, "", "PENDING", ""]
 
 
@@ -1491,7 +1515,7 @@ def _tab_requests(t: TabMeta) -> list[dict]:
             out.append(_text_eq_rule(sid, c, 1, fmt_rows, "RUN", _C_RUN))
             out.append(_text_eq_rule(sid, c, 1, fmt_rows, EXECUTE_DONE, _C_APPROVE))
             out.append(_text_eq_rule(sid, c, 1, fmt_rows, EXECUTE_FAILED, _C_FAILED))
-            out.append(_text_eq_rule(sid, c, 1, fmt_rows, EXECUTE_NEEDS_HUMAN, _C_REJECT))
+            out.append(_text_eq_rule(sid, c, 1, fmt_rows, _display_status(EXECUTE_NEEDS_HUMAN), _C_REJECT))
         if "score" in low:
             c = low.index("score")
             out.append(_score_scale_rule(sid, c, 1, fmt_rows))
