@@ -157,17 +157,20 @@ infographic:
     # tên) vì cache 2 mode không tương thích nhau (ảnh nền vs ảnh đầy đủ).
     cache_dir: "assets_ai_full"
 
-    # 2026-07-23 (Phần A, khung cứng đáy — quyết định Lead, THAY hướng scrim đáy
-    # cũ) — kích thước khung CUỐI sau brand_stamp (KHÁC size gọi API ở
-    # ai_full.RATIO_SIZES — API cần chia hết 16, khung cuối là mục tiêu xuất
-    # bản THẬT). brand_stamp.matting() resize ảnh AI vừa khít phần trong
-    # (final_h - bottom_band_h), band đáy vẽ ở phần còn lại — cấu trúc, không
-    # đè lên ảnh AI.
+    # Kích thước xuất bản cuối. Từ 2026-07-31, GPT sinh full-canvas ở
+    # generation_size đúng tỷ lệ; overlay chỉ downscale rồi đặt brand trực tiếp.
     final_size:
       "4:5": [1080, 1350]
       "9:16": [1080, 1920]
       "1:1": [1080, 1080]
-    # BOTTOM_BAND_H = max(round(final_h * 0.075), bottom_band_min_px).
+    # Kích thước gọi gpt-image-2 cho chế độ full-canvas. Cùng đúng tỷ lệ xuất
+    # bản và lớn hơn final_size để hậu kỳ chỉ thu nhỏ, không crop/ép vào khung.
+    generation_size:
+      "4:5": [1280, 1600]
+      "9:16": [1152, 2048]
+      "1:1": [1280, 1280]
+    # Legacy stamp_brand tests/backward compatibility; production ai_full mới
+    # không còn tạo bottom band.
     bottom_band_min_px: 72
     # Fallback màu band đáy khi màu trung vị 20 hàng cuối ảnh AI SÁNG (luminance
     # > 140) — navy FVA cố định, khớp _THEME_COLORS["dark"]["background"]
