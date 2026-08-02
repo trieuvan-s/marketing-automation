@@ -10306,6 +10306,30 @@ def test_execute_column_has_one_color_rule_per_state_and_no_dropdown():
             assert "rule" not in sd, "Execute là cột read-only -> KHÔNG được có dropdown"
 
 
+def test_content_rows_taller_than_context_rows_for_easier_skimming():
+    """Trung 02/08 — tab CONTENT (Output/Notes dài, thân bài/JSON preview) cần
+    khoảng đọc rộng hơn CONTEXT để liếc nhanh nhiều dòng, KHÔNG auto-resize
+    theo độ dài nội dung (Sheets API không có, xem _CONTENT_ROW_HEIGHT) — chỉ
+    set 1 chiều cao CỐ ĐỊNH cao hơn mặc định cho MỌI dòng dữ liệu CONTENT.
+    CONTEXT KHÔNG bị đụng (giữ mặc định Sheets như trước)."""
+    from twmkt.sheets_board import CONTENT_HEADER, CONTEXT_HEADER, TabMeta, _tab_requests
+
+    def _row_height_requests(tab_name, header):
+        t = TabMeta(name=tab_name, header=list(header), sheet_id=1, n_rows=5)
+        reqs = _tab_requests(t)
+        return [r["updateDimensionProperties"] for r in reqs
+                if "updateDimensionProperties" in r
+                and r["updateDimensionProperties"]["range"].get("dimension") == "ROWS"
+                and r["updateDimensionProperties"]["range"].get("startIndex") == 1]
+
+    content_reqs = _row_height_requests("CONTENT", CONTENT_HEADER)
+    assert len(content_reqs) == 1, f"kỳ vọng ĐÚNG 1 request chiều cao dòng CONTENT: {content_reqs}"
+    assert content_reqs[0]["properties"]["pixelSize"] > 21   # cao hơn mặc định Sheets (~21px)
+
+    context_reqs = _row_height_requests("CONTEXT", CONTEXT_HEADER)
+    assert context_reqs == [], "CONTEXT KHÔNG được set chiều cao dòng riêng (giữ mặc định)"
+
+
 def test_queue_worker_sync_sheet_ingests_before_render_never_loses_approval(monkeypatch):
     """BUG THẬT 2026-07-28 (lượt e2e đầu tiên): Lead duyệt 5 chủ đề, hệ thống
     chỉ nhận 1 — 4 lượt duyệt bị render-từ-store ghi đè PENDING trong lúc

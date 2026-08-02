@@ -1292,6 +1292,16 @@ _COL_WIDTH_DEFAULT = 140
 _WRAP_COLS = {"title", "hook", "notes", "message", "payload", "context",
               "output", "prompt", "template", "label", "keywords", "sources"}
 
+# CHIỀU CAO DÒNG DỮ LIỆU tab CONTENT (yêu cầu Trung 02/08): Context/Output/
+# Notes ở đây dài hơn hẳn CONTEXT (thân bài/JSON preview), mặc định Google
+# Sheets (~21px) quá thấp để liếc nhanh nhiều dòng — CỐ Ý KHÔNG auto-resize
+# theo độ dài nội dung (Sheets API không có kiểu "chiều cao co giãn theo text"
+# qua batchUpdate, chỉ set 1 giá trị CỐ ĐỊNH cho MỌI dòng) — người cần đọc trọn
+# vẫn double-click mở rộng ô như trước, đây chỉ nới khoảng liếc mặc định.
+# ~50% cao hơn mặc định (~21px) -> 32px. CONTEXT giữ nguyên mặc định (không
+# set gì = Sheets tự dùng chuẩn của nó, không đổi hành vi cũ).
+_CONTENT_ROW_HEIGHT = 32
+
 
 def _rgb(hex_str: str) -> dict:
     h = hex_str.lstrip("#")
@@ -1423,6 +1433,14 @@ def _tab_requests(t: TabMeta) -> list[dict]:
                 "range": _grid_range(sid, 0, fmt_rows, i, i + 1),
                 "cell": {"userEnteredFormat": {"wrapStrategy": "WRAP"}},
                 "fields": "userEnteredFormat.wrapStrategy"}})
+
+    # 6b) Chiều cao dòng dữ liệu — CHỈ tab CONTENT nới cao hơn (xem
+    # _CONTENT_ROW_HEIGHT). CONTEXT không set gì -> giữ mặc định Sheets, không
+    # đổi hành vi cũ (Trung 02/08: chỉ CONTENT dài dòng cần khoảng đọc rộng hơn).
+    if t.name == "CONTENT" and fmt_rows > 1:
+        out.append({"updateDimensionProperties": {
+            "range": {"sheetId": sid, "dimension": "ROWS", "startIndex": 1, "endIndex": fmt_rows},
+            "properties": {"pixelSize": _CONTENT_ROW_HEIGHT}, "fields": "pixelSize"}})
 
     # 7) Data validation.
     if "enable" in low:  # SOURCES.Enable / PROMPTS.Enable -> checkbox
