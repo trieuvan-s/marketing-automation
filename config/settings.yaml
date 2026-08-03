@@ -562,6 +562,37 @@ notifications:
     parse_mode: HTML
     timeout_s: 5
 
+# --- Nhãn tiếng Việt hiển thị (Trung 02/08) --------------------------------
+# CHỈ đổi CHỮ NGƯỜI NHÌN THẤY trên Sheet (Status/Execute/Notes) và Telegram
+# (event/ctx-key) — TUYỆT ĐỐI KHÔNG đụng giá trị lưu trong store hay dùng để
+# so sánh trong code (SKIPPED/NEEDS_HUMAN/SOURCE_BROKEN/DUPLICATE/BOILERPLATE/
+# NO_USABLE_CONTENT/FORMAT_MISMATCH/RENDER_RANKING_GUARD vẫn tiếng Anh xuyên
+# suốt store/code/so sánh — xem sheets_board._display_status()/_display_
+# notes(), telegram_notifier.format_message()). Đổi chữ hiển thị sau này CHỈ
+# sửa mục này, KHÔNG đụng code. Thiếu mục nào/thiếu cả khối này -> code lùi
+# về bảng mặc định hard-code (không nổ, xem docstring các hàm trên).
+labels:
+  vi:
+    sheet_status:              # Sheet: Status (CONTENT) + Execute (CONTEXT)
+      SKIPPED: "BỎ QUA"
+      NEEDS_HUMAN: "Cần người review lại nội dung"
+    notes_codes:                # Sheet: mã lý do TRONG câu Notes (prefix "MÃ:")
+      SOURCE_BROKEN: "Nguồn lỗi"
+      DUPLICATE: "Trùng lặp"
+      BOILERPLATE: "Nội dung mẫu/điều hướng"
+      NO_USABLE_CONTENT: "Không có nội dung dùng được"
+      FORMAT_MISMATCH: "Không hợp định dạng"
+      RENDER_RANKING_GUARD: "Cảnh báo cắt theo mức ưu tiên"
+    telegram_events:             # Telegram: tên event (dòng in đậm đầu tin)
+      start: "Bắt đầu xử lý nội dung"
+      new_topic: "Chủ đề mới"
+      skipped: "Bỏ qua"
+      error: "Lỗi xử lý"
+      draft_changed: "Cập nhật nội dung"
+    telegram_keys:                # Telegram: tên field (label trước dấu ":")
+      topic: "Chủ đề"
+      reason: "Lý do"
+
 # --- Sản xuất nội dung ----------------------------------------------
 producers:
   hook: true                      # bước Hook (góc marketing) - mục b/c

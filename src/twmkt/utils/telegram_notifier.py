@@ -59,23 +59,40 @@ _EMOJI = {
 
 _UNEXPANDED_ENV_RE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
 
-# NHÃN TIẾNG VIỆT hiển thị trên tin Telegram (yêu cầu Trung 02/08) — CHỈ đổi
-# CHỮ hiển thị khi build_message() dựng text gửi đi. TUYỆT ĐỐI KHÔNG đổi
-# string "event"/key ctx dùng làm ĐỊNH DANH nội bộ xuyên suốt code (notify()
-# call site, _EMOJI dict, notifier.events trong test) — event lạ (không có
-# trong bảng) hoặc key lạ giữ NGUYÊN tiếng Anh, chỉ dịch đúng danh sách Trung
-# yêu cầu, không tự mở rộng thêm.
-_VI_EVENT_LABELS = {
+# NHÃN TIẾNG VIỆT hiển thị trên tin Telegram (Trung 02/08, B2 02/08 — chuyển
+# vào CONFIG) — CHỈ đổi CHỮ hiển thị khi format_message() dựng text gửi đi.
+# TUYỆT ĐỐI KHÔNG đổi string "event"/key ctx dùng làm ĐỊNH DANH nội bộ xuyên
+# suốt code (notify() call site, _EMOJI dict, notifier.events trong test) —
+# event lạ (không có trong bảng) hoặc key lạ giữ NGUYÊN tiếng Anh. Bảng dịch
+# THẬT đọc từ config/settings.yaml (khối `labels.vi.telegram_events`/
+# `telegram_keys`, B2 — đổi chữ hiển thị sau này CHỈ sửa config); 2 dict dưới
+# đây CHỈ còn là MẶC ĐỊNH LÙI MƯỢT khi thiếu config (không nổ).
+_DEFAULT_VI_EVENT_LABELS = {
     "start": "Bắt đầu xử lý nội dung",
     "new_topic": "Chủ đề mới",
     "skipped": "Bỏ qua",
     "error": "Lỗi xử lý",
     "draft_changed": "Cập nhật nội dung",
 }
-_VI_CTX_KEY_LABELS = {
+_DEFAULT_VI_CTX_KEY_LABELS = {
     "topic": "Chủ đề",
     "reason": "Lý do",
 }
+
+
+def _vi_labels(section: str, default: dict[str, str]) -> dict[str, str]:
+    """Đọc bảng dịch tiếng Việt từ config/settings.yaml (`labels.vi.<section>`)
+    — lùi về `default` khi thiếu file/khối/section hoặc lỗi đọc config bất kỳ
+    (KHÔNG để cấu hình hỏng chặn gửi tin Telegram). Cùng nếp sheets_board.
+    _vi_labels() — 2 module không phụ thuộc nhau, mỗi bên tự đọc config."""
+    try:
+        from ..config import load_settings
+        table = load_settings().get(f"labels.vi.{section}")
+        if isinstance(table, dict) and table:
+            return {str(k): str(v) for k, v in table.items()}
+    except Exception:   # noqa: BLE001
+        pass
+    return default
 
 
 class Notifier(Protocol):
@@ -92,14 +109,17 @@ def format_message(event: str, ctx: dict) -> str:
     """Dựng nội dung tin nhắn: emoji + tên event (in đậm) + từng cặp key: value
     trong `ctx`, MỖI GIÁ TRỊ ĐỘNG đều escape HTML. Hàm THUẦN — test được, không
     cần mạng. Event lạ (không có emoji định sẵn) -> dùng "ℹ️" trung tính.
-    Tên event/key hiển thị qua `_VI_EVENT_LABELS`/`_VI_CTX_KEY_LABELS` (nhãn
-    tiếng Việt) khi có trong bảng — event/key KHÔNG có trong bảng giữ NGUYÊN
-    tiếng Anh (KHÔNG đụng tới `event`/`k` gốc dùng làm định danh nội bộ)."""
+    Tên event/key hiển thị qua bảng dịch (config `labels.vi.telegram_events`/
+    `telegram_keys`, xem _vi_labels()) khi có trong bảng — event/key KHÔNG có
+    trong bảng giữ NGUYÊN tiếng Anh (KHÔNG đụng tới `event`/`k` gốc dùng làm
+    định danh nội bộ)."""
     emoji = _EMOJI.get(event, "ℹ️")
-    label = _VI_EVENT_LABELS.get(event, event)
+    event_labels = _vi_labels("telegram_events", _DEFAULT_VI_EVENT_LABELS)
+    key_labels = _vi_labels("telegram_keys", _DEFAULT_VI_CTX_KEY_LABELS)
+    label = event_labels.get(event, event)
     lines = [f"{emoji} <b>{escape_html(label)}</b>"]
     for k, v in ctx.items():
-        k_label = _VI_CTX_KEY_LABELS.get(k, k)
+        k_label = key_labels.get(k, k)
         lines.append(f"<b>{escape_html(k_label)}:</b> {escape_html(v)}")
     return "\n".join(lines)
 

@@ -26,6 +26,7 @@ get_all_values, batch_update, v.v.) tự động retry khi Google Sheets API tr�
 from __future__ import annotations
 
 import random
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -288,28 +289,71 @@ EXECUTE_VALUES = (EXECUTE_WAITING, EXECUTE_RUNNING, EXECUTE_DONE,
 # KHÔNG BAO GIỜ ghi mới 2 giá trị này.
 EXECUTE_PENDING_STATES = frozenset({EXECUTE_WAITING, EXECUTE_FAILED, "", "RUN"})
 
-# NHÃN TIẾNG VIỆT HIỂN THỊ TRÊN SHEET (yêu cầu Trung 02/08) — CHỈ đổi CHỮ
-# NGƯỜI NHÌN THẤY khi ghi vào ô (context_row()/content_row() dưới), TUYỆT ĐỐI
-# KHÔNG đổi hằng số nội bộ (EXECUTE_NEEDS_HUMAN/"SKIPPED" vẫn tiếng Anh xuyên
-# suốt store/produce_from_sheet.py/WriterOutcome/test — token đó KHÔNG được
-# đọc ngược từ Sheet, xem ingest_context_from_sheet()/ingest_content_from_
-# sheet(): Execute/Status là MỘT CHIỀU store->Sheet, dịch ở đây an toàn tuyệt
-# đối, không làm gãy logic nào). `_display_status()` dùng CHUNG cho cả
-# context_row() (cột Execute) LẪN conditional-formatting rule (xem
-# _tab_requests() — rule màu đỏ NEEDS_HUMAN phải khớp ĐÚNG chữ đã dịch, không
-# thì mất màu) để không lệch nhau giữa 2 nơi.
-_VI_STATUS_LABELS = {
+# NHÃN TIẾNG VIỆT HIỂN THỊ TRÊN SHEET (Trung 02/08, B2 02/08 — chuyển vào
+# CONFIG) — CHỈ đổi CHỮ NGƯỜI NHÌN THẤY khi ghi vào ô (context_row()/
+# content_row() dưới), TUYỆT ĐỐI KHÔNG đổi hằng số nội bộ (EXECUTE_NEEDS_
+# HUMAN/"SKIPPED"/5 mã SKIP/RENDER_RANKING_GUARD vẫn tiếng Anh xuyên suốt
+# store/produce_from_sheet.py/WriterOutcome/test — token đó KHÔNG được đọc
+# ngược từ Sheet, xem ingest_context_from_sheet()/ingest_content_from_sheet():
+# Execute/Status/Notes là MỘT CHIỀU store->Sheet, dịch ở đây an toàn tuyệt
+# đối, không làm gãy logic nào). Bảng dịch THẬT đọc từ config/settings.yaml
+# (khối `labels.vi`, B2 — đổi chữ hiển thị sau này CHỈ sửa config, không đụng
+# code); 2 dict dưới đây CHỈ còn là MẶC ĐỊNH LÙI MƯỢT khi thiếu config/khối
+# `labels.vi` (không nổ, cùng nếp `_visible_rows()` trong store/sync_service.py).
+_DEFAULT_VI_STATUS_LABELS = {
     "SKIPPED": "BỎ QUA",
     EXECUTE_NEEDS_HUMAN: "Cần người review lại nội dung",
 }
+_DEFAULT_VI_NOTES_CODE_LABELS = {
+    "SOURCE_BROKEN": "Nguồn lỗi",
+    "DUPLICATE": "Trùng lặp",
+    "BOILERPLATE": "Nội dung mẫu/điều hướng",
+    "NO_USABLE_CONTENT": "Không có nội dung dùng được",
+    "FORMAT_MISMATCH": "Không hợp định dạng",
+    "RENDER_RANKING_GUARD": "Cảnh báo cắt theo mức ưu tiên",
+}
+
+
+def _vi_labels(section: str, default: dict[str, str]) -> dict[str, str]:
+    """Đọc bảng dịch tiếng Việt từ config/settings.yaml (`labels.vi.<section>`)
+    — lùi về `default` (hard-code) khi thiếu file/khối/section, hoặc bất kỳ
+    lỗi đọc config nào (KHÔNG để 1 lỗi cấu hình làm gãy hiển thị Sheet).
+    Không cache: settings.yaml hiếm khi đọc lại (chỉ lúc render, không phải
+    hot path), và test hay đổi config giữa các lần gọi trong CÙNG tiến trình."""
+    try:
+        from .config import load_settings
+        table = load_settings().get(f"labels.vi.{section}")
+        if isinstance(table, dict) and table:
+            return {str(k): str(v) for k, v in table.items()}
+    except Exception:   # noqa: BLE001 -- cấu hình hỏng/thiếu KHÔNG được chặn hiển thị
+        pass
+    return default
 
 
 def _display_status(value: str) -> str:
     """Giá trị NỘI BỘ (tiếng Anh, dùng xuyên suốt code/test) -> nhãn tiếng
-    Việt hiển thị trên Sheet. Giá trị không có trong bảng dịch (Waiting/
-    Running.../DONE/FAILED/ERROR/PENDING/APPROVE/REJECT...) giữ NGUYÊN —
-    Trung chỉ yêu cầu dịch đúng 2 nhãn này, không mở rộng thêm."""
-    return _VI_STATUS_LABELS.get(value, value)
+    Việt hiển thị trên Sheet (Status/Execute — khớp NGUYÊN VĂN cả ô). Giá trị
+    không có trong bảng dịch (Waiting/Running.../DONE/FAILED/ERROR/PENDING/
+    APPROVE/REJECT...) giữ NGUYÊN — Trung chỉ yêu cầu dịch đúng 2 nhãn này,
+    không mở rộng thêm."""
+    return _vi_labels("sheet_status", _DEFAULT_VI_STATUS_LABELS).get(value, value)
+
+
+def _display_notes(notes: str) -> str:
+    """Dịch mã lý do SKIP/RENDER_RANKING_GUARD xuất hiện TRONG Notes (dạng
+    "MÃ: phần còn lại..." — scripts/produce_from_sheet._channel_skip_reason —
+    HOẶC "MÃ (chi tiết...): phần còn lại..." — scripts/render_production_
+    assets._append_notes/_ranking_guard_note, mã KHÔNG đứng sát dấu ":") sang
+    tiếng Việt — so khớp CHÍNH XÁC theo TỪNG mã đã biết (word-boundary, không
+    đoán mẫu chung "chuỗi HOA:"), giữ NGUYÊN phần câu còn lại (đã viết tiếng
+    Việt sẵn). Mã lạ (không có trong bảng dịch) giữ nguyên tiếng Anh — không
+    mở rộng ngoài B3. Notes rỗng -> trả y nguyên."""
+    if not notes:
+        return notes
+    labels = _vi_labels("notes_codes", _DEFAULT_VI_NOTES_CODE_LABELS)
+    for code, label in labels.items():
+        notes = re.sub(rf"\b{re.escape(code)}\b", label, notes)
+    return notes
 
 
 CONTEXT_HEADER = ["Timestamp", "Hot%", "Score", "Group", "Topic", "Context", "Hook",
@@ -744,8 +788,8 @@ def content_row(*, context: str, type_: str, status: str, output: str,
     người tự đổi qua dropdown khi thật sự duyệt asset. Xem
     test_no_machine_write_path_touches_gate3 (tests/test_pipeline.py) — khoá
     bất biến này VĨNH VIỄN, KHÔNG thêm lại tham số gate3 ở đây dù có lý do gì."""
-    return [ts or _now_ddmmyyyy(), context, type_, _display_status(status), output, notes, approve,
-           topic_key, facts, asset_path, "", "PENDING", ""]
+    return [ts or _now_ddmmyyyy(), context, type_, _display_status(status), output,
+           _display_notes(notes), approve, topic_key, facts, asset_path, "", "PENDING", ""]
 
 
 def facts_to_json(facts: list) -> str:

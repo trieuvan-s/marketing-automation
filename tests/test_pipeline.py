@@ -3960,7 +3960,7 @@ def test_run_infographic_skipped_when_no_numeric_content_true_article_still_prod
     infographic_rows = [r for r in board.appended_content if r[2] == "infographic"]
     assert len(infographic_rows) == 1
     assert infographic_rows[0][3] == "BỎ QUA"           # Status (nhãn VI, xem sheets_board._display_status)
-    assert "FORMAT_MISMATCH" in infographic_rows[0][5]  # Notes mã chuẩn hoá (Bước 4.3)
+    assert "Không hợp định dạng" in infographic_rows[0][5]  # Notes mã FORMAT_MISMATCH (nhãn VI, B3)
 
     article_rows = [r for r in board.appended_content if r[2] == "article"]
     assert len(article_rows) == 1 and article_rows[0][3] == "DONE"
@@ -4025,7 +4025,7 @@ def test_run_infographic_skipped_by_code_count_ignoring_router_rationale():
     infographic_rows = [r for r in board.appended_content if r[2] == "infographic"]
     assert len(infographic_rows) == 1
     assert infographic_rows[0][3] == "BỎ QUA"
-    assert "FORMAT_MISMATCH" in infographic_rows[0][5]
+    assert "Không hợp định dạng" in infographic_rows[0][5]  # nhãn VI của FORMAT_MISMATCH (B3)
     assert "Tin bảng-số không đủ dữ liệu trình bày hình" not in infographic_rows[0][5], (
         "Notes PHẢI là lý do đếm-số của CODE, KHÔNG phải câu chữ Router — "
         "Router mất quyền quyết riêng tuyến infographic ở chế độ AUTO (Bước A)"
@@ -4078,7 +4078,7 @@ def test_run_article_skipped_when_router_decides_channel_false_upfront():
 
     article_rows = [r for r in board.appended_content if r[2] == "article"]
     assert len(article_rows) == 1 and article_rows[0][3] == "BỎ QUA"
-    assert "NO_USABLE_CONTENT" in article_rows[0][5]
+    assert "Không có nội dung dùng được" in article_rows[0][5]  # nhãn VI của NO_USABLE_CONTENT (B3)
 
 
 def test_run_article_forced_true_when_router_vetoes_but_content_units_anchored():
@@ -4192,7 +4192,7 @@ def test_run_infographic_format_mismatch_when_no_numeric_units_article_video_unt
 
     infographic_rows = [r for r in board.appended_content if r[2] == "infographic"]
     assert len(infographic_rows) == 1 and infographic_rows[0][3] == "BỎ QUA"
-    assert "FORMAT_MISMATCH" in infographic_rows[0][5]
+    assert "Không hợp định dạng" in infographic_rows[0][5]  # nhãn VI của FORMAT_MISMATCH (B3)
 
     article_rows = [r for r in board.appended_content if r[2] == "article"]
     assert len(article_rows) == 1 and article_rows[0][3] == "DONE"
@@ -4294,7 +4294,7 @@ def test_run_boilerplate_source_now_skipped_not_fabricated_article_phase_c():
     assert statuses.get("article") == "BỎ QUA", f"kỳ vọng BỎ QUA (SKIPPED), thực tế: {statuses}"
     for r in board.appended_content:
         if r[2] == "article":
-            assert "NO_USABLE_CONTENT" in r[5]
+            assert "Không có nội dung dùng được" in r[5]  # nhãn VI của NO_USABLE_CONTENT (B3)
 
 
 def test_run_output_type_restricts_to_selected_type_only():
@@ -9095,7 +9095,9 @@ def test_render_production_assets_run_ranking_guard_notes_survive_resync(monkeyp
     i_tk = [h.strip().lower() for h in header].index("topickey")
     i_notes = [h.strip().lower() for h in header].index("notes")
     row_out = next(r for r in grid[1:] if r[i_tk] == "tk-rank")
-    assert "RENDER_RANKING_GUARD" in row_out[i_notes], (
+    # Nhãn VI của RENDER_RANKING_GUARD (B3, sheets_board._display_notes) —
+    # Sheet hiển thị chữ đã dịch, store (kiểm ở assert phía trên) vẫn tiếng Anh.
+    assert "Cảnh báo cắt theo mức ưu tiên" in row_out[i_notes], (
         f"Notes bị MẤT sau lượt sync kế tiếp -- đúng lỗi VIỆC A mô tả, thực tế: {row_out[i_notes]!r}"
     )
 
@@ -10463,6 +10465,94 @@ def test_content_rows_taller_than_context_rows_for_easier_skimming():
 
     context_reqs = _row_height_requests("CONTEXT", CONTEXT_HEADER)
     assert context_reqs == [], "CONTEXT KHÔNG được set chiều cao dòng riêng (giữ mặc định)"
+
+
+def test_display_status_and_notes_read_vi_labels_from_config(monkeypatch):
+    """B2 (Lead 02/08) — bảng ánh xạ nhãn tiếng Việt PHẢI đọc từ config/
+    settings.yaml (`labels.vi.*`), không hard-code: đổi config -> đổi nhãn
+    hiển thị NGAY, không cần sửa code. Test bằng cách monkeypatch load_
+    settings() trả về 1 bảng KHÁC bảng mặc định hard-code trong code, xác
+    nhận sheets_board._display_status()/_display_notes() dùng ĐÚNG bảng đó."""
+    import twmkt.config as twmkt_config
+    from twmkt.config import Settings
+    from twmkt.sheets_board import _display_notes, _display_status
+
+    custom = Settings({"labels": {"vi": {
+        "sheet_status": {"SKIPPED": "ĐÃ HUỶ (test)"},
+        "notes_codes": {"FORMAT_MISMATCH": "Sai định dạng (test)"},
+    }}})
+    monkeypatch.setattr(twmkt_config, "load_settings", lambda *a, **kw: custom)
+
+    assert _display_status("SKIPPED") == "ĐÃ HUỶ (test)"      # KHÁC mặc định "BỎ QUA"
+    assert "Sai định dạng (test)" in _display_notes("FORMAT_MISMATCH: lý do X")
+    # Giá trị KHÔNG có trong bảng config tuỳ biến (NEEDS_HUMAN) -> lùi về giá
+    # trị GỐC (config này không định nghĩa) -- không đoán/không giữ mặc định
+    # hard-code cũ khi ĐàCÓ khối labels.vi.sheet_status hợp lệ (dù thiếu key).
+    assert _display_status("NEEDS_HUMAN") == "NEEDS_HUMAN"
+
+
+def test_display_status_and_notes_fall_back_to_hardcoded_default_when_config_missing(monkeypatch):
+    """B2 — thiếu file config/khối labels.vi hoàn toàn (hoặc lỗi đọc bất kỳ)
+    -> KHÔNG nổ, lùi về bảng mặc định hard-code trong code (an toàn vận
+    hành — 1 lỗi cấu hình không được chặn hiển thị Sheet)."""
+    import twmkt.config as twmkt_config
+    from twmkt.sheets_board import _display_notes, _display_status
+
+    def _raise(*a, **kw):
+        raise FileNotFoundError("không có settings.yaml (mô phỏng)")
+
+    monkeypatch.setattr(twmkt_config, "load_settings", _raise)
+
+    assert _display_status("SKIPPED") == "BỎ QUA"
+    assert _display_status("NEEDS_HUMAN") == "Cần người review lại nội dung"
+    assert "Không hợp định dạng" in _display_notes("FORMAT_MISMATCH: lý do X")
+
+
+def test_vi_labels_do_not_affect_internal_string_comparisons_b4(monkeypatch, tmp_path):
+    """B4 (Lead 02/08) — đổi nhãn hiển thị KHÔNG được gãy bất kỳ so sánh
+    trạng thái nào bằng chuỗi TRONG CODE (B1: giá trị store/code giữ nguyên
+    tiếng Anh, chỉ Sheet/Telegram hiển thị khác). Khoá cứng bằng lượt chạy
+    THẬT: đổi config `labels.vi` sang bảng KHÁC HẲN, chạy produce_from_sheet.
+    run() với 1 chủ đề bị SKIP (NO_USABLE_CONTENT) -- kết quả nghiệp vụ
+    (skipped/produced/Execute) PHẢI GIỐNG HỆT dù nhãn hiển thị đổi, chứng tỏ
+    mọi rẽ nhánh trong code đọc giá trị GỐC tiếng Anh, không đọc chữ đã dịch."""
+    import json as _json
+    import twmkt.config as twmkt_config
+    from twmkt.config import Settings, load_settings as real_load_settings
+
+    class _PoisonWriterLLM:
+        def complete(self, *a, **kw):
+            raise AssertionError("KHÔNG được gọi writer khi brief_status=NO_USABLE_CONTENT")
+
+    class _BoilerplateRouteLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False, **kw):
+            if "no_numeric_content" in system:
+                return _json.dumps({"content_units": [], "no_numeric_content": False}, ensure_ascii=False)
+            return ""
+
+    base = real_load_settings()
+    weird = dict(base._data)   # Settings._data — xem twmkt/config.py
+    weird["labels"] = {"vi": {
+        "sheet_status": {"SKIPPED": "XXX_KHÁC_HẲN"},
+        "notes_codes": {"NO_USABLE_CONTENT": "YYY_KHÁC_HẲN"},
+    }}
+    monkeypatch.setattr(twmkt_config, "load_settings", lambda *a, **kw: Settings(weird))
+
+    result, board, notifier = _run_produce_scenario(
+        _PoisonWriterLLM(),
+        _approved_row("Trang chủ. Menu. Đăng nhập. Đang cập nhật nội dung...", row=2),
+        route_llm=_BoilerplateRouteLLM())
+
+    # Nghiệp vụ vẫn ĐÚNG y hệt hành vi gốc (test_run_boilerplate_source_now_
+    # skipped_not_fabricated_article_phase_c) dù nhãn config đổi hẳn --
+    # produce_from_sheet.py hoàn toàn KHÔNG đọc bảng labels.vi.
+    statuses = {r[2]: r[3] for r in board.appended_content}
+    assert statuses.get("article") == "XXX_KHÁC_HẲN"   # Sheet hiển thị nhãn MỚI (đổi config có tác dụng)
+    for r in board.appended_content:
+        if r[2] == "article":
+            assert "YYY_KHÁC_HẲN" in r[5]
+    assert result["produced"] == 0 and result["skipped"] >= 1   # nghiệp vụ KHÔNG đổi
+
 
 
 def test_queue_worker_sync_sheet_ingests_before_render_never_loses_approval(monkeypatch):
