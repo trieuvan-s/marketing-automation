@@ -171,17 +171,22 @@ def ratios_for(output_data: dict, *, settings) -> tuple[str, ...]:
 
 
 _TEXT_OUTPUTS = {
-    # content_type -> (đuôi file, mime). Video ở ĐÂY là KỊCH BẢN (JSON hợp đồng
-    # CONTENT.Output), KHÔNG phải .mp4 — file mp4 do repo aigen dựng (cần
-    # OmniVoice TTS + ffmpeg), CHƯA nối vào luồng này. Đặt tên .json cho đúng
-    # bản chất thay vì .mp4 gây hiểu nhầm là đã có video thành phẩm.
+    # content_type -> (đuôi file, mime).
     "article": (".md", "text/markdown"),
     # VIỆC 1 (2026-08-03) — Long-Article dùng CHUNG định dạng .md/text/markdown
     # với article (KHÔNG có định dạng ra riêng, xem models.ContentFormat.
     # LONG_ARTICLE); thiếu dòng này thì Long-Article DONE nhưng KHÔNG BAO GIỜ
     # có AssetPath (run_text_assets() chỉ lặp qua các khoá trong dict này).
     "long_article": (".md", "text/markdown"),
-    "video": (".json", "application/json"),
+    # SỬA LỖI THẬT (2026-08-03, Lead báo qua ca "Thế giới Di động") — "video"
+    # TỪNG có mặt ở đây (upload KỊCH BẢN .json làm AssetPath khi aigen "CHƯA
+    # nối vào luồng"). Nay aigen ĐÃ nối thật (run_videos()/render_video_one()
+    # dựng .mp4 thật), nhưng "video" vẫn còn trong dict này khiến run_text_
+    # assets() upload KỊCH BẢN JSON làm AssetPath BẤT CỨ KHI NÀO run_videos()
+    # bỏ qua/lỗi ở lượt đó — Gate 2 trông như "đã xong" dù CHƯA có video thật.
+    # Lead xác nhận: CHỈ video.mp4 thật lên Drive mới được coi là hoàn thành.
+    # KHÔNG thêm lại "video" vào đây — muốn AssetPath cho video, PHẢI qua
+    # run_videos()/render_video_one() (aigen), không có đường lùi mượt khác.
 }
 
 # VIỆC 2 (2026-08-03, Lead) — CHỈ Article/Long-Article convert sang Google

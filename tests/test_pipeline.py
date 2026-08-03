@@ -11306,8 +11306,17 @@ class _FakeTextDrive:
 
 def test_run_text_assets_converts_article_to_google_doc_not_video(tmp_path):
     """VIỆC 2.1/2.3 (2026-08-03, Lead) — Article/Long-Article upload kèm
-    target_mime_type=GOOGLE_DOC_MIME (Drive tự convert); Video (kịch bản JSON)
-    GIỮ NGUYÊN, KHÔNG convert gì (target_mime_type rỗng)."""
+    target_mime_type=GOOGLE_DOC_MIME (Drive tự convert).
+
+    SỬA LỖI THẬT (2026-08-03, Lead báo qua ca "Thế giới Di động") — "video"
+    KHÔNG còn trong _TEXT_OUTPUTS: trước đây có mặt để upload KỊCH BẢN JSON
+    làm AssetPath "cho đỡ trống" khi aigen "chưa nối" — nhưng aigen ĐÃ nối
+    thật (run_videos()/render_video_one() dựng .mp4 thật), và "video" vẫn còn
+    trong dict khiến run_text_assets() âm thầm ghi AssetPath = link KỊCH BẢN
+    (không phải video thật) mỗi khi run_videos() bỏ qua/lỗi ở lượt đó — Gate 2
+    trông như "đã xong" dù CHƯA có video thật. Lead xác nhận: CHỈ video.mp4
+    thật lên Drive mới được coi là hoàn thành -> run_text_assets() PHẢI bỏ
+    qua hoàn toàn dòng "video", dù Gate 2 đã APPROVE."""
     from store import document_store as ds
     from store import pipeline_store as ps
     from twmkt.config import Settings
@@ -11340,11 +11349,13 @@ def test_run_text_assets_converts_article_to_google_doc_not_video(tmp_path):
     with monkeypatch_db_path(db_path):
         result = rpa.run_text_assets(settings=settings, board=board, drive=drive, out_dir=out_dir)
 
-    assert result["text_uploaded"] == 3
+    assert result["text_uploaded"] == 2   # CHỈ article + long_article -- video KHÔNG qua đường này
     by_tk = {c["topic_key"]: c for c in drive.calls}
+    assert "tk-vid" not in by_tk, "video KHÔNG được upload kịch bản làm AssetPath giả -- phải qua aigen thật"
     assert by_tk["tk-art"]["target_mime_type"] == GOOGLE_DOC_MIME
     assert by_tk["tk-long"]["target_mime_type"] == GOOGLE_DOC_MIME
-    assert by_tk["tk-vid"]["target_mime_type"] == ""   # VIỆC 2.3 -- KHÔNG đụng video
+    # content_status của tk-vid KHÔNG bị đụng -- vẫn chờ run_videos()/aigen thật.
+    assert not (ps.read_content_status("tk-vid", "video", db_path=db_path).get("asset_url") or "").strip()
 
 
 def test_run_text_assets_idempotent_by_content_hash_reuploads_on_change(tmp_path):
