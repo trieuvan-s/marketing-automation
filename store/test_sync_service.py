@@ -446,6 +446,34 @@ def test_ingest_content_from_sheet_writes_gate2_gate3_social_posting_changes(boa
     assert status["posting_status"] == "Đã đăng"
 
 
+def test_ingest_content_from_sheet_matches_type_as_display_label(board, db_path):
+    """SỬA LỖI THẬT NGHIÊM TRỌNG (2026-08-03, Lead báo qua ca Gate 2 duyệt
+    xong không sinh AssetPath) — VIỆC 3 đổi content_row() ghi NHÃN hiển thị
+    ("Video"/"Infographic"...) vào cột Type, nhưng ingest_content_from_sheet()
+    vẫn đọc THẲNG ô đó làm content_type để tra store -> "Video" != "video" ->
+    read_content_output() trả None -> CẢ DÒNG bị bỏ qua ÂM THẦM. Hậu quả thật:
+    Gate 2 người vừa duyệt (APPROVE) KHÔNG BAO GIỜ được ghi vào store, rồi
+    render_content_to_sheet() lượt sau lại vẽ đè Sheet về "PENDING" (từ store
+    cũ) -- xoá mất thao tác người vừa bấm. Test này khoá ĐÚNG use-case
+    "Type ghi nhãn hiển thị" (không phải khoá thô) vẫn phải ingest được."""
+    ps.write_raw("tk-1", {"context": "Bài video"}, db_path=db_path)
+    ps.write_content_output("tk-1", "video", {"status": "DONE", "output": "x",
+                                              "notes": "", "facts": "[]"}, db_path=db_path)
+    ps.write_content_status("tk-1", "video", gate2="PENDING", db_path=db_path)
+
+    board._tab("CONTENT").set_rows([
+        CONTENT_HEADER,
+        # "Video" -- NHÃN hiển thị (VIỆC 3), KHÔNG phải "video" thô.
+        ["24/07/2026", "Bài video", "Video", "DONE", "x", "", "APPROVE", "tk-1", "[]", "",
+         "", "PENDING", ""],
+    ])
+
+    n = ss.ingest_content_from_sheet(board, db_path=db_path)
+    assert n == 1, "Type ghi nhãn hiển thị PHẢI vẫn khớp được content_output, không bị bỏ qua"
+    status = ps.read_content_status("tk-1", "video", db_path=db_path)
+    assert status["gate2"] == "APPROVE"
+
+
 def test_ingest_content_from_sheet_skips_when_content_output_missing(board, db_path):
     """CONTENT row tham chiếu (TopicKey, Type) CHƯA có content_output trong
     store -- KHÔNG được tự tạo content_status mồ côi."""

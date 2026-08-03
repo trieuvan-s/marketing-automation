@@ -39,7 +39,7 @@ migrate.
 from __future__ import annotations
 
 from twmkt.sheets_board import (  # noqa: F401
-    _col_a1, _display_notes_business,
+    _col_a1, _display_notes_business, raw_content_type,
     CONTENT_HEADER, CONTEXT_HEADER, EXECUTE_WAITING, GATE1_COL, GATE2_COL, GATE3_COL,
     OUTPUT_TYPE_COL, SheetsBoard, content_row, context_row, facts_to_json,
 )
@@ -710,9 +710,13 @@ def ingest_content_from_sheet(board: SheetsBoard, *, db_path=None) -> int:
 
     writes = 0
     for row in rows:
-        topic_key, type_ = _cell(row, i_key), _cell(row, i_type)
-        if not topic_key or not type_:
+        topic_key, type_display = _cell(row, i_key), _cell(row, i_type)
+        if not topic_key or not type_display:
             continue
+        # SỬA LỖI THẬT (2026-08-03) — cột Type trên Sheet giờ ghi NHÃN hiển thị
+        # (VIỆC 3, vd "Infographic"), KHÔNG còn là content_type thô ("infographic")
+        # — phải dịch ngược trước khi tra store, xem docstring raw_content_type().
+        type_ = raw_content_type(type_display)
         if ps.read_content_output(topic_key, type_, db_path=db_path) is None:
             continue   # content_output chưa tồn tại -- không có content_status để ingest vào
         sheet_gate2 = _cell(row, i_g2) or "PENDING"

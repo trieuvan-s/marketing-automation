@@ -362,6 +362,25 @@ def _display_type(value: str) -> str:
     return _vi_labels("content_type", _DEFAULT_VI_TYPE_LABELS).get(value, value)
 
 
+def raw_content_type(display_value: str) -> str:
+    """CHIỀU NGƯỢC của _display_type() — nhãn hiển thị Sheet ("Article",
+    "Long-Article"...) -> content_type khoá STORE ("article", "long_article"...).
+
+    SỬA LỖI THẬT (2026-08-03, phát hiện qua ca Lead duyệt Gate 2 xong không
+    thấy sinh AssetPath) — VIỆC 3 đổi content_row() ghi NHÃN hiển thị vào cột
+    Type, nhưng store/sync_service.ingest_content_from_sheet() vẫn đọc THẲNG
+    giá trị ô này làm content_type để tra content_output/content_status ->
+    "Article" != "article" -> read_content_output() trả None -> TOÀN BỘ dòng
+    bị bỏ qua ÂM THẦM (continue) — Gate 2/Social Link/Posting Status không
+    còn ingest được NỮA, không riêng gì 2 bài cụ thể. Hàm này CHUNG với
+    _display_type() (đọc CÙNG bảng config, không dựng ánh xạ thứ hai). Giá
+    trị lạ (không khớp nhãn nào đã biết) giữ NGUYÊN — coi như đã là khoá
+    thô (dữ liệu cũ trước VIỆC 3, hoặc gõ tay)."""
+    table = _vi_labels("content_type", _DEFAULT_VI_TYPE_LABELS)
+    reverse = {label: raw for raw, label in table.items()}
+    return reverse.get(display_value, display_value)
+
+
 def _display_notes(notes: str) -> str:
     """Dịch mã lý do SKIP/RENDER_RANKING_GUARD xuất hiện TRONG Notes (dạng
     "MÃ: phần còn lại..." — scripts/produce_from_sheet._channel_skip_reason —
