@@ -1,7 +1,8 @@
 """Bước 4.2 -- đóng dấu brand TẤT ĐỊNH lên ảnh do AI sinh (ai_full.py), bằng
 Pillow, KHÔNG bao giờ để AI tự vẽ logo/nguồn/disclaimer (AI không vẽ logo
-đúng được -- xem ai_full.py docstring). Vị trí/font/màu CỐ ĐỊNH theo Theme-
-rules (prompts/themes/), không phụ thuộc nội dung AI sinh ra.
+đúng được -- xem ai_full.py docstring). Màu đọc trực tiếp từ bảng DESIGN
+TOKENS trong Theme-rules (prompts/themes/); các mục layout D*/L* không được
+áp dụng.
 
 ĐẢO HƯỚNG P0 (2026-07-23, QUYẾT ĐỊNH LEAD -- xem STOP-REPORT phiên
 feature/infographic-frame): CHẨN ĐOÁN GỐC khác giả định cũ -- disclaimer đè
@@ -46,12 +47,12 @@ QUY TRÌNH (đúng thứ tự, xem `stamp_brand`):
      tối (luminance <=140) -> dùng thẳng (mối nối vô hình); sáng -> fallback
      navy FVA cố định (config infographic.ai_full.navy_fallback).
   4. NỘI DUNG BAND (`_layout_band_text`) -- Trái "Nguồn: ...", Phải disclaimer,
-     font = 0.30*BAND_H, KHÔNG BAO GIỜ cắt chữ/thu font dưới 18px -- band TỰ
+     font = 0.30*BAND_H*text_scale, KHÔNG BAO GIỜ cắt chữ/thu font dưới 18px -- band TỰ
      NỚI cao (matting lại với inner_h nhỏ hơn) nếu 1 dòng không đủ chỗ dù đã
      xuống 2 dòng.
   5. LOGO (`_paste_logo`) -- dán vào TOP_PAD (dải màu band phẳng ở đỉnh, đã
-     bảo đảm đủ chỗ ở Bước 2), căn trái lề 4% chiều rộng, căn giữa theo chiều
-     dọc trong dải. KHÔNG còn scrim (nền phẳng 1 màu, không có gì để đè).
+     bảo đảm đủ chỗ ở Bước 2), vị trí đọc từ brand.yaml. KHÔNG còn scrim
+     (nền phẳng 1 màu, không có gì để đè).
      ASSERT bbox logo nằm TRỌN trong TOP_PAD.
   6. LOG JSON (`build_stamp_log`) -- trả kèm bytes để ai_full.py ghi cạnh ảnh,
      Lead kiểm không cần mở ảnh (xem A2 Bước 6, STOP-REPORT) -- gồm cả
@@ -67,10 +68,13 @@ from __future__ import annotations
 
 import io
 import logging
+import re
 import statistics
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageStat
+
+from ..config import load_brand
 
 logger = logging.getLogger("twmkt.render.brand_stamp")
 
@@ -82,8 +86,12 @@ _DEFAULT_FINAL_SIZES: dict[str, tuple[int, int]] = {
     "9:16": (1080, 1920),
     "1:1": (1080, 1080),
 }
+_DEFAULT_FULL_CANVAS_AI_SIZES: dict[str, tuple[int, int]] = {
+    "4:5": (1280, 1600),
+    "9:16": (1152, 2048),
+    "1:1": (1280, 1280),
+}
 _DEFAULT_BOTTOM_BAND_MIN_PX = 72
-_DEFAULT_NAVY_FALLBACK = (6, 21, 33)   # #061521 -- khớp _THEME_COLORS["dark"]["bg"] dưới đây
 
 # Font size tối thiểu tuyệt đối -- DƯỚI mức này dấu tiếng Việt (dấu mũ/móc/
 # thanh điệu chồng) bắt đầu vỡ nét ở ảnh raster thường (DỪNG KHI #2, xem
@@ -93,10 +101,97 @@ _DEFAULT_NAVY_FALLBACK = (6, 21, 33)   # #061521 -- khớp _THEME_COLORS["dark"]
 # không đủ chỗ", band co giãn theo nhu cầu chữ).
 _MIN_READABLE_FONT_SIZE = 18
 
-_THEME_COLORS = {
-    "dark": {"bg": (6, 21, 33), "text": (243, 235, 221), "muted": (200, 208, 212), "gold": (201, 161, 74)},
-    "light": {"bg": (246, 240, 229), "text": (31, 31, 31), "muted": (96, 103, 107), "gold": (201, 161, 74)},
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_THEME_TOKEN_ROW_RE = re.compile(
+    r"^\|\s*`(?P<token>[a-z_.]+)`\s*\|\s*`(?P<value>#[0-9A-Fa-f]{6})`\s*\|",
+    re.MULTILINE,
+)
+_THEME_ID_RE = re.compile(r"^theme_id:\s*(?P<value>[^\r\n]+?)\s*$", re.MULTILINE)
+_REQUIRED_THEME_TOKENS = {
+    "background.primary",
+    "background.secondary",
+    "text.primary",
+    "text.secondary",
+    "accent.gold",
 }
+
+
+class ThemeConfigError(ValueError):
+    """Cấu hình theme hoặc design token màu không hợp lệ."""
+
+
+def _hex_to_rgb(value: str) -> tuple[int, int, int]:
+    text = value.strip().lstrip("#")
+    if len(text) != 6:
+        raise ThemeConfigError(f"Mã màu theme không hợp lệ: {value!r}")
+    try:
+        return tuple(int(text[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError as exc:
+        raise ThemeConfigError(f"Mã màu theme không hợp lệ: {value!r}") from exc
+
+
+def resolve_theme_name(theme: str | None = None, *, content_type: str | None = None) -> str:
+    """Chọn theme bằng config; không suy luận nội dung từ câu chữ."""
+    cfg = load_brand().get("infographic_theme")
+    if not isinstance(cfg, dict):
+        raise ThemeConfigError("Thiếu brand.infographic_theme trong config/brand.yaml")
+    files = cfg.get("files")
+    if not isinstance(files, dict) or not files:
+        raise ThemeConfigError("Thiếu brand.infographic_theme.files trong config/brand.yaml")
+
+    requested = str(theme or "").strip().lower()
+    if requested:
+        if requested not in files:
+            raise ThemeConfigError(
+                f"Theme {requested!r} chưa cấu hình; chỉ hỗ trợ {sorted(files)}")
+        return requested
+
+    content_key = str(content_type or "").strip().lower()
+    content_map = cfg.get("content_map")
+    if content_key and isinstance(content_map, dict):
+        mapped = str(content_map.get(content_key) or "").strip().lower()
+        if mapped:
+            if mapped not in files:
+                raise ThemeConfigError(
+                    f"Theme {mapped!r} của content_type={content_key!r} chưa có file")
+            return mapped
+
+    default = str(cfg.get("default") or "").strip().lower()
+    if default not in files:
+        raise ThemeConfigError(
+            f"Theme mặc định {default!r} chưa có trong brand.infographic_theme.files")
+    return default
+
+
+def load_theme_palette(
+    theme: str | None = None,
+    *,
+    content_type: str | None = None,
+) -> tuple[str, str, dict[str, str]]:
+    """Đọc DUY NHẤT bảng design token màu từ file theme đã cấu hình.
+
+    Các phần layout D*/L*, typography và density trong markdown không được
+    parse hay đưa vào renderer.
+    """
+    resolved = resolve_theme_name(theme, content_type=content_type)
+    cfg = load_brand()["infographic_theme"]
+    configured_path = Path(str(cfg["files"][resolved]))
+    path = configured_path if configured_path.is_absolute() else _REPO_ROOT / configured_path
+    if not path.is_file():
+        raise ThemeConfigError(f"Không tìm thấy file theme {resolved!r}: {path}")
+
+    text = path.read_text(encoding="utf-8")
+    tokens = {m.group("token"): m.group("value").upper()
+              for m in _THEME_TOKEN_ROW_RE.finditer(text)}
+    missing = sorted(_REQUIRED_THEME_TOKENS - set(tokens))
+    if missing:
+        raise ThemeConfigError(
+            f"Theme {resolved!r} thiếu design token màu bắt buộc: {missing}")
+    theme_id_match = _THEME_ID_RE.search(text)
+    if not theme_id_match:
+        raise ThemeConfigError(f"Theme {resolved!r} thiếu theme_id trong front matter")
+    theme_id = theme_id_match.group("value").strip().strip("\"'")
+    return resolved, theme_id, tokens
 
 # Chuỗi ứng viên đường dẫn font TTF hỗ trợ dấu tiếng Việt -- thử LẦN LƯỢT,
 # CÙNG NẾP config-first (settings.yaml có thể ghi đè qua render.ai_full.
@@ -160,8 +255,77 @@ def _resolve_band_min_px(settings=None) -> int:
     return _DEFAULT_BOTTOM_BAND_MIN_PX
 
 
-def _resolve_navy_fallback(settings=None) -> tuple[int, int, int]:
-    if settings is not None:
+def _resolve_stamp_style() -> dict[str, float]:
+    """Đọc thông số thẩm mỹ brand stamp từ brand.yaml.
+
+    Các giới hạn ở đây chỉ xác thực config; bốn guardrail cấu trúc
+    (fit-inside, TOP_PAD, band riêng, scale <= 1) vẫn do code bên dưới giữ.
+    """
+    cfg = load_brand().get("infographic_stamp") or {}
+    logo_cfg = cfg.get("logo") or {}
+    footer_cfg = cfg.get("footer") or {}
+    style = {
+        "logo_left_ratio": float(logo_cfg.get("left_ratio", 0.04)),
+        "logo_vertical_bias": float(logo_cfg.get("vertical_bias", 0.50)),
+        "footer_text_scale": float(
+            footer_cfg.get("text_scale", _SECONDARY_TEXT_SCALE)
+        ),
+    }
+    if not 0.0 <= style["logo_left_ratio"] <= 0.20:
+        raise ValueError("brand.infographic_stamp.logo.left_ratio phải nằm trong [0, 0.20]")
+    if not 0.0 <= style["logo_vertical_bias"] <= 1.0:
+        raise ValueError("brand.infographic_stamp.logo.vertical_bias phải nằm trong [0, 1]")
+    if not 0.50 <= style["footer_text_scale"] <= 1.0:
+        raise ValueError("brand.infographic_stamp.footer.text_scale phải nằm trong [0.50, 1.0]")
+    return style
+
+
+def _resolve_overlay_style() -> dict[str, float]:
+    """Đọc hình học overlay full-canvas từ brand.yaml."""
+    cfg = load_brand().get("infographic_overlay") or {}
+    logo_cfg = cfg.get("logo") or {}
+    metadata_cfg = cfg.get("metadata") or {}
+    style = {
+        "logo_right_ratio": float(logo_cfg.get("right_ratio", 0.035)),
+        "logo_top_ratio": float(logo_cfg.get("top_ratio", 0.025)),
+        "logo_height_ratio": float(logo_cfg.get("height_ratio", 0.055)),
+        "metadata_side_ratio": float(metadata_cfg.get("side_ratio", 0.035)),
+        "metadata_bottom_ratio": float(metadata_cfg.get("bottom_ratio", 0.012)),
+        "image_body_font_ratio": float(metadata_cfg.get("image_body_font_ratio", 0.028)),
+        "metadata_font_scale": float(metadata_cfg.get("font_scale", 0.80)),
+        "metadata_backdrop_opacity": float(metadata_cfg.get("backdrop_opacity", 185)),
+    }
+    for key in (
+        "logo_right_ratio", "logo_top_ratio", "metadata_side_ratio",
+        "metadata_bottom_ratio",
+    ):
+        if not 0.0 <= style[key] <= 0.20:
+            raise ValueError(f"brand.infographic_overlay.{key} phải nằm trong [0, 0.20]")
+    if not 0.02 <= style["logo_height_ratio"] <= 0.15:
+        raise ValueError("brand.infographic_overlay.logo.height_ratio phải nằm trong [0.02, 0.15]")
+    if not 0.01 <= style["image_body_font_ratio"] <= 0.08:
+        raise ValueError(
+            "brand.infographic_overlay.metadata.image_body_font_ratio phải nằm trong [0.01, 0.08]"
+        )
+    if not 0.50 <= style["metadata_font_scale"] <= 1.0:
+        raise ValueError("brand.infographic_overlay.metadata.font_scale phải nằm trong [0.50, 1.0]")
+    if not 0 <= style["metadata_backdrop_opacity"] <= 255:
+        raise ValueError(
+            "brand.infographic_overlay.metadata.backdrop_opacity phải nằm trong [0, 255]"
+        )
+    return style
+
+
+def _resolve_navy_fallback(
+    *,
+    theme: str,
+    theme_background: tuple[int, int, int],
+    settings=None,
+) -> tuple[int, int, int]:
+    # `navy_fallback` là override legacy chỉ đúng cho Dark. Light phải lấy
+    # background.primary từ chính file theme, nếu không band sáng sẽ bất ngờ
+    # chuyển thành navy.
+    if theme == "dark" and settings is not None:
         hex_v = settings.get("infographic.ai_full.navy_fallback")
         if isinstance(hex_v, str) and hex_v.strip():
             h = hex_v.strip().lstrip("#")
@@ -170,7 +334,7 @@ def _resolve_navy_fallback(settings=None) -> tuple[int, int, int]:
                     return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
                 except ValueError:
                     pass
-    return _DEFAULT_NAVY_FALLBACK
+    return theme_background
 
 
 def _luminance(rgb: tuple[float, float, float]) -> float:
@@ -292,6 +456,48 @@ def select_ai_size(ratio: str, *, settings=None) -> tuple[tuple[int, int], str]:
     return (w, h), reason
 
 
+def select_full_canvas_ai_size(
+    ratio: str,
+    *,
+    settings=None,
+) -> tuple[tuple[int, int], str]:
+    """Chọn size API đúng tỷ lệ full-canvas và lớn hơn khung xuất bản.
+
+    Không trừ TOP_PAD/bottom band vì overlay mới nằm trực tiếp trên ảnh.
+    """
+    configured = (
+        settings.get(f"infographic.ai_full.generation_size.{ratio}")
+        if settings is not None
+        else None
+    )
+    if isinstance(configured, (list, tuple)) and len(configured) == 2:
+        size = (int(configured[0]), int(configured[1]))
+    else:
+        size = _DEFAULT_FULL_CANVAS_AI_SIZES.get(ratio)
+    if size is None:
+        raise ValueError(f"Không có generation_size full-canvas cho tỷ lệ {ratio!r}")
+    width, height = size
+    if width % 16 or height % 16:
+        raise ValueError(
+            f"generation_size {ratio}={width}x{height} phải chia hết cho 16"
+        )
+    final_w, final_h = _resolve_final_size(ratio, settings)
+    if width < final_w or height < final_h:
+        raise ValueError(
+            f"generation_size {ratio}={width}x{height} nhỏ hơn final_size "
+            f"{final_w}x{final_h}; hậu kỳ không được phóng to ảnh"
+        )
+    ratio_delta = abs(width / height - final_w / final_h)
+    if ratio_delta > 0.002:
+        raise ValueError(
+            f"generation_size {ratio} lệch tỷ lệ final_size (delta={ratio_delta:.4f})"
+        )
+    return size, (
+        f"full-canvas {width}x{height}, đúng tỷ lệ {ratio}, lớn hơn final "
+        f"{final_w}x{final_h}; chỉ downscale, không crop/matting"
+    )
+
+
 def _logo_dimensions(logo_path: Path, *, final_w: int, final_h: int) -> tuple[int, int, int]:
     """Trả (logo_w, logo_h, pad) -- pad = lề 4% chiều rộng (>=16px), logo_h =
     6% chiều cao cuối (>=24px), logo_w suy từ tỷ lệ khung file logo thật.
@@ -387,7 +593,8 @@ def _median_color(region: Image.Image) -> tuple[int, int, int]:
 
 
 def _band_color(matted: Image.Image, *, navy_fallback: tuple[int, int, int],
-                lum_threshold: float = 140.0, sample_rows: int = 20) -> tuple[tuple[int, int, int], str]:
+                lum_threshold: float = 140.0, sample_rows: int = 20,
+                fallback_source: str = "fallback_navy") -> tuple[tuple[int, int, int], str]:
     """Màu band = màu TRUNG VỊ của `sample_rows` hàng pixel CUỐI CÙNG của ảnh
     AI ĐÃ RESIZE (matted) -- mối nối band/ảnh AI trở nên VÔ HÌNH vì cùng màu.
     Tối (luminance <= `lum_threshold`) -> dùng thẳng ("matched"). Sáng (band
@@ -399,7 +606,7 @@ def _band_color(matted: Image.Image, *, navy_fallback: tuple[int, int, int],
     color = _median_color(region)
     if _luminance(color) <= lum_threshold:
         return color, "matched"
-    return navy_fallback, "fallback_navy"
+    return navy_fallback, fallback_source
 
 
 # =====================================================================
@@ -491,23 +698,31 @@ def _block_height(lines: list[str], line_h: int, *, line_gap_ratio: float = 0.28
 def _layout_band_text(
     draw: ImageDraw.ImageDraw, *, source_text: str, disclaimer_text: str,
     band_w: int, nominal_band_h: int, margin_x: int, font_path: str | None,
+    text_scale: float = _SECONDARY_TEXT_SCALE,
 ) -> dict:
     """Đo (KHÔNG vẽ) khối "Nguồn:" (trái) + disclaimer (phải) -- font =
-    0.30*nominal_band_h (Yêu cầu Lead, A2 Bước 4), tối đa 2 dòng/khối, KHÔNG
+    0.30*nominal_band_h*text_scale, tối đa 2 dòng/khối, KHÔNG
     BAO GIỜ dưới `_MIN_READABLE_FONT_SIZE`. Trả dict đủ để vẽ + `band_h` THẬT
     (>= nominal_band_h -- band TỰ NỚI nếu chữ cần nhiều chỗ hơn dải danh
     nghĩa, KHÔNG BAO GIỜ cắt chữ)."""
-    base_size = max(int(nominal_band_h * 0.30), _MIN_READABLE_FONT_SIZE)
-    half_w = band_w // 2
+    base_size = max(
+        int(nominal_band_h * 0.30 * text_scale),
+        _MIN_READABLE_FONT_SIZE,
+    )
     gap = max(int(band_w * 0.02), 8)
-    side_max_w = max(half_w - margin_x - gap // 2, 10)
+    usable_w = max(band_w - 2 * margin_x - gap, 20)
+    # Nguồn đã được rút về tên trang nên cần ít chỗ hơn disclaimer pháp lý.
+    # Chia 34/66 giúp disclaimer ngắn chuẩn nằm gọn hơn, nhưng tổng hai vùng
+    # vẫn không thể giao nhau vì đều được đo trong cùng `usable_w`.
+    source_max_w = max(round(usable_w * 0.34), 10)
+    disclaimer_max_w = max(usable_w - source_max_w, 10)
 
     src_lines, src_font, src_line_h = _fit_block(
-        source_text, base_size=base_size, max_width=side_max_w, draw=draw,
+        source_text, base_size=base_size, max_width=source_max_w, draw=draw,
         bold=True, font_path=font_path, max_lines=2,
     )
     dis_lines, dis_font, dis_line_h = _fit_block(
-        disclaimer_text, base_size=base_size, max_width=side_max_w, draw=draw,
+        disclaimer_text, base_size=base_size, max_width=disclaimer_max_w, draw=draw,
         bold=False, font_path=font_path, max_lines=2,
     )
     src_h = _block_height(src_lines, src_line_h)
@@ -517,7 +732,8 @@ def _layout_band_text(
     band_h = max(nominal_band_h, needed_h)
 
     return {
-        "band_h": band_h, "margin_x": margin_x, "side_max_w": side_max_w,
+        "band_h": band_h, "margin_x": margin_x,
+        "source_max_w": source_max_w, "disclaimer_max_w": disclaimer_max_w,
         "src_lines": src_lines, "src_font": src_font, "src_line_h": src_line_h, "src_h": src_h,
         "dis_lines": dis_lines, "dis_font": dis_font, "dis_line_h": dis_line_h, "dis_h": dis_h,
     }
@@ -549,7 +765,9 @@ def _draw_right_block(draw: ImageDraw.ImageDraw, lines: list[str], font: ImageFo
 # =====================================================================
 
 def _paste_logo(overlay: Image.Image, *, logo_path: Path, top_pad_px: int, pad: int,
-                logo_w: int, logo_h: int, final_w: int) -> bool:
+                logo_w: int, logo_h: int, final_w: int,
+                left_ratio: float = 0.04, vertical_bias: float = 0.50,
+                neutral_tint: tuple[int, int, int] | None = None) -> bool:
     """SỬA LỖI ĐẶC TẢ (2026-07-24, Phần A SỬA 2) -- dán ẢNH logo thật vào
     TOP_PAD (dải màu band phẳng ở đỉnh, matting Bước 2 đã bảo đảm đủ chỗ:
     top_pad_px >= logo_h + 2*pad) THAY VÌ đè lên ảnh AI tràn viền mép trên
@@ -557,9 +775,10 @@ def _paste_logo(overlay: Image.Image, *, logo_path: Path, top_pad_px: int, pad: 
     khi luminance nền sáng >110) trở nên VÔ NGHĨA, XOÁ HẲN cơ chế (không còn
     field log `scrim_applied`).
 
-    Căn trái lề `pad`, căn giữa theo chiều dọc trong dải TOP_PAD. ASSERT bbox
-    logo nằm TRỌN trong TOP_PAD -- raise ValueError nếu vi phạm (BUG cấu
-    trúc, xem A2 SỬA 2). Trả True nếu đã dán (ghi vào log JSON
+    Vị trí đọc từ config qua `left_ratio`/`vertical_bias`. Với Light, phần
+    bạc gần trắng có thể được nhuộm bằng `neutral_tint` lấy từ token màu
+    theme. ASSERT bbox logo nằm TRỌN trong TOP_PAD -- raise ValueError nếu vi
+    phạm (BUG cấu trúc, xem A2 SỬA 2). Trả True nếu đã dán (ghi vào log JSON
     `logo_in_pad`), False nếu không có/lỗi file logo (KHÔNG raise, giữ hành
     vi cũ: thiếu logo không được chặn cả pipeline)."""
     if not logo_path.exists():
@@ -571,8 +790,9 @@ def _paste_logo(overlay: Image.Image, *, logo_path: Path, top_pad_px: int, pad: 
         logger.warning("brand_stamp: lỗi mở file logo '%s' (%s) -- bỏ qua, KHÔNG đóng dấu logo.", logo_path, e)
         return False
 
-    logo_x = pad
-    logo_y = max((top_pad_px - logo_h) // 2, 0)
+    logo_x = max(round(final_w * left_ratio), 16)
+    available_y = max(top_pad_px - logo_h, 0)
+    logo_y = min(max(round(available_y * vertical_bias), 0), available_y)
 
     if logo_y + logo_h > top_pad_px or logo_x + logo_w > final_w:
         raise ValueError(
@@ -581,8 +801,229 @@ def _paste_logo(overlay: Image.Image, *, logo_path: Path, top_pad_px: int, pad: 
         )
 
     logo_resized = logo.resize((logo_w, logo_h), Image.LANCZOS)
+    if neutral_tint is not None:
+        # Logo gốc có phần bạc gần trắng: rõ trên Dark nhưng chìm trên Light.
+        # Chỉ nhuộm pixel gần trung tính; phần Gold có chroma cao được giữ
+        # nguyên. Màu nhuộm lấy từ theme text.primary, không hardcode.
+        pixels = []
+        for red, green, blue, alpha in logo_resized.getdata():
+            chroma = max(red, green, blue) - min(red, green, blue)
+            if alpha and chroma < 38:
+                pixels.append((*neutral_tint, alpha))
+            else:
+                pixels.append((red, green, blue, alpha))
+        logo_resized.putdata(pixels)
     overlay.alpha_composite(logo_resized, (logo_x, logo_y))
     return True
+
+
+def overlay_brand_full_canvas(
+    png_bytes: bytes,
+    *,
+    ratio: str,
+    theme: str | None = None,
+    source: str = "",
+    disclaimer: str = "",
+    logo_path: str | Path | None = None,
+    font_path: str | None = None,
+    settings=None,
+) -> tuple[bytes, dict]:
+    """Overlay brand trực tiếp lên ảnh GPT full-canvas.
+
+    Không crop, matting, padding hoặc tạo khung con. Đây là implementation
+    Pillow của lớp trình bày tất định mà HTML/webapp sẽ sở hữu sau này.
+    """
+    theme, theme_id, palette = load_theme_palette(theme)
+    style = _resolve_overlay_style()
+    colors = {
+        "background": _hex_to_rgb(palette["background.primary"]),
+        "primary": _hex_to_rgb(palette["text.primary"]),
+        "secondary": _hex_to_rgb(palette["text.secondary"]),
+        "gold": _hex_to_rgb(palette["accent.gold"]),
+    }
+    source_image = Image.open(io.BytesIO(png_bytes)).convert("RGB")
+    source_w, source_h = source_image.size
+    final_w, final_h = _resolve_final_size(ratio, settings)
+    ratio_delta = abs(source_w / source_h - final_w / final_h)
+    # Fixture 1x1 của test cũ không đại diện response API. Ảnh thật phải đúng
+    # tỷ lệ để resize không làm biến dạng nội dung.
+    if min(source_w, source_h) > 64 and ratio_delta > 0.01:
+        raise ValueError(
+            f"Ảnh GPT {source_w}x{source_h} lệch tỷ lệ {ratio} "
+            f"(delta={ratio_delta:.4f}); không crop hoặc ép méo để cứu."
+        )
+    from .postflight import expand_bbox, scan_text_collision
+
+    content_canvas = source_image.resize((final_w, final_h), Image.LANCZOS).convert("RGBA")
+
+    body_font_px = max(round(final_w * style["image_body_font_ratio"]), 1)
+    metadata_font_px = max(
+        round(body_font_px * style["metadata_font_scale"]),
+        _MIN_READABLE_FONT_SIZE,
+    )
+    source_font = _find_font(metadata_font_px, bold=True, extra_path=font_path)
+    disclaimer_font = _find_font(metadata_font_px, bold=False, extra_path=font_path)
+    source_short = _shorten_source(source)
+    source_text = f"Nguồn: {source_short}" if source_short else ""
+    side = max(round(final_w * style["metadata_side_ratio"]), 12)
+    bottom = max(round(final_h * style["metadata_bottom_ratio"]), 8)
+    gap = max(round(final_w * 0.025), 16)
+    measure = ImageDraw.Draw(content_canvas)
+    source_w_px = round(measure.textlength(source_text, font=source_font)) if source_text else 0
+    disclaimer_w_px = (
+        round(measure.textlength(disclaimer, font=disclaimer_font)) if disclaimer else 0
+    )
+    if source_w_px + disclaimer_w_px + gap > final_w - 2 * side:
+        raise ValueError(
+            "Nguồn + disclaimer không vừa một dòng ở metadata_font_scale="
+            f"{style['metadata_font_scale']:.2f}; không tự thu nhỏ dưới tỷ lệ user chốt."
+        )
+    probe = source_text or disclaimer or "Ag"
+    probe_font = source_font if source_text else disclaimer_font
+    text_bbox = measure.textbbox((0, 0), probe, font=probe_font)
+    line_h = max(text_bbox[3] - text_bbox[1], metadata_font_px)
+    v_pad = max(round(line_h * 0.45), 7)
+    proposed_line_bottom = final_h - bottom
+    proposed_text_y = proposed_line_bottom - line_h - text_bbox[1]
+    proposed_backdrop_top = max(proposed_text_y - v_pad, 0)
+    metadata_scan_bbox = (0, proposed_backdrop_top, final_w, final_h)
+    metadata_scan = scan_text_collision(content_canvas, metadata_scan_bbox)
+    metadata_extended = bool(metadata_scan["detected"])
+    metadata_extension_px = 0
+    output_h = final_h
+    if metadata_extended:
+        metadata_extension_px = max(
+            final_h - proposed_backdrop_top,
+            line_h + 2 * v_pad + bottom,
+        )
+        output_h = final_h + metadata_extension_px
+    try:
+        canvas = Image.new("RGBA", (final_w, output_h), (*colors["background"], 255))
+    except (MemoryError, OSError) as exc:
+        raise ValueError(
+            "METADATA_GUARDRAIL_FAIL: phát hiện chữ trong band đáy nhưng không "
+            f"nới được canvas thêm {metadata_extension_px}px"
+        ) from exc
+    canvas.alpha_composite(content_canvas, (0, 0))
+    overlay = Image.new("RGBA", (final_w, output_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    resolved_logo_path = Path(logo_path) if logo_path else _DEFAULT_LOGO_PATH
+    logo_in_bounds = False
+    logo_bbox: list[int] | None = None
+    if resolved_logo_path.is_file():
+        logo = Image.open(resolved_logo_path).convert("RGBA")
+        logo_h = max(round(final_h * style["logo_height_ratio"]), 24)
+        logo_w = max(round(logo.width * logo_h / max(logo.height, 1)), 1)
+        logo_margin = max(round(final_w * style["logo_right_ratio"]), 16)
+        logo_x = final_w - logo_margin - logo_w
+        logo_y = max(round(final_h * style["logo_top_ratio"]), 12)
+        if logo_x < 0 or logo_y + logo_h > final_h:
+            raise ValueError("Logo full-canvas vượt biên ảnh; kiểm tra config infographic_overlay")
+        right_bbox = (logo_x, logo_y, logo_x + logo_w, logo_y + logo_h)
+        right_scan_bbox = expand_bbox(
+            right_bbox, image_size=(final_w, final_h), ratio=0.20
+        )
+        right_scan = scan_text_collision(
+            content_canvas, right_scan_bbox, min_aligned=2
+        )
+        left_scan = {"detected": False, "component_count": 0}
+        logo_position = "top_right"
+        logo_scrim_applied = False
+        logo_collision_warning = ""
+        if right_scan["detected"]:
+            logo_x = logo_margin
+            left_bbox = (logo_x, logo_y, logo_x + logo_w, logo_y + logo_h)
+            left_scan_bbox = expand_bbox(
+                left_bbox, image_size=(final_w, final_h), ratio=0.20
+            )
+            left_scan = scan_text_collision(
+                content_canvas, left_scan_bbox, min_aligned=2
+            )
+            logo_position = "top_left"
+            if left_scan["detected"]:
+                logo_scrim_applied = True
+                logo_collision_warning = (
+                    "Chữ được phát hiện ở cả góc trên phải và trên trái; "
+                    "logo dùng góc trên trái kèm scrim."
+                )
+                draw.rounded_rectangle(
+                    left_scan_bbox,
+                    radius=max(round(logo_h * 0.18), 4),
+                    fill=(*colors["background"], 220),
+                )
+        logo = logo.resize((logo_w, logo_h), Image.LANCZOS)
+        if theme in ("bright", "light"):
+            pixels = []
+            for red, green, blue, alpha in logo.getdata():
+                chroma = max(red, green, blue) - min(red, green, blue)
+                pixels.append(
+                    (*colors["primary"], alpha)
+                    if alpha and chroma < 38
+                    else (red, green, blue, alpha)
+                )
+            logo.putdata(pixels)
+        overlay.alpha_composite(logo, (logo_x, logo_y))
+        logo_bbox = [logo_x, logo_y, logo_x + logo_w, logo_y + logo_h]
+        logo_in_bounds = True
+    else:
+        logo_position = "none"
+        logo_scrim_applied = False
+        logo_collision_warning = ""
+        right_scan = {"detected": False, "component_count": 0}
+        left_scan = {"detected": False, "component_count": 0}
+
+    line_bottom = output_h - bottom
+    text_y = line_bottom - line_h - text_bbox[1]
+    backdrop_top = final_h if metadata_extended else max(text_y - v_pad, 0)
+    draw.rectangle(
+        (0, backdrop_top, final_w, output_h),
+        fill=(*colors["background"], round(style["metadata_backdrop_opacity"])),
+    )
+    if source_text:
+        draw.text((side, text_y), source_text, font=source_font, fill=(*colors["gold"], 255))
+    if disclaimer:
+        draw.text(
+            (final_w - side - disclaimer_w_px, text_y),
+            disclaimer,
+            font=disclaimer_font,
+            fill=(*colors["secondary"], 255),
+        )
+
+    rendered = Image.alpha_composite(canvas, overlay).convert("RGB")
+    out = io.BytesIO()
+    rendered.save(out, format="PNG")
+    return out.getvalue(), {
+        "overlay_mode": "full_canvas_deterministic",
+        "theme": theme,
+        "theme_id": theme_id,
+        "source_wh": [source_w, source_h],
+        "final_wh": [final_w, output_h],
+        "content_wh": [final_w, final_h],
+        "ratio_delta": round(ratio_delta, 6),
+        "content_crop_px": 0,
+        "matting_applied": False,
+        "scale_x": round(final_w / source_w, 4),
+        "scale_y": round(final_h / source_h, 4),
+        "logo_position": logo_position,
+        "logo_bbox": logo_bbox,
+        "logo_in_bounds": logo_in_bounds,
+        "logo_right_text_scan": right_scan,
+        "logo_left_text_scan": left_scan,
+        "logo_scrim_applied": logo_scrim_applied,
+        "logo_collision_warning": logo_collision_warning,
+        "metadata_font_px": metadata_font_px,
+        "image_body_font_px": body_font_px,
+        "metadata_font_scale": style["metadata_font_scale"],
+        "metadata_backdrop_top_px": backdrop_top,
+        "metadata_text_scan": metadata_scan,
+        "metadata_extended": metadata_extended,
+        "metadata_extension_px": metadata_extension_px,
+        "metadata_guardrail": "PASS_EXTENDED" if metadata_extended else "PASS_CLEAR",
+        "source_text": source_text,
+        "disclaimer_text": disclaimer,
+        "metadata_single_line": True,
+    }
 
 
 # =====================================================================
@@ -593,7 +1034,7 @@ def stamp_brand(
     png_bytes: bytes,
     *,
     ratio: str,
-    theme: str = "dark",
+    theme: str | None = None,
     wordmark: str = "FVA CAPITAL",
     source: str = "",
     disclaimer: str = "",
@@ -620,8 +1061,14 @@ def stamp_brand(
     band_h, band_color, band_color_source, ai_size_requested, ai_size_reason,
     ratio_inner, ratio_ai, scale_factor, top_pad_px, side_pad_px, logo_in_pad,
     source_text, disclaimer_lines, final_wh}."""
-    theme = theme if theme in _THEME_COLORS else "dark"
-    colors = _THEME_COLORS[theme]
+    theme, theme_id, palette = load_theme_palette(theme)
+    stamp_style = _resolve_stamp_style()
+    colors = {
+        "bg": _hex_to_rgb(palette["background.primary"]),
+        "text": _hex_to_rgb(palette["text.primary"]),
+        "muted": _hex_to_rgb(palette["text.secondary"]),
+        "gold": _hex_to_rgb(palette["accent.gold"]),
+    }
 
     im = Image.open(io.BytesIO(png_bytes)).convert("RGB")
 
@@ -642,8 +1089,17 @@ def stamp_brand(
     fit = _matte(im, target_w=final_w, target_h=final_h - nominal_band_h, min_top_pad=min_top_pad)
 
     # --- Bước 3: màu band tự khớp -------------------------------------------
-    navy_fallback = _resolve_navy_fallback(settings)
-    band_color, band_color_source = _band_color(fit["resized"], navy_fallback=navy_fallback)
+    navy_fallback = _resolve_navy_fallback(
+        theme=theme,
+        theme_background=colors["bg"],
+        settings=settings,
+    )
+    fallback_source = "fallback_navy" if theme == "dark" else "fallback_theme_background"
+    band_color, band_color_source = _band_color(
+        fit["resized"],
+        navy_fallback=navy_fallback,
+        fallback_source=fallback_source,
+    )
 
     # --- Bước 4: đo nội dung band (CÓ THỂ khiến band nới cao hơn danh nghĩa) -
     margin_x = max(int(final_w * 0.04), 12)
@@ -654,6 +1110,7 @@ def stamp_brand(
     layout = _layout_band_text(
         probe_draw, source_text=source_text, disclaimer_text=disclaimer,
         band_w=final_w, nominal_band_h=nominal_band_h, margin_x=margin_x, font_path=font_path,
+        text_scale=stamp_style["footer_text_scale"],
     )
     band_h = layout["band_h"]
     if band_h != nominal_band_h:
@@ -661,7 +1118,11 @@ def stamp_brand(
         # -- khung xuất bản cố định, phần hy sinh là diện tích ảnh AI, KHÔNG
         # BAO GIỜ là chữ bị cắt).
         fit = _matte(im, target_w=final_w, target_h=final_h - band_h, min_top_pad=min_top_pad)
-        band_color, band_color_source = _band_color(fit["resized"], navy_fallback=navy_fallback)
+        band_color, band_color_source = _band_color(
+            fit["resized"],
+            navy_fallback=navy_fallback,
+            fallback_source=fallback_source,
+        )
 
     # --- Dựng canvas: nền màu band PHỦ TOÀN BỘ (2c -- phần dư lấp màu band) -
     # rồi dán ảnh AI (đã fit-inside) đúng vị trí: đáy khớp band, ngang giữa --
@@ -682,7 +1143,10 @@ def stamp_brand(
 
     # --- Bước 5: logo trong TOP_PAD (KHÔNG scrim -- nền phẳng, xem SỬA 2) ---
     logo_in_pad = _paste_logo(overlay, logo_path=resolved_logo_path, top_pad_px=fit["top_pad_px"],
-                              pad=pad, logo_w=logo_w, logo_h=logo_h, final_w=final_w)
+                              pad=pad, logo_w=logo_w, logo_h=logo_h, final_w=final_w,
+                              left_ratio=stamp_style["logo_left_ratio"],
+                              vertical_bias=stamp_style["logo_vertical_bias"],
+                              neutral_tint=colors["text"] if theme == "light" else None)
 
     stamped = Image.alpha_composite(canvas.convert("RGBA"), overlay).convert("RGB")
     out = io.BytesIO()
@@ -691,6 +1155,8 @@ def stamp_brand(
     ai_size, ai_size_reason = select_ai_size(ratio, settings=settings)
 
     log = {
+        "theme": theme,
+        "theme_id": theme_id,
         "cropped_top_px": cropped_top_px,
         "band_h": band_h,
         "band_color": "#%02x%02x%02x" % band_color,
@@ -703,6 +1169,10 @@ def stamp_brand(
         "top_pad_px": fit["top_pad_px"],
         "side_pad_px": fit["side_pad_px"],
         "logo_in_pad": logo_in_pad,
+        "logo_left_ratio": stamp_style["logo_left_ratio"],
+        "logo_vertical_bias": stamp_style["logo_vertical_bias"],
+        "source_font_px": getattr(layout["src_font"], "size", None),
+        "disclaimer_font_px": getattr(layout["dis_font"], "size", None),
         "source_text": source_text,
         "disclaimer_lines": layout["dis_lines"],
         "final_wh": [final_w, final_h],

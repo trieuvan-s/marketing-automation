@@ -26,6 +26,7 @@ get_all_values, batch_update, v.v.) tự động retry khi Google Sheets API tr�
 from __future__ import annotations
 
 import random
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -288,6 +289,224 @@ EXECUTE_VALUES = (EXECUTE_WAITING, EXECUTE_RUNNING, EXECUTE_DONE,
 # KHÔNG BAO GIỜ ghi mới 2 giá trị này.
 EXECUTE_PENDING_STATES = frozenset({EXECUTE_WAITING, EXECUTE_FAILED, "", "RUN"})
 
+# NHÃN TIẾNG VIỆT HIỂN THỊ TRÊN SHEET (Trung 02/08, B2 02/08 — chuyển vào
+# CONFIG) — CHỈ đổi CHỮ NGƯỜI NHÌN THẤY khi ghi vào ô (context_row()/
+# content_row() dưới), TUYỆT ĐỐI KHÔNG đổi hằng số nội bộ (EXECUTE_NEEDS_
+# HUMAN/"SKIPPED"/5 mã SKIP/RENDER_RANKING_GUARD vẫn tiếng Anh xuyên suốt
+# store/produce_from_sheet.py/WriterOutcome/test — token đó KHÔNG được đọc
+# ngược từ Sheet, xem ingest_context_from_sheet()/ingest_content_from_sheet():
+# Execute/Status/Notes là MỘT CHIỀU store->Sheet, dịch ở đây an toàn tuyệt
+# đối, không làm gãy logic nào). Bảng dịch THẬT đọc từ config/settings.yaml
+# (khối `labels.vi`, B2 — đổi chữ hiển thị sau này CHỈ sửa config, không đụng
+# code); 2 dict dưới đây CHỈ còn là MẶC ĐỊNH LÙI MƯỢT khi thiếu config/khối
+# `labels.vi` (không nổ, cùng nếp `_visible_rows()` trong store/sync_service.py).
+_DEFAULT_VI_STATUS_LABELS = {
+    "SKIPPED": "BỎ QUA",
+    EXECUTE_NEEDS_HUMAN: "Cần người review lại nội dung",
+}
+_DEFAULT_VI_NOTES_CODE_LABELS = {
+    "SOURCE_BROKEN": "Nguồn lỗi",
+    "DUPLICATE": "Trùng lặp",
+    "BOILERPLATE": "Nội dung mẫu/điều hướng",
+    "NO_USABLE_CONTENT": "Không có nội dung dùng được",
+    "FORMAT_MISMATCH": "Không hợp định dạng",
+    "RENDER_RANKING_GUARD": "Cảnh báo cắt theo mức ưu tiên",
+}
+
+# VIỆC 3 (2026-08-03, Lead) — cột Type (CONTENT) PHẢI khớp CHÍNH XÁC (kể cả
+# hoa/thường + gạch nối) với giá trị dropdown cột Output Type (CONTEXT) —
+# Lead sẽ dựng data validation cho cột Type dùng CHUNG danh sách 4 giá trị
+# này. Khoá STORE (content_type, "long_article"...) giữ NGUYÊN tiếng Anh chữ
+# thường — bảng dưới CHỈ đổi CHỮ NGƯỜI NHÌN THẤY (cùng cơ chế _vi_labels() với
+# sheet_status/notes_codes, KHÔNG dựng đường ánh xạ thứ hai). Đọc từ config
+# `labels.vi.content_type`; dict dưới CHỈ là mặc định lùi mượt.
+_DEFAULT_VI_TYPE_LABELS = {
+    "article": "Article",
+    "long_article": "Long-Article",
+    "infographic": "Infographic",
+    "video": "Video",
+}
+
+
+def _vi_labels(section: str, default: dict[str, str]) -> dict[str, str]:
+    """Đọc bảng dịch tiếng Việt từ config/settings.yaml (`labels.vi.<section>`)
+    — lùi về `default` (hard-code) khi thiếu file/khối/section, hoặc bất kỳ
+    lỗi đọc config nào (KHÔNG để 1 lỗi cấu hình làm gãy hiển thị Sheet).
+    Không cache: settings.yaml hiếm khi đọc lại (chỉ lúc render, không phải
+    hot path), và test hay đổi config giữa các lần gọi trong CÙNG tiến trình."""
+    try:
+        from .config import load_settings
+        table = load_settings().get(f"labels.vi.{section}")
+        if isinstance(table, dict) and table:
+            return {str(k): str(v) for k, v in table.items()}
+    except Exception:   # noqa: BLE001 -- cấu hình hỏng/thiếu KHÔNG được chặn hiển thị
+        pass
+    return default
+
+
+def _display_status(value: str) -> str:
+    """Giá trị NỘI BỘ (tiếng Anh, dùng xuyên suốt code/test) -> nhãn tiếng
+    Việt hiển thị trên Sheet (Status/Execute — khớp NGUYÊN VĂN cả ô). Giá trị
+    không có trong bảng dịch (Waiting/Running.../DONE/FAILED/ERROR/PENDING/
+    APPROVE/REJECT...) giữ NGUYÊN — Trung chỉ yêu cầu dịch đúng 2 nhãn này,
+    không mở rộng thêm."""
+    return _vi_labels("sheet_status", _DEFAULT_VI_STATUS_LABELS).get(value, value)
+
+
+def _display_type(value: str) -> str:
+    """VIỆC 3 — content_type STORE (article/long_article/infographic/video) ->
+    nhãn hiển thị cột Type (CONTENT), PHẢI khớp TỪNG KÝ TỰ với giá trị dropdown
+    Output Type (OUTPUT_TYPE_VALUES, trừ "AUTO" — Type không bao giờ ghi
+    "AUTO" cho 1 loại thật, xem VIỆC 4 cho ca gộp AUTO riêng). Giá trị lạ
+    (không có trong bảng) giữ NGUYÊN — không đoán/không nổ."""
+    return _vi_labels("content_type", _DEFAULT_VI_TYPE_LABELS).get(value, value)
+
+
+def raw_content_type(display_value: str) -> str:
+    """CHIỀU NGƯỢC của _display_type() — nhãn hiển thị Sheet ("Article",
+    "Long-Article"...) -> content_type khoá STORE ("article", "long_article"...).
+
+    SỬA LỖI THẬT (2026-08-03, phát hiện qua ca Lead duyệt Gate 2 xong không
+    thấy sinh AssetPath) — VIỆC 3 đổi content_row() ghi NHÃN hiển thị vào cột
+    Type, nhưng store/sync_service.ingest_content_from_sheet() vẫn đọc THẲNG
+    giá trị ô này làm content_type để tra content_output/content_status ->
+    "Article" != "article" -> read_content_output() trả None -> TOÀN BỘ dòng
+    bị bỏ qua ÂM THẦM (continue) — Gate 2/Social Link/Posting Status không
+    còn ingest được NỮA, không riêng gì 2 bài cụ thể. Hàm này CHUNG với
+    _display_type() (đọc CÙNG bảng config, không dựng ánh xạ thứ hai). Giá
+    trị lạ (không khớp nhãn nào đã biết) giữ NGUYÊN — coi như đã là khoá
+    thô (dữ liệu cũ trước VIỆC 3, hoặc gõ tay)."""
+    table = _vi_labels("content_type", _DEFAULT_VI_TYPE_LABELS)
+    reverse = {label: raw for raw, label in table.items()}
+    return reverse.get(display_value, display_value)
+
+
+def _display_notes(notes: str) -> str:
+    """Dịch mã lý do SKIP/RENDER_RANKING_GUARD xuất hiện TRONG Notes (dạng
+    "MÃ: phần còn lại..." — scripts/produce_from_sheet._channel_skip_reason —
+    HOẶC "MÃ (chi tiết...): phần còn lại..." — scripts/render_production_
+    assets._append_notes/_ranking_guard_note, mã KHÔNG đứng sát dấu ":") sang
+    tiếng Việt — so khớp CHÍNH XÁC theo TỪNG mã đã biết (word-boundary, không
+    đoán mẫu chung "chuỗi HOA:"), giữ NGUYÊN phần câu còn lại (đã viết tiếng
+    Việt sẵn). Mã lạ (không có trong bảng dịch) giữ nguyên tiếng Anh — không
+    mở rộng ngoài B3. Notes rỗng -> trả y nguyên."""
+    if not notes:
+        return notes
+    labels = _vi_labels("notes_codes", _DEFAULT_VI_NOTES_CODE_LABELS)
+    for code, label in labels.items():
+        notes = re.sub(rf"\b{re.escape(code)}\b", label, notes)
+    return notes
+
+
+# VIỆC 5 (2026-08-03, Lead) — Notes viết cho BIÊN TẬP VIÊN, không phải kỹ sư.
+# _display_notes() ở trên (B3) chỉ thay 1 TOKEN, để nguyên phần câu kỹ thuật
+# xung quanh ("NO_USABLE_CONTENT: Brief đọc được nguồn nhưng KHÔNG tìm thấy...
+# xem agents/brief.BriefResult.brief_status" — vẫn lộ tên hàm/module). Bộ dưới
+# đây THAY THẾ CẢ CÂU cho các thông điệp kỹ thuật đã biết, đọc bảng câu từ
+# `labels.vi.notes_messages` (CHUNG cơ chế _vi_labels() — KHÔNG dựng đường ánh
+# xạ thứ hai). Áp DUY NHẤT tại content_row() — điểm ghi Notes RA SHEET, KHÔNG
+# đụng store (mã lý do gốc giữ nguyên tiếng Anh, xem docstring content_row()).
+_DEFAULT_VI_NOTES_MESSAGES = {
+    "NO_USABLE_CONTENT_FULL": "Bài gốc không có nội dung thực chất (trang điều hướng hoặc trang trống)",
+    "INFOGRAPHIC_NOT_WORTHY": "Nội dung không đủ dữ liệu để dựng thành Infographic có ý nghĩa",
+    "CONTENT_UNITS_EMPTY": "Không trích được dữ kiện nào từ bài gốc",
+    "EMPTY_SECTIONS": "Không dựng được bài viết từ nguồn này",
+    "INSUFFICIENT_SCENES": "Nguồn không đủ chất liệu để dựng video",
+    "RENDER_RANKING_GUARD_FULL": "Ảnh tự thêm số thứ tự xếp hạng không có trong dữ liệu",
+    "SOURCE_BROKEN_FULL": "Không đọc được nguồn",
+    "DUPLICATE_FULL": "Trùng với bài đã xử lý",
+    "BOILERPLATE_FULL": "Trang không có nội dung thực chất",
+    "GENERIC_FALLBACK": "Không xử lý được, cần kiểm tra lại",
+}
+
+# Nhãn TỰ NHIÊN (không phải Type-column) dùng riêng cho câu "Nội dung không
+# phù hợp để làm {loại}" (VIỆC 5, Router-decline) — cố ý KHÁC _DEFAULT_VI_TYPE_
+# LABELS (đó là nhãn CỘT, viết hoa; đây là danh từ giữa câu, viết thường).
+_ROUTER_DECLINE_CHANNEL_VI = {"article": "bài viết", "infographic": "infographic", "video": "video"}
+
+# Marker (chuỗi con NHẬN DIỆN thông điệp kỹ thuật GỐC) -> khoá tra trong
+# `labels.vi.notes_messages`/_DEFAULT_VI_NOTES_MESSAGES. Kiểm THEO THỨ TỰ,
+# khớp ĐẦU TIÊN thắng — marker càng đặc hiệu càng đứng TRƯỚC (vd BOILERPLATE
+# đứng SAU NO_USABLE_CONTENT vì _NO_USABLE_CONTENT_REASON có nhắc "BOILERPLATE
+# dùng chung mã này" trong câu, dễ khớp nhầm nếu đảo thứ tự).
+_NOTES_WHOLE_MARKERS = (
+    ("nghi nguồn boilerplate/trang điều hướng/placeholder", "NO_USABLE_CONTENT_FULL"),
+    ("KHÔNG đạt ngưỡng dựng Infographic", "INFOGRAPHIC_NOT_WORTHY"),
+    ("content_units[] rỗng (Brief chưa trích được số liệu", "CONTENT_UNITS_EMPTY"),
+    ("Composer trả sections rỗng", "EMPTY_SECTIONS"),
+    ("Composer trả scenes rỗng", "INSUFFICIENT_SCENES"),
+    ("KHÔNG bịa cảnh đệm cho đủ số", "INSUFFICIENT_SCENES"),
+    ("RENDER_RANKING_GUARD", "RENDER_RANKING_GUARD_FULL"),
+    ("SOURCE_BROKEN", "SOURCE_BROKEN_FULL"),
+    ("DUPLICATE", "DUPLICATE_FULL"),
+    ("BOILERPLATE", "BOILERPLATE_FULL"),
+)
+
+# Guardrail (agents/production.apply_guardrails) — số bịa/không khớp nguồn,
+# CÓ giá trị động (vd "28%") nên KHÔNG thể map tĩnh qua notes_messages.
+_PCT_MISMATCH_RE = re.compile(r"Số liệu không thấy trong evidence/background:\s*([^\s;|]+)")
+# Router từ chối 1 tuyến (produce_from_sheet._channel_skip_reason) — GIỮ
+# rationale (đã là câu tiếng Việt tự nhiên do Router/LLM viết), chỉ thay PHẦN
+# ĐẦU kỹ thuật ("FORMAT_MISMATCH: Router quyết định tuyến X không hợp tin
+# này:") bằng câu nghiệp vụ + nêu rõ loại (yêu cầu 5.2: "nêu rõ loại nào").
+_ROUTER_DECLINE_RE = re.compile(
+    r"FORMAT_MISMATCH: Router quyết định tuyến (article|infographic|video) không hợp tin này:\s*(.*)",
+    re.S)
+
+# LƯỚI AN TOÀN 5.6 — mã lý do MỚI phát sinh sau này (chưa có trong bảng ánh
+# xạ trên) KHÔNG được lọt thuật ngữ kỹ thuật ra Sheet. Nếu sau khi áp hết các
+# luật trên mà câu VẪN còn 1 trong các dấu hiệu này -> thay bằng GENERIC_
+# FALLBACK + ghi log cảnh báo (KHÔNG raise, notes vẫn phải hiển thị được).
+_BANNED_NOTES_MARKERS = (
+    "content_units[]", "facts[]", "brief_status", "evidence/background",
+    "schema", "payload", "JSON", "NO_USABLE_CONTENT", "FORMAT_MISMATCH",
+    ".py:", "agents/", "scripts/", "None", "null",
+)
+
+
+def _translate_notes_clause(clause: str, messages: dict) -> str:
+    """1 mệnh đề Notes (đã tách theo "; ") -> câu nghiệp vụ tiếng Việt. Mệnh đề
+    KHÔNG khớp mẫu kỹ thuật nào (vd rationale Router đã viết sẵn tiếng Việt tự
+    nhiên, hoặc câu "Output Type không chọn tuyến...") -> giữ NGUYÊN — hàm này
+    CHỈ thay thứ ĐÃ XÁC NHẬN là kỹ thuật, không đụng câu đã sạch."""
+    m = _PCT_MISMATCH_RE.search(clause)
+    if m:
+        return f"Số liệu {m.group(1)} trong bài không có trong nguồn"
+    m = _ROUTER_DECLINE_RE.match(clause.strip())
+    if m:
+        loai = _ROUTER_DECLINE_CHANNEL_VI.get(m.group(1), m.group(1))
+        rationale = m.group(2).strip()
+        return f"Nội dung không phù hợp để làm {loai}. {rationale}" if rationale else \
+               f"Nội dung không phù hợp để làm {loai}."
+    for marker, key in _NOTES_WHOLE_MARKERS:
+        if marker in clause:
+            return messages.get(key, _DEFAULT_VI_NOTES_MESSAGES[key])
+    return clause
+
+
+def _display_notes_business(notes: str) -> str:
+    """VIỆC 5 — Notes hiển thị Sheet, ngôn ngữ NGHIỆP VỤ cho biên tập viên
+    (thay _display_notes() làm điểm ghi CHÍNH tại content_row(), xem đó).
+    Tách theo "; " (dấu nối compliance_issues/_channel_skip_reason dùng xuyên
+    suốt code) -> dịch TỪNG mệnh đề -> lưới an toàn 5.6 (mã lạ chưa có bảng
+    -> câu chung + log cảnh báo, KHÔNG lộ kỹ thuật) -> nối lại. Notes rỗng ->
+    trả y nguyên."""
+    if not notes:
+        return notes
+    messages = _vi_labels("notes_messages", _DEFAULT_VI_NOTES_MESSAGES)
+    out_clauses = []
+    for clause in (c.strip() for c in notes.split("; ")):
+        if not clause:
+            continue
+        translated = _translate_notes_clause(clause, messages)
+        if any(term in translated for term in _BANNED_NOTES_MARKERS):
+            print(f"[CẢNH BÁO] Notes còn thuật ngữ kỹ thuật sau khi dịch (mã lý do mới, "
+                 f"chưa có trong labels.vi.notes_messages) -> dùng câu chung. Gốc: {clause!r}")
+            translated = messages.get("GENERIC_FALLBACK", _DEFAULT_VI_NOTES_MESSAGES["GENERIC_FALLBACK"])
+        out_clauses.append(translated)
+    return "; ".join(out_clauses)
+
+
 CONTEXT_HEADER = ["Timestamp", "Hot%", "Score", "Group", "Topic", "Context", "Hook",
                   "Source", GATE1_COL, OUTPUT_TYPE_COL, "Execute", "tickers", "Notes", "TopicKey"]
 # "engine" TẠM (haiku|sonnet|mock) — đối chiếu model NÀO thực sự chạy cho mỗi
@@ -430,7 +649,7 @@ _LEGACY_TABS = {"Sheet1", "ResearchReview", "ContentReview"}
 # TOÀN nhất, giống default context_row() tự đặt) — KHÔNG khôi phục được lựa
 # chọn APPROVE/REJECT thật đã mất (phải sửa tay nếu gặp lại, như phiên này).
 _MIGRATE_DEFAULTS: dict[str, dict[str, str]] = {
-    "CONTEXT": {"Execute": EXECUTE_WAITING, "TopicKey": "", GATE1_COL: "PENDING"},
+    "CONTEXT": {"Execute": "", "TopicKey": "", GATE1_COL: "PENDING"},
     "CONTENT": {GATE2_COL: "PENDING", "TopicKey": "",
                "Facts": "", "AssetPath": "", "Social Link": "",
                GATE3_COL: "PENDING", "Posting Status": ""},
@@ -651,12 +870,18 @@ def _source_cell(source_url: str, other_sources: list[str] | None) -> str:
 def context_row(*, title: str, hook_line: str, source_url: str, score: int, hot_pct: float,
                 topic: str = "", group: str = "", other_sources: list[str] | None = None,
                 tickers: list[str] | None = None, status: str = "PENDING",
-                execute: str = EXECUTE_WAITING, topic_key: str = "", ts: str | None = None,
+                execute: str = "", topic_key: str = "", ts: str | None = None,
                 notes: str = "", output_type: list[str] | None = None) -> list[str]:
     """Một hàng CONTEXT ĐÚNG thứ tự CONTEXT_HEADER (Timestamp đầu tiên).
 
-    Status mặc định PENDING, Execute mặc định rỗng (tự chuyển RUN khi Status=
-    APPROVE — xem SheetsBoard.sync_approve_execute_flags). score/hot_pct do
+    Status mặc định PENDING, Execute mặc định rỗng "" — SỬA LỖI THẬT (2026-08-03,
+    Lead): docstring này TỪ TRƯỚC đã ghi "Execute mặc định rỗng" nhưng tham số
+    `execute` lại default = EXECUTE_WAITING ("Waiting") — dòng vừa crawl, CHƯA
+    qua Gate 1 hiện "Waiting" như thể đã xếp hàng, sai. Chuỗi trạng thái ĐÚNG
+    (VIỆC Execute 2026-08-03): "" (mới crawl, chưa duyệt) -> Waiting (Gate 1
+    APPROVE, đã vào hàng đợi) -> Running... (Composer đang xử lý) -> DONE/
+    FAILED (xong)/NEEDS_HUMAN (cần người xem lại nội dung — GIỮ, không gộp
+    vào FAILED). score/hot_pct do
     curation.enrich tính; Group/Topic từ classify (nhóm marketing). Source gộp
     url bài chính + các báo khác đưa cùng tin (dedup chéo nguồn, xem review_to_sheet).
     Publisher/Field KHÔNG ghi ra sheet (chỉ dùng nội bộ cho cluster/tiebreak).
@@ -687,7 +912,7 @@ def context_row(*, title: str, hook_line: str, source_url: str, score: int, hot_
         _source_cell(source_url, other_sources),                  # Source (gộp báo khác)
         status,                                                     # Status (Duyệt Context)
         ", ".join(output_type or ["AUTO"]),                          # Output Type (mặc định hiển thị AUTO)
-        execute,                                                      # Execute
+        _display_status(execute),                                     # Execute (nhãn VI cho NEEDS_HUMAN)
         ", ".join(tickers or []),                                     # tickers
         notes,                                                         # Notes
         topic_key,                                                      # TopicKey (Lớp 5, cuối)
@@ -720,8 +945,8 @@ def content_row(*, context: str, type_: str, status: str, output: str,
     người tự đổi qua dropdown khi thật sự duyệt asset. Xem
     test_no_machine_write_path_touches_gate3 (tests/test_pipeline.py) — khoá
     bất biến này VĨNH VIỄN, KHÔNG thêm lại tham số gate3 ở đây dù có lý do gì."""
-    return [ts or _now_ddmmyyyy(), context, type_, status, output, notes, approve,
-           topic_key, facts, asset_path, "", "PENDING", ""]
+    return [ts or _now_ddmmyyyy(), context, _display_type(type_), _display_status(status), output,
+           _display_notes_business(notes), approve, topic_key, facts, asset_path, "", "PENDING", ""]
 
 
 def facts_to_json(facts: list) -> str:
@@ -741,7 +966,10 @@ def facts_from_json(raw: str) -> list:
     flag — an toàn, không bịa fact để lấp chỗ trống)."""
     import json as _json
 
-    from .models import Fact
+    # Fact -> ContentUnit (đổi tên dứt điểm, feature/content-units-complete) --
+    # sửa DUY NHẤT import này để module không vỡ, KHÔNG đổi hành vi/tên hàm
+    # facts_to_json/facts_from_json (sheets_board.py off-limits theo RANH GIỚI).
+    from .models import ContentUnit
 
     raw = (raw or "").strip()
     if not raw:
@@ -756,9 +984,9 @@ def facts_from_json(raw: str) -> list:
     for item in data:
         if isinstance(item, dict):
             try:
-                out.append(Fact(**item))
+                out.append(ContentUnit(**item))
             except TypeError:
-                continue   # field lạ/thiếu -> bỏ qua fact đó, KHÔNG vỡ cả danh sách
+                continue   # field lạ/thiếu -> bỏ qua đơn vị đó, KHÔNG vỡ cả danh sách
     return out
 
 
@@ -995,9 +1223,14 @@ def content_rows_for_render(header: list[str], rows: list[list[str]], *,
         i = idx.get(col)
         return row[i].strip() if i is not None and i < len(row) else ""
 
+    # VIỆC 3 (2026-08-03) — cột Type trên Sheet giờ ghi NHÃN hiển thị
+    # (_display_type(), vd "Infographic") chứ không còn content_type thô
+    # ("infographic") — so khớp qua CÙNG hàm dịch, giữ API `type_` NHẬN content_
+    # type thô như trước (KHÔNG đổi chữ ký, tránh phá caller/test hiện có).
+    want = _display_type(type_)
     out: list[dict] = []
     for offset, row in enumerate(rows):
-        if g(row, "type") != type_:
+        if g(row, "type") != want:
             continue
         out.append({
             "row": offset + 2,
@@ -1265,6 +1498,15 @@ _COL_WIDTH_DEFAULT = 140
 _WRAP_COLS = {"title", "hook", "notes", "message", "payload", "context",
               "output", "prompt", "template", "label", "keywords", "sources"}
 
+# CHIỀU CAO DÒNG DỮ LIỆU tab CONTENT (Trung 02/08, chốt lại sau khi đo THẬT
+# trên Sheet sản xuất — bản đầu 32px SAI: các dòng CONTENT lúc đó đang TỰ
+# GIÃN theo nội dung wrap, 67-84px, cố định 32px sẽ THU NHỎ lại, ngược ý
+# muốn "dễ đọc hơn"). Quyết định cuối: 1 chiều cao CỐ ĐỊNH duy nhất trong dải
+# 45-60px cho MỌI dòng dữ liệu (KHÔNG tự giãn theo nội dung nữa, kể cả dòng
+# dài) — người cần đọc trọn thì double-click mở rộng ô. CONTEXT giữ nguyên
+# mặc định Sheets (không set gì).
+_CONTENT_ROW_HEIGHT = 50
+
 
 def _rgb(hex_str: str) -> dict:
     h = hex_str.lstrip("#")
@@ -1397,20 +1639,27 @@ def _tab_requests(t: TabMeta) -> list[dict]:
                 "cell": {"userEnteredFormat": {"wrapStrategy": "WRAP"}},
                 "fields": "userEnteredFormat.wrapStrategy"}})
 
+    # 6b) Chiều cao dòng dữ liệu — CHỈ tab CONTENT nới cao hơn (xem
+    # _CONTENT_ROW_HEIGHT). CONTEXT không set gì -> giữ mặc định Sheets, không
+    # đổi hành vi cũ (Trung 02/08: chỉ CONTENT dài dòng cần khoảng đọc rộng hơn).
+    if t.name == "CONTENT" and fmt_rows > 1:
+        out.append({"updateDimensionProperties": {
+            "range": {"sheetId": sid, "dimension": "ROWS", "startIndex": 1, "endIndex": fmt_rows},
+            "properties": {"pixelSize": _CONTENT_ROW_HEIGHT}, "fields": "pixelSize"}})
+
     # 7) Data validation.
     if "enable" in low:  # SOURCES.Enable / PROMPTS.Enable -> checkbox
         c = low.index("enable")
         out.append(_set_validation(sid, 1, fmt_rows, c,
                                    {"condition": {"type": "BOOLEAN"}, "showCustomUi": True}))
-    if t.name == "CONTEXT" and _GATE1_KEY in low:  # -> dropdown quy trình duyệt (cổng 1)
-        # "DELETE" (2026-07-29, quyết định Lead) — XOÁ HẲN chủ đề khỏi DB lẫn
-        # Sheet. CHỈ có ở Gate 1: đây là cổng "chủ đề này có đáng làm không",
-        # nơi duy nhất hợp lý để loại bỏ hoàn toàn. Gate 2/3 nói về SẢN PHẨM
-        # của chủ đề đã nhận, xoá ở đó không có nghĩa gì.
-        # KHÔNG HOÀN TÁC ĐƯỢC — muốn giữ lịch sử thì dùng REJECT.
-        c = low.index(_GATE1_KEY)
-        out.append(_set_validation(sid, 1, fmt_rows, c,
-                                   _one_of_list(["PENDING", "APPROVE", "REJECT", "DELETE"])))
+    # Duyệt Context (Gate 1, CONTEXT): CỐ Ý KHÔNG ghi setDataValidation (Trung
+    # 02/08, cùng lý do Output Type dưới đây) — Trung đã tự bật tay Dropdown
+    # (Chip, chỉ 1 giá trị) qua UI Sheets; mọi lần code ghi validation đè lên
+    # (kể cả plain ONE_OF_LIST) sẽ HẠ CẤP/reset cấu hình chip đó mỗi lượt
+    # --setup. Giá trị hợp lệ (PENDING/APPROVE/REJECT/DELETE, xem "DELETE" —
+    # 2026-07-29, quyết định Lead: xoá hẳn chủ đề, KHÔNG HOÀN TÁC ĐƯỢC, chỉ có
+    # ở Gate 1) vẫn được kiểm ở tầng xử lý (ingest_context_from_sheet), không
+    # cần chặn ở Sheet.
     # Output Type: CỐ Ý KHÔNG ghi setDataValidation (2026-07-28).
     # Ô này là MULTI-SELECT do Lead bật tay qua UI Sheets — API v4 không tạo
     # được kiểu ô đó, nên mọi lần ghi validation từ code đều HẠ CẤP nó về
@@ -1442,14 +1691,12 @@ def _tab_requests(t: TabMeta) -> list[dict]:
         # có validation sót từ lần chèn cột trước đây.
         c = low.index("type")
         out.append({"setDataValidation": {"range": _grid_range(sid, 1, fmt_rows, c, c + 1)}})
-    if t.name == "CONTENT" and _GATE2_KEY in low:  # -> dropdown quy trình duyệt (cổng 2)
-        c = low.index(_GATE2_KEY)
-        out.append(_set_validation(sid, 1, fmt_rows, c,
-                                   _one_of_list(["PENDING", "APPROVE", "REJECT"])))
-    if t.name == "CONTENT" and _GATE3_KEY in low:  # Phase 1.3 -> dropdown quy trình duyệt (cổng 3, duyệt ASSET)
-        c = low.index(_GATE3_KEY)
-        out.append(_set_validation(sid, 1, fmt_rows, c,
-                                   _one_of_list(["PENDING", "APPROVE", "REJECT"])))
+    # Duyệt Content (Gate 2) / Duyệt Public (Gate 3), CONTENT: CỐ Ý KHÔNG ghi
+    # setDataValidation (Trung 02/08, cùng lý do Duyệt Context/Output Type ở
+    # trên) — Trung đã tự bật tay Dropdown (Chip, chỉ 1 giá trị) cho CẢ 2 cột
+    # này qua UI Sheets; ghi validation đè lên mỗi lượt --setup sẽ reset mất.
+    # Giá trị hợp lệ (PENDING/APPROVE/REJECT) vẫn được kiểm ở tầng xử lý
+    # (ingest_content_from_sheet), không cần chặn ở Sheet.
     if t.name == "CONTENT" and "posting status" in low:
         # TRẠNG THÁI ĐĂNG — CỜ MÁY-GHI của khâu publish (2026-07-29, chốt ngữ
         # nghĩa với Lead). Bộ giá trị khớp nếp Execute (Running.../DONE/FAILED):
@@ -1488,7 +1735,7 @@ def _tab_requests(t: TabMeta) -> list[dict]:
             out.append(_text_eq_rule(sid, c, 1, fmt_rows, "RUN", _C_RUN))
             out.append(_text_eq_rule(sid, c, 1, fmt_rows, EXECUTE_DONE, _C_APPROVE))
             out.append(_text_eq_rule(sid, c, 1, fmt_rows, EXECUTE_FAILED, _C_FAILED))
-            out.append(_text_eq_rule(sid, c, 1, fmt_rows, EXECUTE_NEEDS_HUMAN, _C_REJECT))
+            out.append(_text_eq_rule(sid, c, 1, fmt_rows, _display_status(EXECUTE_NEEDS_HUMAN), _C_REJECT))
         if "score" in low:
             c = low.index("score")
             out.append(_score_scale_rule(sid, c, 1, fmt_rows))

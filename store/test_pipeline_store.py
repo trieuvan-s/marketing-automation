@@ -78,11 +78,18 @@ def test_list_approved_topics_includes_raw_fields(db_path):
 
 
 def test_existing_content_keys(db_path):
-    ps.write_content_output("topic-1", "article", {"body": "a"}, db_path=db_path)
-    ps.write_content_output("topic-1", "infographic", {"body": "b"}, db_path=db_path)
-    ps.write_content_output("topic-2", "video", {"body": "c"}, db_path=db_path)
+    """SỬA LỖI THẬT (2026-08-03, ca "Nafoods Group") — existing_content_keys()
+    giờ CHỈ tính status="DONE" là "đã xong" (ERROR/NEEDS_HUMAN cho phép Gate1
+    re-approve thử lại thật, xem docstring hàm). Test này seed status=DONE
+    tường minh để phản ánh đúng ý nghĩa mới, KHÔNG còn test rỗng-status-cũng-
+    tính-là-xong."""
+    ps.write_content_output("topic-1", "article", {"body": "a", "status": "DONE"}, db_path=db_path)
+    ps.write_content_output("topic-1", "infographic", {"body": "b", "status": "DONE"}, db_path=db_path)
+    ps.write_content_output("topic-2", "video", {"body": "c", "status": "DONE"}, db_path=db_path)
+    ps.write_content_output("topic-3", "article", {"body": "d", "status": "ERROR"}, db_path=db_path)
     keys = ps.existing_content_keys(db_path=db_path)
     assert keys == {("topic-1", "article"), ("topic-1", "infographic"), ("topic-2", "video")}
+    assert ("topic-3", "article") not in keys, "ERROR KHÔNG tính là đã xong -- phải cho phép thử lại"
 
 
 def test_write_content_status_merges_fields_per_content_type(db_path):

@@ -34,8 +34,9 @@ TUYỆT ĐỐI (không có nhánh "chừa chỗ dán bản đồ thật" vì ch�
 Khi Lead cấp asset chuẩn, bổ sung `_MAP_ASSET_PATH` + logic dán riêng.
 
 Theme-rules (Bước 2): copy nguyên văn từ content-rules/ (sibling, KHÔNG theo
-git) vào `prompts/themes/FVA_Infographic_Theme_{Dark,Light}.md` — MỘT NGUỒN,
-không sửa nội dung khi đọc. `information_score`/layout selector implement lại
+git) vào `prompts/themes/Infographic_Theme_{Dark,Light}.md` (đổi tên bỏ tiền
+tố "FVA_" — Phase A dọn `prompts/`, 2026-07-3x, KHÔNG đổi nội dung) — MỘT
+NGUỒN, không sửa nội dung khi đọc. `information_score`/layout selector implement lại
 Ở CODE (tất định) theo đúng công thức trong theme file, KHÔNG để LLM tự đoán
 layout — cùng triết lý "AI hiểu ở Brief, CODE phán ở Guardrail" xuyên suốt dự
 án này.
@@ -51,8 +52,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
+from PIL import Image
 
-from .brand_stamp import select_ai_size as _select_ai_size
+from .brand_stamp import (
+    load_theme_palette,
+    resolve_theme_name,
+    select_ai_size as _select_ai_size,
+    select_full_canvas_ai_size as _select_full_canvas_ai_size,
+)
 
 logger = logging.getLogger("twmkt.render.ai_full")
 
@@ -60,7 +67,7 @@ _DEFAULT_MODEL = "gpt-image-2"
 _DEFAULT_QUALITY = "medium"
 _API_URL = "https://api.openai.com/v1/images/generations"
 _TIMEOUT_S = 120
-_PROMPT_VERSION = "v5"  # v5 (2026-07-23, Phần B — ĐẢO HƯỚNG P0): BỎ HẲN mọi ngôn ngữ "chừa dải trống"/safe-zone (kể cả v3/v4 -- lý do model coi danh từ trong prompt là vật thể cần vẽ, xem module docstring) -- thay bằng bố cục DƯƠNG TÍNH (mô tả cái CÓ) + negative prompt tường minh (border/frame/colored strip/cream-beige band...). Vị trí brand giờ do brand_stamp.py (khung cứng đáy) lo tuyệt đối, KHÔNG còn phụ thuộc AI. Bỏ luôn quy tắc 4b (lược bớt mục thừa) -- Phần C cắt mật độ Ở CODE TRƯỚC khi build prompt, AI không còn thấy nội dung thừa để phải tự quyết định lược. v4 (2026-07-23): rào cứng 2 dải an toàn (ĐÃ THAY). v3 (2026-07-22): cấm khoảng trống lớn giữa dải đỉnh và tiêu đề (ĐÃ THAY). v2 (2026-07-21): cấm AI vẽ "Nguồn:"/source text -- v1 để lọt AI tự vẽ trùng dòng nguồn với brand_stamp.py, xem báo cáo
+_PROMPT_VERSION = "v12"  # v12: primary-subject precedence for photo relevance.
 
 # Bước 4.3 — sinh ĐÚNG size cho từng tỷ lệ (KHÔNG crop sau bởi API — nhờ
 # brand_stamp.matting() fit-inside/contain, xem SỬA LỖI ĐẶC TẢ 2026-07-24 --
@@ -81,6 +88,9 @@ _PROMPT_VERSION = "v5"  # v5 (2026-07-23, Phần B — ĐẢO HƯỚNG P0): BỎ
 RATIO_SIZES: dict[str, tuple[int, int]] = {
     ratio: _select_ai_size(ratio)[0] for ratio in ("1:1", "4:5", "9:16")
 }
+FULL_CANVAS_RATIO_SIZES: dict[str, tuple[int, int]] = {
+    ratio: _select_full_canvas_ai_size(ratio)[0] for ratio in RATIO_SIZES
+}
 
 # 2026-07-23 (Phần B1, yêu cầu Lead) -- CẤM CỨNG mọi từ/cụm liên quan "chừa
 # trống"/safe-zone trong prompt gửi API, kể cả vô tình gõ lại khi sửa prompt
@@ -93,8 +103,8 @@ _BANNED_PROMPT_WORDS = [
 ]
 
 _THEME_FILES = {
-    "dark": "FVA_Infographic_Theme_Dark.md",
-    "light": "FVA_Infographic_Theme_Light.md",
+    "dark": "Infographic_Theme_Dark.md",
+    "light": "Infographic_Theme_Light.md",
 }
 
 # Trích ĐÚNG design token màu từ 2 theme file (tránh nhúng nguyên 300 dòng
@@ -128,13 +138,18 @@ def compute_information_score(spec: dict) -> int:
     title/subtitle/hero/market/highlights/related/priority/source) chưa có 2
     trường đó. Tất định, không LLM đoán."""
     hero_count = len(spec.get("hero") or [])
-    metric_count = len(spec.get("market") or [])
+    metric_count = len(spec.get("main") or spec.get("market") or [])
     highlight_count = len(spec.get("highlights") or [])
     return hero_count * 2 + metric_count + highlight_count
 
 
 def select_layout(score: int, *, theme: str = "dark") -> str:
-    """Layout selector THEO ĐÚNG bảng ngưỡng Theme-rules §7. Khi tài liệu ghi
+    """Legacy selector giữ tương thích cho caller/test cũ.
+
+    Renderer production không còn gọi selector này: Dark/Light chỉ cung cấp
+    màu, không quyết định bố cục.
+
+    Layout selector THEO ĐÚNG bảng ngưỡng Theme-rules §7. Khi tài liệu ghi
     "X hoặc Y" (ngưỡng chồng lấn 2 lựa chọn hợp lệ) -- CHỌN 1 CỐ ĐỊNH để tất
     định (Dark: D3 thay vì "D2 hoặc D3" vì D3 khớp infographic nhiều chỉ số
     hơn D2 vốn dành cho ảnh+chuyện ngang vai; Light: L3 thay vì "L2 hoặc L3"
@@ -158,8 +173,15 @@ def select_layout(score: int, *, theme: str = "dark") -> str:
     return "SPLIT_TO_CAROUSEL"
 
 
-def _theme_dir() -> Path:
-    return Path(__file__).resolve().parents[3] / "prompts" / "themes"
+def select_content_layout(score: int) -> str:
+    """Layout trung lập theme, thích ứng một hoặc nhiều cụm dữ liệu."""
+    if score <= 6:
+        return "EDITORIAL_HERO"
+    if score <= 12:
+        return "FLEX_DATA_RAIL"
+    if score <= 20:
+        return "FLEX_MODULAR_GRID"
+    return "SPLIT_TO_SERIES"
 
 
 def _check_prompt_banned_words(prompt: str) -> None:
@@ -177,7 +199,210 @@ def _check_prompt_banned_words(prompt: str) -> None:
         )
 
 
-def build_ai_full_prompt(spec: dict, *, theme: str = "dark", ratio: str = "4:5") -> str:
+def _content_unit_kinds(spec: dict) -> list[str]:
+    units = spec.get("content_units")
+    if not isinstance(units, list):
+        return []
+    kinds: list[str] = []
+    for unit in units:
+        if not isinstance(unit, dict):
+            continue
+        value = (
+            unit.get("type")
+            or unit.get("kind")
+            or unit.get("unit_type")
+            or unit.get("content_type")
+        )
+        if value:
+            kinds.append(str(value).strip().casefold())
+    return kinds
+
+
+def _qualitative_visual_direction(spec: dict) -> str:
+    """Renderer direction only; không đổi schema hoặc diễn giải lại facts."""
+    kinds = _content_unit_kinds(spec)
+    if not kinds:
+        return ""
+    process = sum(
+        kind in {"process", "timeline", "procedure", "workflow", "sequence"}
+        for kind in kinds
+    )
+    relation = sum(
+        kind in {"relation", "relationship", "state_change", "before_after"}
+        for kind in kinds
+    )
+    if process > len(kinds) / 2:
+        return (
+            "Nội dung chủ yếu là process/timeline: trình bày các bước theo đúng "
+            "trình tự có trong content_units. Ảnh chụp vẫn là neo thị giác; sơ "
+            "đồ bước chỉ là lớp thông tin, không biến thành cartoon/vector."
+        )
+    if relation > len(kinds) / 2:
+        return (
+            "Nội dung chủ yếu là relation/state_change: trình bày quan hệ giữa "
+            "các bên hoặc trạng thái trước–sau đúng như content_units. Ảnh chụp "
+            "vẫn là neo thị giác; sơ đồ chỉ là lớp thông tin."
+        )
+    return ""
+
+
+def _photo_subject_direction(spec: dict) -> str:
+    """Select a concrete, non-evidentiary photo context from supplied text."""
+    fragments: list[str] = []
+    primary_fragments: list[str] = []
+    for key in ("title", "subtitle"):
+        value = spec.get(key)
+        if value:
+            fragments.append(str(value))
+            if key == "title":
+                primary_fragments.append(str(value))
+    for key in ("hero", "main", "market", "highlights", "related"):
+        value = spec.get(key)
+        if not isinstance(value, list):
+            continue
+        for item in value:
+            if isinstance(item, dict):
+                fragments.extend(
+                    str(item[field])
+                    for field in ("label", "value", "text")
+                    if item.get(field)
+                )
+            elif item:
+                fragments.append(str(item))
+    priority = spec.get("priority")
+    if isinstance(priority, dict):
+        for level in ("primary", "secondary", "minor"):
+            values = priority.get(level)
+            if isinstance(values, list):
+                fragments.extend(str(item) for item in values if item)
+                if level == "primary":
+                    primary_fragments.extend(str(item) for item in values if item)
+    text = " ".join(fragments).casefold()
+    primary_text = " ".join(primary_fragments).casefold()
+
+    categories = (
+        (
+            ("msr", "masan high-tech", "khai khoáng", "khoáng sản", "vật liệu"),
+            "a real industrial materials or mineral-processing environment "
+            "(machinery, processing equipment, raw materials), without any "
+            "company logo or claim that it is the named company's facility",
+        ),
+        (
+            ("cảng", "port", "logistics", "container", "vận tải biển"),
+            "a real port and logistics environment with cranes, containers or "
+            "cargo operations, without identifiable company branding",
+        ),
+        (
+            ("viễn thông", "telecom", "cáp quang", "data center", "dữ liệu"),
+            "a real telecommunications or data-center environment with fiber "
+            "and network equipment, without identifiable company branding",
+        ),
+        (
+            ("fed", "ngân hàng trung ương", "chính sách tiền tệ", "lạm phát"),
+            "a real macroeconomic-analysis workspace focused on interest-rate "
+            "policy documents and a generic rates chart, without official "
+            "seals, identifiable people or invented numeric chart labels",
+        ),
+        (
+            ("điện", "năng lượng", "power", "điện lực", "thủy điện"),
+            "a real power-generation or energy-operations environment, without "
+            "identifiable company branding or a claimed event location",
+        ),
+        (
+            (
+                "cổ phiếu",
+                "chứng khoán",
+                "ptkt",
+                "hỗ trợ",
+                "kháng cự",
+                "thị trường",
+            ),
+            "a real securities trading workstation or market-analysis desk "
+            "with a generic price chart, without invented ticker data",
+        ),
+        (
+            ("ngân hàng", "bank", "tín dụng", "lãi suất"),
+            "a real banking or financial-operations environment, without "
+            "identifiable company branding",
+        ),
+        (
+            ("bất động sản", "vinhomes", "đô thị", "chung cư"),
+            "a real contemporary urban-development or residential construction "
+            "environment, without identifiable project branding",
+        ),
+        (
+            ("trang sức", "pnj", "vàng bạc", "kim hoàn"),
+            "a real jewelry craftsmanship or retail-display environment, "
+            "without identifiable company branding",
+        ),
+        (
+            ("thực phẩm", "meatlife", "nông nghiệp", "chăn nuôi"),
+            "a real food-production or agricultural environment, without "
+            "identifiable company branding",
+        ),
+    )
+    selected = next(
+        (
+            direction
+            for keywords, direction in categories
+            if any(keyword in primary_text for keyword in keywords)
+        ),
+        None,
+    )
+    if selected is None:
+        selected = next(
+            (
+                direction
+                for keywords, direction in categories
+                if any(keyword in text for keyword in keywords)
+            ),
+            None,
+        )
+    if selected is None:
+        selected = (
+            "a concrete real-world environment directly represented by the "
+            "primary labels in the JSON; do not fall back to business people, "
+            "an office lobby or a city skyline merely to signal 'business'"
+        )
+    return (
+        "PHOTO SUBJECT ANCHOR: use "
+        + selected
+        + ". The photograph must explain the subject at first glance, not just "
+        "match its general business mood. Treat it as generic contextual "
+        "imagery, never as evidence of the named event, company or location."
+    )
+
+
+def _spec_for_image_prompt(spec: dict) -> tuple[dict, list[str]]:
+    """Omit intentionally empty optional blocks before calling the image model.
+
+    An absent block must not be named in the prompt: image models can treat even
+    a negative mention as an object to draw.  Only the two optional presentation
+    blocks covered by the Composer contract are omitted; all factual fields are
+    preserved verbatim.
+    """
+    prompt_spec = dict(spec)
+    omitted: list[str] = []
+    for key in ("subtitle", "related"):
+        value = prompt_spec.get(key)
+        is_empty = (
+            value is None
+            or isinstance(value, (list, tuple, dict, set)) and not value
+            or isinstance(value, str) and not value.strip()
+        )
+        if key in prompt_spec and is_empty:
+            prompt_spec.pop(key)
+            omitted.append(key)
+    return prompt_spec, omitted
+
+
+def build_ai_full_prompt(
+    spec: dict,
+    *,
+    theme: str | None = None,
+    ratio: str = "4:5",
+    postflight_instruction: str = "",
+) -> str:
     """BƯỚC 1 kết luận: JSON THÔ thắng -- KHÔNG bọc qua LLM diễn giải lại nội
     dung. Prompt = JSON spec (serialize thẳng, giữ NGUYÊN mọi field) + ĐÚNG
     các chỉ dẫn AN TOÀN bắt buộc. KHÔNG thêm mô tả bố cục/diễn giải nội dung
@@ -188,49 +413,80 @@ def build_ai_full_prompt(spec: dict, *, theme: str = "dark", ratio: str = "4:5")
     hàm này KHÔNG tự cắt/đếm mục, chỉ mô tả bố cục DƯƠNG TÍNH + negative
     prompt, KHÔNG còn nói bất kỳ hình thức "chừa chỗ" nào (xem
     `_check_prompt_banned_words`, module docstring)."""
-    theme = theme if theme in _THEME_COLORS else "dark"
-    colors = _THEME_COLORS[theme]
+    theme, theme_id, colors = load_theme_palette(
+        theme,
+        content_type=spec.get("content_type"),
+    )
     score = compute_information_score(spec)
-    layout_id = select_layout(score, theme=theme)
+    layout_id = select_content_layout(score)
 
-    spec_json_str = json.dumps(spec, ensure_ascii=False, indent=2)
-    bg_desc = "dark navy" if theme == "dark" else "warm light cream"
+    prompt_spec, _omitted_empty_blocks = _spec_for_image_prompt(spec)
+    spec_json_str = json.dumps(prompt_spec, ensure_ascii=False, indent=2)
+    if theme == "bright":
+        visual_direction = """
+Bright Editorial: nền trắng sáng đến ivory rất nhạt, có ánh xanh trời nhẹ.
+Tiêu đề navy trang trọng, số quan trọng màu gold ấm, nội dung charcoal; phân
+vùng bằng đường navy/gold mảnh và khoảng trắng. Dùng ngôn ngữ ảnh chụp
+photojournalistic tự nhiên làm neo thị giác chính, hòa vào header hoặc một
+phân khu lớn bằng chuyển sắc trắng. Thiết kế nghiêm túc, cao cấp, không
+vintage, không dashboard UI.
+""".strip()
+    else:
+        visual_direction = (
+            "Full-canvas editorial design using the configured theme colors; "
+            "clear hierarchy, natural photography and restrained dividers."
+        )
+    photo_subject_direction = _photo_subject_direction(spec)
+    photo_subject_block = f"\n8. {photo_subject_direction}"
+    qualitative_direction = _qualitative_visual_direction(spec)
+    qualitative_block = (
+        f"\n9. {qualitative_direction}" if qualitative_direction else ""
+    )
+    retry_block = (
+        "\n9. HẬU KIỂM LẦN TRƯỚC ĐÃ FAIL: "
+        + postflight_instruction.strip()
+        if postflight_instruction.strip()
+        else ""
+    )
 
     safety_block = f"""
 YÊU CẦU BẮT BUỘC (không thoả hiệp):
-1. KHÔNG vẽ bản đồ Việt Nam, sơ đồ địa lý, đường biên giới, hay bất kỳ hình
-   dạng lãnh thổ/quốc gia nào -- kể cả khi dữ liệu trên nhắc tên tỉnh/thành/
-   địa danh. Nếu cần thể hiện địa danh, chỉ dùng TÊN CHỮ, không vẽ hình bản đồ.
-2. KHÔNG tự vẽ logo, biểu tượng thương hiệu, chữ "FVA Capital"/"FVA CAPITAL",
-   dòng "Nguồn:"/"Source:" hay bất kỳ dạng ghi chú nguồn/miễn trừ trách nhiệm
-   nào (kể cả field "source" trong JSON dưới đây) -- các phần này do lớp khác
-   đóng dấu sau, KHÔNG phải việc của bước sinh ảnh này. Chỉ dùng field
-   "source" để BIẾT bối cảnh, KHÔNG vẽ nó thành chữ trên ảnh.
-3. Mọi hình minh hoạ (tàu, cảng, máy bay, nhà máy...) PHẢI là photorealistic
-   professional photography -- ảnh chụp thật hoặc quang thực chuyên nghiệp.
-   TUYỆT ĐỐI KHÔNG phong cách illustration, cartoon, vector art, hay 3D-render.
-4. BỐ CỤC (mô tả TRỰC TIẾP những gì xuất hiện trên ảnh, layout do CODE lo
-   vị trí brand SAU khi ảnh sinh ra -- xem trọn vẹn nội dung dưới đây):
-   Full-bleed {bg_desc} background extending past all four edges of the
-   frame -- the background fills the entire canvas edge-to-edge, top to
-   bottom, left to right, with no border or separate colored area anywhere.
-   The headline/title block begins around 12% of the height from the top
-   edge and starts immediately there.
-   Content (headline, data cards, highlights, illustration) fills the space
-   evenly all the way down the frame. The lowest content block ends around
-   85% of the height; below that point the background simply continues
-   uninterrupted to the bottom edge.
-5. TUYỆT ĐỐI TRÁNH (negative prompt): no border, no frame, no letterbox
-   bars, no colored strip along any edge, no cream or beige band, no
-   watermark, no logo, no signature, no caption at the bottom edge.
-6. Giữ NGUYÊN VĂN, chính xác tuyệt đối mọi số liệu và dấu tiếng Việt trong
-   JSON dưới đây -- không dịch, không làm tròn, không bịa thêm số.
+1. Dùng TOÀN BỘ canvas tỷ lệ {ratio} một cách tự nhiên. Không đặt infographic
+   vào poster/card/màn hình/khung con nhỏ hơn ảnh. Các phân khu hợp thành một
+   thiết kế liền mạch phủ toàn kích thước đầu ra. Full-bleed full-canvas:
+   no border around the entire canvas, no letterbox, no cream or beige band.
+2. {visual_direction}
+3. Góc trên-phải giữ thị giác nhẹ, không đặt chữ hoặc số cốt lõi tại đó để lớp
+   deterministic đặt logo. Mép dưới dùng nền ít chi tiết; không đặt dữ kiện
+   cốt lõi ở dòng cuối vì lớp deterministic đặt nguồn và disclaimer tại đó.
+   Đây không phải dải trống hay khung riêng: nền và hình ảnh vẫn tiếp tục tự
+   nhiên đến đủ bốn mép canvas.
+4. KHÔNG vẽ logo, thương hiệu, watermark, chữ "FVA Capital", nguồn, tác giả,
+   ngày đăng hoặc disclaimer. Field "source" chỉ cung cấp bối cảnh, không được
+   biến thành chữ trên ảnh.
+5. KHÔNG vẽ bản đồ, biên giới hoặc hình lãnh thổ. ƯU TIÊN HÌNH ẢNH THẬT:
+   dùng ngôn ngữ ảnh chụp báo chí/doanh nghiệp tự nhiên làm minh hoạ chính,
+   với ánh sáng, vật liệu, tỷ lệ, phối cảnh và môi trường giống ảnh máy ảnh.
+   Ít nhất một vùng ảnh quang thực đủ lớn để làm neo thị giác; không biến ảnh
+   chụp thành thumbnail nhỏ giữa các icon. Vì đầu vào không cung cấp tài sản
+   ảnh đã xác minh, đây phải là AI photorealistic mô tả BỐI CẢNH CHUNG, không
+   được giả làm ảnh bằng chứng của đúng sự kiện, nhân vật hay địa điểm cụ thể.
+   Không dựng gương mặt người thật, logo doanh nghiệp, biển hiệu có thương
+   hiệu hoặc công trình nhận diện cụ thể. Không cartoon, vector, flat
+   illustration, clip-art, icon-led composition hay 3D-render.
+6. Chỉ dùng ĐÚNG số liệu có trong JSON. KHÔNG tự cộng tổng, tính trung bình,
+   tỷ lệ, chênh lệch, xếp hạng hoặc sinh thêm bất kỳ con số nào. Nếu một phân
+   khu không có fact hỗ trợ thì bỏ phân khu, không điền số trang trí.
+7. Giữ nguyên dấu tiếng Việt và cách viết số, kể cả dấu phẩy thập phân.
+   Chỉ vẽ các khối có key trong JSON; không suy ra hoặc bổ sung khối nội dung
+   không có key trong JSON.
+{photo_subject_block}{qualitative_block}{retry_block}
 
-Theme: FVA Capital VN -- {"Dark Editorial" if theme == "dark" else "Light Research"}.
-Nền {colors["background"]}, chữ chính {colors["text_primary"]}, chữ phụ
-{colors["text_secondary"]}, Gold {colors["gold"]} CHỈ nhấn priority.primary
-(tối đa 1-2 mục), không phủ rộng. Tỷ lệ ảnh: {ratio}.
-Mức độ thông tin: {score} điểm -- bố cục tham chiếu: {layout_id}.
+Theme màu: {theme_id}. Nền {colors["background.primary"]}, vùng phụ
+{colors["background.secondary"]}, chữ chính {colors["text.primary"]}, chữ phụ
+{colors["text.secondary"]}, Gold {colors["accent.gold"]}. Theme chỉ cấp màu;
+bố cục thích ứng với số chủ thể thực tế. Mức thông tin: {score}; layout tham
+chiếu: {layout_id}.
 
 Dữ liệu Infographic (JSON, giữ nguyên mọi trường):
 {spec_json_str}
@@ -261,9 +517,14 @@ def _resolve_density_caps(ratio: str, settings=None) -> dict[str, int]:
     if settings is not None:
         cfg = settings.get(f"infographic.ai_full.density_caps.{ratio}")
         if isinstance(cfg, dict):
-            return {"market": int(cfg.get("market", 999)), "highlights": int(cfg.get("highlights", 999)),
+            return {"main": int(cfg.get("main", cfg.get("market", 999))), "highlights": int(cfg.get("highlights", 999)),
                     "related": int(cfg.get("related", 999))}
-    return dict(_DEFAULT_DENSITY_CAPS.get(ratio, _DEFAULT_DENSITY_CAPS["4:5"]))
+    legacy = _DEFAULT_DENSITY_CAPS.get(ratio, _DEFAULT_DENSITY_CAPS["4:5"])
+    return {
+        "main": legacy["market"],
+        "highlights": legacy["highlights"],
+        "related": legacy["related"],
+    }
 
 
 def _item_label(item) -> str:
@@ -282,8 +543,9 @@ def _priority_rank(label: str, priority: dict) -> int:
 
 
 def apply_density_cap(spec: dict, *, ratio: str, settings=None) -> tuple[dict, list[dict]]:
-    """C1-C3: cắt CÓ CHỦ ĐÍCH các block "market"/"highlights"/"related" vượt
+    """C1-C3: cắt CÓ CHỦ ĐÍCH các block "main"/"highlights"/"related" vượt
     giới hạn mật độ theo tỷ lệ (config infographic.ai_full.density_caps) --
+    chấp nhận alias legacy `market` để render dữ liệu cũ,
     GIỮ priority.primary + secondary TRƯỚC, cắt minor/chưa phân loại TRƯỚC
     (ổn định: trong cùng hạng ưu tiên, giữ đúng thứ tự xuất hiện gốc, KHÔNG
     xáo trộn). KHÔNG cắt/tràn im lặng -- trả kèm `truncated` (C3-C4):
@@ -295,8 +557,16 @@ def apply_density_cap(spec: dict, *, ratio: str, settings=None) -> tuple[dict, l
     capped = dict(spec)
     truncated: list[dict] = []
 
-    for block in ("market", "highlights", "related"):
-        cap = caps.get(block)
+    for logical_block in ("main", "highlights", "related"):
+        # v3.4 chốt tên `main`; `market` là contract legacy vẫn phải đọc được.
+        block = (
+            "main"
+            if logical_block == "main" and "main" in spec
+            else "market"
+            if logical_block == "main"
+            else logical_block
+        )
+        cap = caps.get(logical_block)
         items = spec.get(block) or []
         if not cap or len(items) <= cap:
             continue
@@ -310,6 +580,37 @@ def apply_density_cap(spec: dict, *, ratio: str, settings=None) -> tuple[dict, l
             "dropped_labels": [_item_label(items[i]) for i in dropped_idx],
         }
         truncated.append(entry)
+
+    # Density cap must remove every alternate path by which the image model
+    # could still see a dropped item. `priority` is prompt metadata, so keeping
+    # a dropped label there silently defeats the cap.
+    dropped_labels = {
+        label
+        for entry in truncated
+        for label in entry["dropped_labels"]
+    }
+    if dropped_labels and isinstance(priority, dict):
+        retained_labels = {
+            _item_label(item)
+            for block in ("hero", "main", "market", "highlights", "related")
+            for item in (capped.get(block) or [])
+        }
+        removed_refs = dropped_labels - retained_labels
+        capped_priority = {}
+        for key, values in priority.items():
+            if isinstance(values, list):
+                capped_priority[key] = [
+                    value for value in values if value not in removed_refs
+                ]
+            else:
+                capped_priority[key] = values
+        capped["priority"] = capped_priority
+        for entry in truncated:
+            entry["removed_priority_refs"] = [
+                label
+                for label in entry["dropped_labels"]
+                if label in removed_refs
+            ]
 
     return capped, truncated
 
@@ -333,8 +634,23 @@ def _save_manifest(manifest_path: Path, data: dict) -> None:
     manifest_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _cache_key(spec: dict, theme: str, ratio: str) -> str:
-    raw = json.dumps(spec, ensure_ascii=False, sort_keys=True) + "|" + theme + "|" + ratio + "|" + _PROMPT_VERSION
+def _cache_key(
+    spec: dict,
+    theme: str,
+    ratio: str,
+    postflight_instruction: str = "",
+) -> str:
+    raw = (
+        json.dumps(spec, ensure_ascii=False, sort_keys=True)
+        + "|"
+        + theme
+        + "|"
+        + ratio
+        + "|"
+        + _PROMPT_VERSION
+        + "|"
+        + postflight_instruction
+    )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
@@ -379,11 +695,12 @@ def _call_openai_images_api(prompt: str, *, api_key: str, model: str, size: str,
 def get_or_generate_raw_image(
     spec: dict,
     *,
-    theme: str = "dark",
+    theme: str | None = None,
     ratio: str = "4:5",
     regenerate: bool = False,
     assets_dir: str | Path | None = None,
     settings=None,
+    postflight_instruction: str = "",
 ) -> tuple[Path | None, str]:
     """Điểm vào DUY NHẤT gọi API thật -- cache-first (B3 CÙNG NẾP ai_background.py).
     Trả (đường_dẫn_PNG_THÔ_chưa_đóng_dấu_brand, cảnh_báo). Cache key theo
@@ -396,6 +713,7 @@ def get_or_generate_raw_image(
     thường, KHÔNG được nuốt thành warning."""
     if ratio not in RATIO_SIZES:
         return None, f"CẢNH BÁO: tỷ lệ '{ratio}' không hỗ trợ (chỉ {list(RATIO_SIZES)})."
+    theme = resolve_theme_name(theme, content_type=spec.get("content_type"))
 
     if assets_dir is None:
         from ..config import data_path
@@ -414,7 +732,7 @@ def get_or_generate_raw_image(
         model = settings.get("infographic.ai_full.model", _DEFAULT_MODEL)
         quality = settings.get("infographic.ai_full.quality", _DEFAULT_QUALITY)
 
-    key = _cache_key(spec, theme, ratio)
+    key = _cache_key(spec, theme, ratio, postflight_instruction)
     png_path = generated_dir / f"{key}.png"
     manifest = _load_manifest(manifest_path)
 
@@ -431,12 +749,16 @@ def get_or_generate_raw_image(
         logger.warning(warning)
         return None, warning
 
-    prompt = build_ai_full_prompt(spec, theme=theme, ratio=ratio)
+    prompt = build_ai_full_prompt(
+        spec,
+        theme=theme,
+        ratio=ratio,
+        postflight_instruction=postflight_instruction,
+    )
     _check_prompt_banned_words(prompt)   # Phần B1 -- raise NGAY nếu lọt từ cấm, KHÔNG gọi API
-    # 2026-07-24 (SỬA LỖI ĐẶC TẢ) -- TÍNH ĐỘNG (KHÔNG tra RATIO_SIZES tĩnh ở
-    # trên, bảng đó chỉ để tham khảo/test) -- tôn trọng settings override thật
-    # (final_size/bottom_band_min_px), xem brand_stamp.select_ai_size().
-    (w, h), _size_reason = _select_ai_size(ratio, settings=settings)
+    # v7 full-canvas: gọi API ở đúng tỷ lệ xuất bản và kích thước lớn hơn
+    # final_size; lớp overlay chỉ downscale, không matting/crop.
+    (w, h), _size_reason = _select_full_canvas_ai_size(ratio, settings=settings)
     size_str = f"{w}x{h}"
 
     try:
@@ -483,17 +805,15 @@ def record_actual_cost(*, cache_key: str, cost_usd: float, assets_dir: str | Pat
 def render_ai_full(
     spec: dict,
     *,
-    theme: str = "dark",
+    theme: str | None = None,
     ratios: tuple[str, ...] = ("1:1", "4:5", "9:16"),
     regenerate: bool = False,
     assets_dir: str | Path | None = None,
     settings=None,
 ) -> tuple[dict[str, tuple[bytes | None, str]], dict[str, dict]]:
-    """Điểm vào NÊN DÙNG cho mode "ai_full" -- Phần C (cắt mật độ, MỖI tỷ lệ
-    RIÊNG vì sức chứa khác nhau) -> sinh (cache-first) -> Phần A (đóng dấu
-    brand kiến trúc khung cứng đáy, brand_stamp.stamp_brand) cho MỖI tỷ lệ
-    trong `ratios`, KHÔNG crop chéo tỷ lệ (Bước 4.3: mỗi tỷ lệ gọi API RIÊNG,
-    đúng size, xem RATIO_SIZES).
+    """Điểm vào NÊN DÙNG cho mode "ai_full": cắt mật độ riêng từng tỷ lệ ->
+    sinh full-canvas cache-first -> overlay brand/metadata tất định trực tiếp.
+    Mỗi tỷ lệ gọi API riêng ở đúng size; không matting, crop hoặc khung con.
 
     2026-07-23 (ĐẢO HƯỚNG P0) -- BREAKING: trả (results, logs) 2 dict, KHÔNG
     còn 1 dict như bản cũ:
@@ -505,11 +825,16 @@ def render_ai_full(
         sách block đã cắt nếu có, rỗng nếu không cắt gì) -- ai_full.py KHÔNG
         tự ghi file, CALLER (vd render_production_assets.py) ghi JSON cạnh
         ảnh để Lead kiểm không cần mở ảnh."""
-    from .brand_stamp import stamp_brand
+    from .brand_stamp import overlay_brand_full_canvas
+    from .postflight import content_has_explicit_ranking, detect_ordinal_markers
     from ..config import load_brand
 
+    theme, theme_id, _palette = load_theme_palette(
+        theme,
+        content_type=spec.get("content_type"),
+    )
+    layout_id = select_content_layout(compute_information_score(spec))
     brand = load_brand()
-    wordmark = brand.get("wordmark", "FVA CAPITAL")
     # 2026-07-24 (quyết định Lead, SỬA VIỆC 2 -- "một nguồn sự thật"): BỎ HẲN
     # override render.infographic.disclaimer (settings.yaml) từng thêm 2026-
     # 07-22 -- 2 nguồn (brand.yaml + settings.yaml) đã LỆCH NHAU về câu chữ
@@ -539,11 +864,95 @@ def render_ai_full(
             results[ratio] = (None, warning or f"CẢNH BÁO: không sinh được ảnh ai_full tỷ lệ {ratio}.")
             continue
         raw_bytes = Path(png_path).read_bytes()
-        stamped, stamp_log = stamp_brand(
-            raw_bytes, ratio=ratio, theme=theme, wordmark=wordmark, source=source,
-            disclaimer=disclaimer, settings=settings,
-        )
+        ranking_allowed = content_has_explicit_ranking(capped_spec)
+        ranking_scan = detect_ordinal_markers(Image.open(png_path).convert("RGB"))
+        ranking_attempts = 1
+        if ranking_scan["detected"] and not ranking_allowed:
+            retry_instruction = (
+                "Ảnh trước đã tự thêm marker 1/2/3 như bảng xếp hạng. Tuyệt đối "
+                "không đánh số thứ tự, không dùng số trong vòng tròn và không "
+                "gắn ordinal marker cho bất kỳ item nào; facts không có thứ hạng."
+            )
+            retry_path, retry_warning = get_or_generate_raw_image(
+                capped_spec,
+                theme=theme,
+                ratio=ratio,
+                regenerate=True,
+                assets_dir=assets_dir,
+                settings=settings,
+                postflight_instruction=retry_instruction,
+            )
+            ranking_attempts = 2
+            if retry_path is None:
+                results[ratio] = (
+                    None,
+                    retry_warning
+                    or "NEEDS_HUMAN: hậu kiểm ranking yêu cầu retry nhưng không sinh được ảnh.",
+                )
+                logs[ratio] = {
+                    "postflight_status": "NEEDS_HUMAN",
+                    "ranking_allowed": False,
+                    "ranking_attempts": ranking_attempts,
+                    "ranking_scan_attempt_1": ranking_scan,
+                    "ranking_scan_attempt_2": None,
+                }
+                continue
+            png_path = retry_path
+            raw_bytes = Path(png_path).read_bytes()
+            retry_scan = detect_ordinal_markers(
+                Image.open(png_path).convert("RGB")
+            )
+            if retry_scan["detected"]:
+                results[ratio] = (
+                    None,
+                    "NEEDS_HUMAN: ảnh vẫn tự thêm thứ tự/ranking sau 2 lần render; "
+                    "không xuất ảnh.",
+                )
+                logs[ratio] = {
+                    "postflight_status": "NEEDS_HUMAN",
+                    "ranking_allowed": False,
+                    "ranking_attempts": ranking_attempts,
+                    "ranking_scan_attempt_1": ranking_scan,
+                    "ranking_scan_attempt_2": retry_scan,
+                }
+                continue
+            ranking_scan_attempt_1 = ranking_scan
+            ranking_scan = retry_scan
+        else:
+            ranking_scan_attempt_1 = ranking_scan
+        try:
+            stamped, stamp_log = overlay_brand_full_canvas(
+                raw_bytes,
+                ratio=ratio,
+                theme=theme,
+                source=source,
+                disclaimer=disclaimer,
+                settings=settings,
+            )
+        except ValueError as exc:
+            if "METADATA_GUARDRAIL_FAIL" not in str(exc):
+                raise
+            results[ratio] = (None, str(exc))
+            logs[ratio] = {
+                "postflight_status": "FAIL",
+                "metadata_guardrail": "FAIL",
+                "ranking_allowed": ranking_allowed,
+                "ranking_attempts": ranking_attempts,
+                "ranking_scan_attempt_1": ranking_scan_attempt_1,
+                "ranking_scan_final": ranking_scan,
+            }
+            continue
         stamp_log["truncated"] = truncated   # C4 -- cảnh báo cắt mật độ CẠNH ảnh, KHÔNG lên Sheet
+        stamp_log["theme"] = theme
+        stamp_log["theme_id"] = theme_id
+        stamp_log["layout_id"] = layout_id
+        stamp_log["postflight_status"] = "PASS"
+        stamp_log["ranking_allowed"] = ranking_allowed
+        stamp_log["ranking_attempts"] = ranking_attempts
+        stamp_log["ranking_scan_attempt_1"] = ranking_scan_attempt_1
+        stamp_log["ranking_scan_final"] = ranking_scan
+        _, omitted_empty_blocks = _spec_for_image_prompt(capped_spec)
+        stamp_log["prompt_omitted_empty_blocks"] = omitted_empty_blocks
         results[ratio] = (stamped, "")
         logs[ratio] = stamp_log
     return results, logs

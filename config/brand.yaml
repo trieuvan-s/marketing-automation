@@ -30,6 +30,46 @@ brand:
     text: "#F5F5F0"         # chữ chính (trắng ngà)
     text_muted: "#9FB3C8"   # chữ phụ/nhạt hơn
 
+  # Infographic AI chỉ đọc MỤC DESIGN TOKENS MÀU từ hai file theme dưới đây.
+  # Bố cục D1-D6/L1-L7 trong file theme KHÔNG được dùng: rules nội dung cho
+  # phép một hoặc nhiều chủ thể, nên renderer chọn layout trung lập theo dữ
+  # liệu. Đổi màu = sửa file theme; đổi theme mặc định/mapping = sửa tại đây.
+  infographic_theme:
+    default: "bright"
+    files:
+      dark: "prompts/themes/Infographic_Theme_Dark.md"
+      light: "prompts/themes/Infographic_Theme_Light.md"
+      bright: "prompts/themes/Infographic_Theme_Light.md"
+    content_map:
+      daily: "bright"
+      news: "bright"
+      analysis: "bright"
+      policy: "bright"
+      qualitative: "bright"
+
+  # Tinh chỉnh brand stamp, dùng chung cho Dark/Light. Logo vẫn nằm trọn
+  # trong TOP_PAD; footer vẫn ở band đáy riêng, không overlay lên nội dung.
+  infographic_stamp:
+    logo:
+      left_ratio: 0.04
+      vertical_bias: 0.60
+    footer:
+      text_scale: 0.75
+
+  # Tuyến ai_full mới: ảnh GPT giữ nguyên full-canvas; lớp deterministic
+  # overlay logo + metadata trực tiếp, không matting/khung đáy.
+  infographic_overlay:
+    logo:
+      right_ratio: 0.035
+      top_ratio: 0.025
+      height_ratio: 0.055
+    metadata:
+      side_ratio: 0.035
+      bottom_ratio: 0.012
+      image_body_font_ratio: 0.028
+      font_scale: 0.80
+      backdrop_opacity: 185
+
   font_family: "Arial, 'Segoe UI', sans-serif"
 
   # Content Factory Phase D — rút gọn (chỉ đạo user, thay bản dài cũ) — MỘT

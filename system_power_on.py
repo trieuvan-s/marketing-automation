@@ -37,6 +37,7 @@ account.
 from __future__ import annotations
 
 import atexit
+import ctypes
 import os
 import socket
 import sys
@@ -78,11 +79,37 @@ def parse_lock_content(content: str) -> tuple[str, int] | None:
         return None
 
 
+_WIN_SYNCHRONIZE = 0x00100000
+
+
 def is_pid_alive(pid: int) -> bool:
-    """True nếu tiến trình PID còn sống. os.kill(pid, 0) KHÔNG gửi tín hiệu thật
-    (đã kiểm chứng an toàn trên Windows lẫn POSIX) — chỉ kiểm tra tồn tại."""
+    """True nếu tiến trình PID còn sống.
+
+    BUG THẬT (Lead phát hiện, 02/08): bản cũ dùng `os.kill(pid, 0)` trên MỌI
+    OS, với docstring tự nhận "đã kiểm chứng an toàn trên Windows" — SAI.
+    POSIX: signal 0 là phép kiểm KHÔNG gửi gì thật. Windows KHÔNG có ngữ
+    nghĩa "signal 0 rỗng" — giá trị 0 chính là bí danh của CTRL_C_EVENT, nên
+    `os.kill(pid, 0)` trên Windows GỬI THẬT Ctrl+C tới tiến trình đó (đã gây
+    KeyboardInterrupt/exit 137 khi PID trùng chính tiến trình pytest ở
+    test_power_on_acquire_lock_blocks_same_host_alive_pid). Đây là cơ chế
+    chống 2 worker cùng chạy (acquire_lock() dòng ~224, queue_worker.py:172
+    tái dùng NGUYÊN hàm này) — hỏng trên Windows nghĩa là khoá 1-worker-1-máy
+    không đáng tin trên OS này.
+
+    SỬA: nhánh THEO os.name (không suy luận qua try/except) — Windows dùng
+    `ctypes.OpenProcess(SYNCHRONIZE, ...)` (mở tay cầm KHÔNG cần quyền điều
+    khiển tiến trình, chỉ cần đủ để kiểm tồn tại — SYNCHRONIZE là quyền THẤP
+    NHẤT đủ dùng), tay cầm khác 0 là tiến trình còn sống, PHẢI đóng lại ngay
+    (CloseHandle) tránh rò tay cầm. POSIX giữ nguyên `os.kill(pid, 0)` — vẫn
+    đúng ngữ nghĩa "no-op kiểm tồn tại" ở đây."""
     if pid <= 0:
         return False
+    if os.name == "nt":
+        handle = ctypes.windll.kernel32.OpenProcess(_WIN_SYNCHRONIZE, False, pid)
+        if not handle:
+            return False
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return True
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

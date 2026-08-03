@@ -100,6 +100,24 @@ def test_render_context_to_sheet_builds_rows_from_store(board, db_path):
     assert row[_header_index(header, "Source")] == "https://cafef.vn/x.chn"
     assert row[_header_index(header, "TopicKey")] == "tk-1"
     assert row[_header_index(header, GATE1_COL)] == "PENDING"
+    # VIỆC Execute (2026-08-03, Lead) — ĐẢO LẠI quyết định 2026-07-28 (khi đó
+    # ép "Waiting" cho Execute rỗng). Gate1=PENDING (chưa duyệt) + store
+    # execute="" -> Sheet PHẢI hiện đúng "" (không tự đoán "Waiting").
+    assert row[_header_index(header, "Execute")] == ""
+
+
+def test_render_context_to_sheet_shows_waiting_once_approved_not_before(board, db_path):
+    """VIỆC Execute (2026-08-03, Lead) — Gate1=APPROVE + store execute=
+    "Waiting" -> Sheet hiện "Waiting" (khác ca PENDING/rỗng ở test trên).
+    Phân biệt RÕ 2 trạng thái theo store, không hardcode 1 chiều."""
+    ps.write_raw("tk-2", {"context": "Bài 2 đã duyệt"}, db_path=db_path)
+    ps.write_gate_status("tk-2", gate1="APPROVE", execute="Waiting", db_path=db_path)
+
+    ss.render_context_to_sheet(board, db_path=db_path)
+    grid = board._tab("CONTEXT").get_all_values()
+    header = grid[0]
+    row = next(r for r in grid[1:] if r[_header_index(header, "TopicKey")] == "tk-2")
+    assert row[_header_index(header, "Execute")] == "Waiting"
 
 
 def test_render_context_to_sheet_reflects_gate1_and_notes_after_ingest(board, db_path):
@@ -190,7 +208,7 @@ def test_render_content_to_sheet_builds_rows_from_store(board, db_path):
     assert grid[0] == CONTENT_HEADER
     header, row = grid[0], grid[1]
     assert row[_header_index(header, "Context")] == "Bài 1"
-    assert row[_header_index(header, "Type")] == "article"
+    assert row[_header_index(header, "Type")] == "Article"   # VIỆC 3: Type ghi NHÃN hiển thị
     assert row[_header_index(header, "Status")] == "DONE"
     assert row[_header_index(header, GATE2_COL)] == "PENDING"
     assert row[_header_index(header, GATE3_COL)] == "PENDING"
@@ -328,6 +346,9 @@ def test_ingest_context_from_sheet_bridges_new_topic_not_in_store(board, db_path
     assert raw["hot_pct"] == 62.5
     gate = ps.read_gate_status("tk-moi", db_path=db_path)
     assert gate["gate1"] == "PENDING"
+    # VIỆC Execute (2026-08-03, Lead) — topic MỚI, gate1=PENDING (chưa duyệt)
+    # -> Execute="" (KHÔNG "Waiting" — đó là ĐẢO LẠI quyết định 2026-07-28).
+    assert gate["execute"] == ""
 
 
 def test_ingest_context_from_sheet_skips_rows_without_topic_key(board, db_path):
@@ -425,6 +446,34 @@ def test_ingest_content_from_sheet_writes_gate2_gate3_social_posting_changes(boa
     assert status["posting_status"] == "Đã đăng"
 
 
+def test_ingest_content_from_sheet_matches_type_as_display_label(board, db_path):
+    """SỬA LỖI THẬT NGHIÊM TRỌNG (2026-08-03, Lead báo qua ca Gate 2 duyệt
+    xong không sinh AssetPath) — VIỆC 3 đổi content_row() ghi NHÃN hiển thị
+    ("Video"/"Infographic"...) vào cột Type, nhưng ingest_content_from_sheet()
+    vẫn đọc THẲNG ô đó làm content_type để tra store -> "Video" != "video" ->
+    read_content_output() trả None -> CẢ DÒNG bị bỏ qua ÂM THẦM. Hậu quả thật:
+    Gate 2 người vừa duyệt (APPROVE) KHÔNG BAO GIỜ được ghi vào store, rồi
+    render_content_to_sheet() lượt sau lại vẽ đè Sheet về "PENDING" (từ store
+    cũ) -- xoá mất thao tác người vừa bấm. Test này khoá ĐÚNG use-case
+    "Type ghi nhãn hiển thị" (không phải khoá thô) vẫn phải ingest được."""
+    ps.write_raw("tk-1", {"context": "Bài video"}, db_path=db_path)
+    ps.write_content_output("tk-1", "video", {"status": "DONE", "output": "x",
+                                              "notes": "", "facts": "[]"}, db_path=db_path)
+    ps.write_content_status("tk-1", "video", gate2="PENDING", db_path=db_path)
+
+    board._tab("CONTENT").set_rows([
+        CONTENT_HEADER,
+        # "Video" -- NHÃN hiển thị (VIỆC 3), KHÔNG phải "video" thô.
+        ["24/07/2026", "Bài video", "Video", "DONE", "x", "", "APPROVE", "tk-1", "[]", "",
+         "", "PENDING", ""],
+    ])
+
+    n = ss.ingest_content_from_sheet(board, db_path=db_path)
+    assert n == 1, "Type ghi nhãn hiển thị PHẢI vẫn khớp được content_output, không bị bỏ qua"
+    status = ps.read_content_status("tk-1", "video", db_path=db_path)
+    assert status["gate2"] == "APPROVE"
+
+
 def test_ingest_content_from_sheet_skips_when_content_output_missing(board, db_path):
     """CONTENT row tham chiếu (TopicKey, Type) CHƯA có content_output trong
     store -- KHÔNG được tự tạo content_status mồ côi."""
@@ -500,6 +549,58 @@ def test_render_context_to_sheet_includes_output_type(board, db_path):
     grid = board._tab("CONTEXT").get_all_values()
     header, row = grid[0], grid[1]
     assert row[_header_index(header, OUTPUT_TYPE_COL)] == "Infographic, Video"
+
+
+def test_write_rows_skips_unchanged_rows_touches_only_changed_ones(board, db_path):
+    """Lead 02/08 ("Output Type bị khoá") — `_write_rows()` giờ SO KHỚP từng
+    dòng với Sheet hiện tại, CHỈ gọi update() cho dòng THẬT SỰ đổi. Dòng không
+    đổi giữa 2 lần render KHÔNG được đụng tới ô nào (tránh ghi đè ô "dropdown
+    chip multi-select" Output Type Lead tự bật tay qua UI — mỗi lần ghi giá
+    trị thô qua API vào ô chip, kể cả giá trị giống hệt, có thể làm rớt trạng
+    thái UI chip đó, xem docstring _write_rows())."""
+    ps.write_raw("tk-1", {"context": "Bài 1", "hook": "h", "source": "u1",
+                          "tickers": [], "group": "", "topic": ""}, db_path=db_path)
+    ps.write_gate_status("tk-1", gate1="APPROVE", output_type=["Article"], db_path=db_path)
+    ps.write_raw("tk-2", {"context": "Bài 2", "hook": "h", "source": "u2",
+                          "tickers": [], "group": "", "topic": ""}, db_path=db_path)
+    ps.write_gate_status("tk-2", gate1="APPROVE", output_type=["Video"], db_path=db_path)
+
+    ss.render_context_to_sheet(board, db_path=db_path)
+    ws = board._tab("CONTEXT")
+    baseline = ws.get_all_values()
+
+    calls: list[str] = []
+    orig_update = ws.update
+
+    def _spy_update(range_str, values, value_input_option="RAW"):
+        calls.append(range_str)
+        return orig_update(range_str, values, value_input_option=value_input_option)
+
+    ws.update = _spy_update
+
+    # Chỉ đổi tk-2 (Execute) -- tk-1 giữ nguyên hệt.
+    ps.write_gate_status("tk-2", execute="DONE", db_path=db_path)
+    ss.render_context_to_sheet(board, db_path=db_path)
+
+    header = baseline[0]
+    i_key = _header_index(header, "TopicKey")
+    row_of = {r[i_key]: i for i, r in enumerate(baseline[1:], start=2)}   # +2 = số dòng Sheet (1-based, có header)
+
+    # KHÔNG lệnh update() nào chạm dòng tk-1 (không đổi).
+    tk1_row_num = row_of["tk-1"]
+    for rng in calls:
+        start = int(rng[1:])
+        assert start != tk1_row_num, f"dòng tk-1 (không đổi) bị đụng: {rng}"
+
+    # Dòng tk-2 (CÓ đổi) phải được ghi lại.
+    tk2_row_num = row_of["tk-2"]
+    assert any(int(rng[1:]) == tk2_row_num for rng in calls), \
+        f"dòng tk-2 (có đổi) PHẢI được ghi, calls={calls}"
+
+    grid = ws.get_all_values()
+    i_ex = _header_index(header, "Execute")
+    new_row_of = {r[i_key]: r for r in grid[1:]}
+    assert new_row_of["tk-2"][i_ex] == "DONE"
 
 
 def test_render_context_to_sheet_output_type_shows_auto_when_never_set(board, db_path):
@@ -602,16 +703,18 @@ def test_ingest_context_from_sheet_bridges_new_topic_already_approved_bootstraps
 
 
 def test_ingest_context_from_sheet_does_not_bootstrap_when_gate1_still_pending(board, db_path):
-    """Chưa duyệt -> Execute vẫn là "Waiting" (từ 2026-07-28 đây là MẶC ĐỊNH
-    của mọi dòng, không còn để rỗng) nhưng TUYỆT ĐỐI không có job nào — Waiting
-    nghĩa là "hệ thống đã thấy dòng này", KHÔNG phải "sắp chạy dòng này"."""
+    """VIỆC Execute (2026-08-03, Lead) — ĐẢO LẠI quyết định 2026-07-28 (khi đó
+    ép "Waiting" cho MỌI dòng). Chưa duyệt -> Execute = "" (mới crawl, chưa có
+    gì để chờ) — "Waiting" giờ nghĩa CHÍNH XÁC là "đã duyệt, đang xếp hàng",
+    KHÔNG còn dùng cho "hệ thống đã thấy dòng này" nữa. TUYỆT ĐỐI không có
+    job nào."""
     board._tab("CONTEXT").set_rows([
         CONTEXT_HEADER,
         ["24/07/2026", "0.0", "0", "", "", "Bài chưa duyệt", "h", "u1", "PENDING", "", "", "", "", "tk-1"],
     ])
     ss.ingest_context_from_sheet(board, db_path=db_path)
     gate = ps.read_gate_status("tk-1", db_path=db_path)
-    assert gate["execute"] == "Waiting"
+    assert gate["execute"] == ""
     assert qs.list_queue(db_path=db_path) == []
 
 
@@ -834,7 +937,11 @@ def _ctx_row(gate1="APPROVE", output_type="", key="tk-1", execute=""):
 
 def test_cancel_pending_when_gate1_leaves_approve(board, db_path):
     """Người RÚT duyệt -> job đang xếp hàng trở nên vô nghĩa (nó sẽ sinh nội
-    dung cho yêu cầu vừa bị bỏ). Phải huỷ, không để chạy."""
+    dung cho yêu cầu vừa bị bỏ). Phải huỷ, không để chạy.
+
+    VIỆC Execute (2026-08-03, Lead) — Execute về "" (không phải "Waiting")
+    sau khi rút duyệt: "Waiting" giờ nghĩa CHÍNH XÁC "đã duyệt, đang xếp
+    hàng" — rút duyệt thì không còn gì xếp hàng, "" (chưa duyệt) đúng hơn."""
     ps.write_raw("tk-1", {"context": "Bài 1"}, db_path=db_path)
     ps.write_gate_status("tk-1", gate1="APPROVE", execute="Waiting", db_path=db_path)
     qs.enqueue("tk-1", job_type="produce", db_path=db_path)
@@ -844,7 +951,7 @@ def test_cancel_pending_when_gate1_leaves_approve(board, db_path):
 
     jobs = qs.list_queue(db_path=db_path)
     assert [j["status"] for j in jobs] == ["cancelled"]
-    assert ps.read_gate_status("tk-1", db_path=db_path)["execute"] == "Waiting"
+    assert ps.read_gate_status("tk-1", db_path=db_path)["execute"] == ""
 
 
 def test_change_output_type_cancels_old_request_and_creates_new(board, db_path):
@@ -1038,7 +1145,7 @@ def test_restore_keeps_every_user_owned_field(board, db_path):
     assert row_a[_header_index(ctx[0], "Timestamp")] == "28/07/2026"
 
     con = board._tab("CONTENT").get_all_values()
-    art = next(r for r in con[1:] if r[_header_index(con[0], "Type")] == "article")
+    art = next(r for r in con[1:] if r[_header_index(con[0], "Type")] == "Article")   # VIỆC 3: nhãn hiển thị
     assert art[_header_index(con[0], GATE2_COL)] == "APPROVE"
     assert art[_header_index(con[0], GATE3_COL)] == "APPROVE"
     assert art[_header_index(con[0], "Social Link")] == "https://fb.com/p/1"

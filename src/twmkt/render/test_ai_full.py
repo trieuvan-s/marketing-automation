@@ -154,6 +154,93 @@ def test_prompt_embeds_raw_json_not_llm_rewrite():
     assert '"value": "3"' in prompt
 
 
+def test_prompt_omits_intentionally_empty_subtitle_and_related():
+    spec = dict(_SPEC, subtitle=" \t", related=[])
+    prompt = af.build_ai_full_prompt(spec, theme="dark", ratio="4:5")
+    lower = prompt.lower()
+    assert '"subtitle"' not in lower
+    assert '"related"' not in lower
+    assert "chỉ vẽ các khối có key trong json" in lower
+
+
+def test_prompt_preserves_nonempty_subtitle_and_related():
+    prompt = af.build_ai_full_prompt(_SPEC, theme="dark", ratio="4:5")
+    assert '"subtitle": "Phu de test"' in prompt
+    assert '"related": [' in prompt
+
+
+def test_spec_for_image_prompt_does_not_mutate_input():
+    spec = dict(_SPEC, subtitle="", related=[])
+    prompt_spec, omitted = af._spec_for_image_prompt(spec)
+    assert omitted == ["subtitle", "related"]
+    assert "subtitle" not in prompt_spec
+    assert "related" not in prompt_spec
+    assert spec["subtitle"] == ""
+    assert spec["related"] == []
+
+
+def test_bright_prompt_requires_full_canvas_and_forbids_calculated_numbers():
+    prompt = af.build_ai_full_prompt(_SPEC, theme="bright", ratio="4:5")
+    lower = prompt.lower()
+    assert "toàn bộ canvas" in lower
+    assert "không tự cộng tổng" in lower
+    assert "không vẽ logo" in lower
+    assert "góc trên-phải" in lower
+
+
+def test_bright_prompt_is_photo_first_without_claiming_verified_event_photo():
+    prompt = af.build_ai_full_prompt(_SPEC, theme="bright", ratio="4:5")
+    lower = prompt.lower()
+    assert "ưu tiên hình ảnh thật" in lower
+    assert "ảnh chụp báo chí/doanh nghiệp" in lower
+    assert "ai photorealistic" in lower
+    assert "bối cảnh chung" in lower
+    assert "được giả làm ảnh bằng chứng" in lower
+    assert "không dựng gương mặt người thật" in lower
+    assert "icon-led composition" in lower
+
+
+def test_photo_subject_anchor_uses_industrial_context_for_msr():
+    spec = dict(
+        _SPEC,
+        title="MSR tăng trưởng lợi nhuận",
+        related=["Masan High-Tech Materials", "Ngân hàng VIB"],
+    )
+    direction = af._photo_subject_direction(spec).lower()
+    assert "industrial materials or mineral-processing" in direction
+    assert "named company's facility" in direction
+    assert "general business mood" in direction
+
+
+def test_photo_subject_anchor_uses_trading_context_for_stock_analysis():
+    spec = dict(
+        _SPEC,
+        title="Phân tích kỹ thuật cổ phiếu",
+        highlights=["Vùng hỗ trợ và kháng cự"],
+    )
+    direction = af._photo_subject_direction(spec).lower()
+    assert "securities trading workstation" in direction
+    assert "without invented ticker data" in direction
+
+
+def test_photo_subject_anchor_prefers_monetary_policy_over_generic_market():
+    spec = dict(
+        _SPEC,
+        title="Fed và phản ứng của thị trường với chính sách tiền tệ",
+        subtitle="Giá năng lượng tác động đến triển vọng lạm phát",
+    )
+    direction = af._photo_subject_direction(spec).lower()
+    assert "macroeconomic-analysis workspace" in direction
+    assert "official seals" in direction
+
+
+def test_prompt_embeds_concrete_photo_subject_anchor():
+    spec = dict(_SPEC, title="Hoạt động cảng và logistics")
+    prompt = af.build_ai_full_prompt(spec, theme="bright", ratio="9:16")
+    assert "PHOTO SUBJECT ANCHOR" in prompt
+    assert "real port and logistics environment" in prompt
+
+
 def test_prompt_rejects_unsupported_ratio_gracefully():
     # ratio khong hop le van build duoc prompt (khong crash) -- loi thuc su
     # chi xay o get_or_generate_raw_image (kiem tra RATIO_SIZES truoc goi API)
@@ -210,6 +297,23 @@ def test_apply_density_cap_caps_highlights_and_related_independently():
     assert len(capped["related"]) == 12
     blocks = {t["block"] for t in truncated}
     assert blocks == {"highlights", "related"}
+
+
+def test_apply_density_cap_removes_dropped_items_from_priority_metadata():
+    spec = _spec_with_n_items(2, 2, 10)
+    spec["priority"]["secondary"].extend([f"r{i}" for i in range(10)])
+    capped, truncated = af.apply_density_cap(spec, ratio="9:16")
+    assert capped["related"] == [f"r{i}" for i in range(8)]
+    priority_values = {
+        value
+        for values in capped["priority"].values()
+        for value in values
+    }
+    assert "r8" not in priority_values
+    assert "r9" not in priority_values
+    assert truncated[0]["removed_priority_refs"] == ["r8", "r9"]
+    assert "r8" in spec["priority"]["secondary"]
+    assert "r9" in spec["priority"]["secondary"]
 
 
 def test_apply_density_cap_does_not_touch_hero_or_title():
@@ -339,11 +443,19 @@ def test_render_ai_full_returns_stamped_bytes_and_logs_per_ratio(monkeypatch, tm
         assert png_bytes is not None
         im = Image.open(io.BytesIO(png_bytes))
         assert im.format == "PNG"
-        assert im.size == bs._DEFAULT_FINAL_SIZES[ratio]  # A1 -- khung CUỐI cố định theo tỷ lệ
+        expected_w, expected_h = bs._DEFAULT_FINAL_SIZES[ratio]
+        assert im.width == expected_w
+        assert im.height >= expected_h  # C1: có chữ ở band đáy thì nới xuống, không đè
+        assert logs[ratio]["content_wh"] == [expected_w, expected_h]
     assert set(logs.keys()) == {"1:1", "4:5"}
     for ratio, log in logs.items():
-        assert log["final_wh"] == list(bs._DEFAULT_FINAL_SIZES[ratio])
+        assert log["content_wh"] == list(bs._DEFAULT_FINAL_SIZES[ratio])
+        assert log["final_wh"][0] == log["content_wh"][0]
+        assert log["final_wh"][1] >= log["content_wh"][1]
         assert "truncated" in log  # Phần C -- luôn có mặt (rỗng nếu không cắt gì)
+        assert log["overlay_mode"] == "full_canvas_deterministic"
+        assert log["matting_applied"] is False
+        assert log["content_crop_px"] == 0
 
 
 def test_render_ai_full_one_ratio_failing_does_not_block_others(monkeypatch, tmp_path):
@@ -372,6 +484,50 @@ def test_render_ai_full_density_cap_warning_recorded_in_log(monkeypatch, tmp_pat
 # =====================================================================
 # brand_stamp.stamp_brand -- kiến trúc khung cứng đáy (Phần A, 2026-07-23)
 # =====================================================================
+
+
+def test_full_canvas_generation_sizes_are_exact_ratio_and_not_smaller_than_final():
+    for ratio, (final_w, final_h) in bs._DEFAULT_FINAL_SIZES.items():
+        (width, height), reason = bs.select_full_canvas_ai_size(ratio)
+        assert width >= final_w and height >= final_h
+        assert width % 16 == 0 and height % 16 == 0
+        assert abs(width / height - final_w / final_h) <= 0.002
+        assert "không crop/matting" in reason
+
+
+def test_full_canvas_overlay_keeps_image_full_and_places_brand_at_edges():
+    raw = _real_png_bytes(1280, 1600, color=(245, 248, 252))
+    rendered, log = bs.overlay_brand_full_canvas(
+        raw,
+        ratio="4:5",
+        theme="bright",
+        source="CafeF",
+        disclaimer="Nội dung mang tính tham khảo, không phải khuyến nghị đầu tư.",
+    )
+    image = Image.open(io.BytesIO(rendered))
+    assert image.size == bs._DEFAULT_FINAL_SIZES["4:5"]
+    assert log["content_crop_px"] == 0
+    assert log["matting_applied"] is False
+    assert log["scale_x"] <= 1.0 and log["scale_y"] <= 1.0
+    assert log["logo_position"] == "top_right"
+    assert log["logo_in_bounds"] is True
+    assert log["logo_bbox"][0] > image.width // 2
+    assert log["metadata_single_line"] is True
+    assert log["source_text"] == "Nguồn: CafeF"
+    assert log["metadata_font_scale"] == 0.80
+    assert log["metadata_font_px"] == round(log["image_body_font_px"] * 0.80)
+
+
+def test_full_canvas_overlay_rejects_wrong_real_image_ratio():
+    raw = _real_png_bytes(1280, 1280)
+    with pytest.raises(ValueError, match="lệch tỷ lệ"):
+        bs.overlay_brand_full_canvas(
+            raw,
+            ratio="4:5",
+            theme="bright",
+            source="CafeF",
+            disclaimer="Nội dung mang tính tham khảo, không phải khuyến nghị đầu tư.",
+        )
 
 def _resolve_band_top_y(log: dict) -> int:
     w, h = log["final_wh"]
@@ -484,6 +640,37 @@ def test_secondary_text_font_scale_is_75_percent_of_original_base():
     """Yeu cau Lead: disclaimer/nguon giam con 70-80% co chu cu -- xac nhan
     hang so scale dung 0.75."""
     assert bs._SECONDARY_TEXT_SCALE == 0.75
+
+
+def test_stamp_brand_applies_configured_secondary_text_scale():
+    raw = _real_png_bytes(864, 1536)
+    _, log = bs.stamp_brand(
+        raw,
+        ratio="9:16",
+        theme="dark",
+        source="cafef.vn",
+        disclaimer="Nội dung mang tính tham khảo, không phải khuyến nghị đầu tư.",
+    )
+    nominal_band_h = round(bs._DEFAULT_FINAL_SIZES["9:16"][1] * 0.075)
+    expected_max = int(nominal_band_h * 0.30 * bs._SECONDARY_TEXT_SCALE)
+    assert log["source_font_px"] <= expected_max
+    assert log["disclaimer_font_px"] <= expected_max
+    assert log["source_font_px"] >= bs._MIN_READABLE_FONT_SIZE
+    assert log["disclaimer_font_px"] >= bs._MIN_READABLE_FONT_SIZE
+
+
+def test_square_footer_uses_wider_disclaimer_column_to_avoid_orphan():
+    raw = _real_png_bytes(1024, 944)
+    _, log = bs.stamp_brand(
+        raw,
+        ratio="1:1",
+        theme="light",
+        source="CafeF",
+        disclaimer="Nội dung mang tính tham khảo, không phải khuyến nghị đầu tư.",
+    )
+    assert log["disclaimer_lines"] == [
+        "Nội dung mang tính tham khảo, không phải khuyến nghị đầu tư."
+    ]
 
 
 def test_min_readable_font_size_is_18px():
@@ -716,6 +903,40 @@ def test_stamp_brand_logo_bbox_never_overlaps_ai_content_area():
     pad = max(int(final_w * 0.04), 16)
     logo_y = max((log["top_pad_px"] - logo_h) // 2, 0)
     assert logo_y + logo_h <= log["top_pad_px"], "bbox logo vuot qua TOP_PAD -- giao voi vung anh AI"
+
+
+def test_logo_vertical_bias_stays_inside_top_pad():
+    raw = _real_png_bytes(1024, 1280)
+    _, log = bs.stamp_brand(raw, ratio="4:5", theme="dark", source="", disclaimer="")
+    final_h = log["final_wh"][1]
+    logo_h = max(round(final_h * 0.06), 24)
+    available_y = max(log["top_pad_px"] - logo_h, 0)
+    logo_y = round(available_y * log["logo_vertical_bias"])
+    assert 0 <= logo_y
+    assert logo_y + logo_h <= log["top_pad_px"]
+
+
+def test_light_theme_logo_neutral_pixels_are_tinted_for_contrast(tmp_path):
+    logo = Image.new("RGBA", (100, 40), (0, 0, 0, 0))
+    ImageDraw.Draw(logo).rectangle([0, 0, 99, 39], fill=(245, 245, 245, 255))
+    logo_path = tmp_path / "light-logo.png"
+    logo.save(logo_path)
+    raw = _real_png_bytes(1024, 1280, color=(246, 240, 229))
+    stamped, log = bs.stamp_brand(
+        raw,
+        ratio="4:5",
+        theme="light",
+        logo_path=logo_path,
+        source="",
+        disclaimer="",
+    )
+    im = Image.open(io.BytesIO(stamped)).convert("RGB")
+    logo_x = max(round(log["final_wh"][0] * log["logo_left_ratio"]), 16)
+    logo_h = max(round(log["final_wh"][1] * 0.06), 24)
+    available_y = max(log["top_pad_px"] - logo_h, 0)
+    logo_y = round(available_y * log["logo_vertical_bias"])
+    pixel = im.getpixel((logo_x + 2, logo_y + 2))
+    assert sum(pixel) < 200, "logo trung tính trên Light phải được nhuộm màu chữ tối"
 
 
 def test_select_ai_size_closely_matches_ratio_inner_for_all_ratios():

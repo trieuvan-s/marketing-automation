@@ -25,6 +25,7 @@ Chạy:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -42,10 +43,11 @@ ensure_utf8_stdio()
 from twmkt.asset_server import DEFAULT_PORT, asset_url  # noqa: E402
 from twmkt.config import data_path, load_settings  # noqa: E402
 from twmkt.agents.production import VALID_RATIOS  # noqa: E402
-from twmkt.publishers.drive_store import build_drive_store  # noqa: E402
+from twmkt.publishers.drive_store import GOOGLE_DOC_MIME, build_drive_store  # noqa: E402
 from twmkt.render.ai_full import render_ai_full  # noqa: E402
 from twmkt.sheets_board import SheetsBoard  # noqa: E402
 
+from store import document_store as ds  # noqa: E402
 from store import pipeline_store as ps  # noqa: E402
 
 
@@ -82,6 +84,53 @@ def asset_hyperlink_formula(url: str) -> str:
     server/cloud storage THẬT (không phải localhost), chỉ cần đổi cách build
     `url` ở call site, KHÔNG cần sửa hàm này hay cấu trúc cột/Sheet."""
     return f'=HYPERLINK("{url}", "Mở file")'
+
+
+def _append_notes(topic_key: str, content_type: str, note: str) -> int | None:
+    """VIỆC A (Lead 02/08, agent-C phát hiện) — nối thêm 1 dòng vào
+    content_output.notes TRONG STORE, KHÔNG ghi thẳng ô Sheet. Trước bản vá
+    này, renderer gọi `board.set_content_cell(row, "Notes", ...)` ghi THẲNG
+    lên Sheet — giá trị đó KHÔNG ingest ngược vào store, nên lượt
+    render_content_to_sheet() kế tiếp (dựng lại TOÀN BỘ tab từ store, xem
+    store/sync_service.py) XOÁ MẤT cảnh báo vừa ghi mà không ai biết.
+
+    content_output là APPEND-ONLY (document_store.write_document — KHÔNG
+    merge-on-write như content_status/gate_status), nên phải đọc bản MỚI
+    NHẤT, nối Notes, ghi lại NGUYÊN VẸN mọi field khác (status/output/facts/
+    timestamp/published_at) — chỉ ghi mỗi `note` mà không đọc trước sẽ XOÁ
+    MẤT nội dung/status đã có. Trả version vừa ghi (dùng làm "lần render thứ
+    N"), None nếu chưa có content_output để gắn vào (không nên xảy ra — dòng
+    đã tới được renderer nghĩa là content_output PHẢI có sẵn từ Brief/Writer/
+    Composer).
+
+    A3: sync_service.render_content_to_sheet() đã tự đọc content_output.notes
+    và hiển thị lên Sheet theo CƠ CHẾ CHUNG (content_row()) — KHÔNG thêm
+    đường hiển thị riêng nào ở đây, hàm này CHỈ ghi store."""
+    rec = ps.read_content_output(topic_key, content_type)
+    if rec is None:
+        print(f"[CẢNH BÁO] Không tìm thấy content_output({content_type}) để ghi Notes cho {topic_key!r} "
+             "— bỏ qua (không nên xảy ra, dòng đã tới renderer).")
+        return None
+    existing = (rec.get("notes") or "").strip()
+    payload = dict(rec)
+    payload["notes"] = f"{existing}; {note}" if existing else note
+    return ps.write_content_output(topic_key, content_type, payload)
+
+
+def _ranking_guard_note(entries: list[tuple[str, list[dict]]], attempt: int) -> str:
+    """VIỆC A2 — mã lý do RENDER_RANKING_GUARD kèm chi tiết: tỷ lệ nào bị cắt
+    mật độ theo priority (ranking) của Composer, khối nào giữ/bỏ bao nhiêu,
+    và đây là lần render thứ mấy cho content_output này (xem _append_notes).
+    `entries` = [(ratio, truncated_list)] CHỈ gồm ratio THẬT SỰ có cắt (xem
+    render.ai_full.apply_density_cap -- truncated rỗng nghĩa là không cắt gì)."""
+    parts = []
+    for ratio, truncated in entries:
+        detail = "; ".join(
+            f"{t['block']} giữ {t['kept']}/bỏ {t['dropped']} ({t['reason']}) {t['dropped_labels']}"
+            for t in truncated
+        )
+        parts.append(f"tỷ lệ {ratio}: {detail}")
+    return f"RENDER_RANKING_GUARD (lần render thứ {attempt}): " + " | ".join(parts)
 
 
 def _open_board(settings) -> SheetsBoard:
@@ -122,13 +171,35 @@ def ratios_for(output_data: dict, *, settings) -> tuple[str, ...]:
 
 
 _TEXT_OUTPUTS = {
-    # content_type -> (đuôi file, mime). Video ở ĐÂY là KỊCH BẢN (JSON hợp đồng
-    # CONTENT.Output), KHÔNG phải .mp4 — file mp4 do repo aigen dựng (cần
-    # OmniVoice TTS + ffmpeg), CHƯA nối vào luồng này. Đặt tên .json cho đúng
-    # bản chất thay vì .mp4 gây hiểu nhầm là đã có video thành phẩm.
+    # content_type -> (đuôi file, mime).
     "article": (".md", "text/markdown"),
-    "video": (".json", "application/json"),
+    # VIỆC 1 (2026-08-03) — Long-Article dùng CHUNG định dạng .md/text/markdown
+    # với article (KHÔNG có định dạng ra riêng, xem models.ContentFormat.
+    # LONG_ARTICLE); thiếu dòng này thì Long-Article DONE nhưng KHÔNG BAO GIỜ
+    # có AssetPath (run_text_assets() chỉ lặp qua các khoá trong dict này).
+    "long_article": (".md", "text/markdown"),
+    # SỬA LỖI THẬT (2026-08-03, Lead báo qua ca "Thế giới Di động") — "video"
+    # TỪNG có mặt ở đây (upload KỊCH BẢN .json làm AssetPath khi aigen "CHƯA
+    # nối vào luồng"). Nay aigen ĐÃ nối thật (run_videos()/render_video_one()
+    # dựng .mp4 thật), nhưng "video" vẫn còn trong dict này khiến run_text_
+    # assets() upload KỊCH BẢN JSON làm AssetPath BẤT CỨ KHI NÀO run_videos()
+    # bỏ qua/lỗi ở lượt đó — Gate 2 trông như "đã xong" dù CHƯA có video thật.
+    # Lead xác nhận: CHỈ video.mp4 thật lên Drive mới được coi là hoàn thành.
+    # KHÔNG thêm lại "video" vào đây — muốn AssetPath cho video, PHẢI qua
+    # run_videos()/render_video_one() (aigen), không có đường lùi mượt khác.
 }
+
+# VIỆC 2 (2026-08-03, Lead) — CHỈ Article/Long-Article convert sang Google
+# Docs native (2.3: Infographic .png/Video .mp4/.json GIỮ NGUYÊN, không đụng).
+_GOOGLE_DOC_CONVERT_TYPES = {"article", "long_article"}
+
+
+def _content_hash(body: str) -> str:
+    """VIỆC 2.4 — khoá idempotent: cùng TopicKey + cùng loại + cùng NỘI DUNG
+    (hash) -> KHÔNG upload lại, dùng fileId đã lưu. Nội dung đổi (bài viết lại/
+    sửa) -> hash khác -> upload lại (update() cùng file, không tạo bản thứ 2,
+    xem DriveAssetStore.upload())."""
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 def upload_text_outputs(drive, *, topic_key: str, topic: str, out_dir: Path) -> dict[str, str]:
@@ -154,7 +225,12 @@ def upload_text_outputs(drive, *, topic_key: str, topic: str, out_dir: Path) -> 
         fn = out_dir / f"{_slug(topic)}_{ctype}{ext}"
         fn.write_text(body, encoding="utf-8")
         try:
-            r = drive.upload(fn, topic=topic, topic_key=topic_key, mime_type=mime)
+            target_mime = GOOGLE_DOC_MIME if ctype in _GOOGLE_DOC_CONVERT_TYPES else ""
+            r = drive.upload(fn, topic=topic, topic_key=topic_key, mime_type=mime,
+                             target_mime_type=target_mime)
+            ps.write_content_status(topic_key, ctype, asset_drive_file_id=r["id"],
+                                    asset_content_hash=_content_hash(body),
+                                    asset_mime_type=target_mime or mime)
             links[ctype] = r["view_link"]
             print(f"[drive] {ctype} ({len(body)} ký tự, nguyên văn từ store) -> {r['view_link']}")
         except Exception as e:   # noqa: BLE001 -- cùng lý do lùi mượt như ảnh
@@ -282,23 +358,33 @@ def run_text_assets(*, settings, board, drive, out_dir: Path, limit: int = 20) -
                 skipped += 1
                 continue
             tk = item.get("topic_key", "")
-            st = ps.read_content_status(tk, ctype)
-            if (st.get("asset_url") or "").strip():
-                skipped += 1
-                continue   # IDEMPOTENT: hỏi STORE, không hỏi ô Sheet
             rec = ps.read_content_output(tk, ctype)
             body = (rec or {}).get("output") or ""
             if not body.strip():
                 skipped += 1
                 continue   # SKIPPED/rỗng -> không có gì để đẩy
+            # VIỆC 2.4 (2026-08-03, Lead) — IDEMPOTENT theo TopicKey + loại +
+            # content-hash: đã có asset_url VÀ hash KHÔNG đổi -> bỏ qua, dùng
+            # fileId đã lưu. Nội dung đổi (viết lại/sửa) -> hash khác -> upload
+            # lại (update() cùng file trong DriveAssetStore.upload(), KHÔNG
+            # tạo bản thứ 2). Đọc STORE, không đọc ô Sheet (cùng nếp cũ).
+            st = ps.read_content_status(tk, ctype)
+            current_hash = _content_hash(body)
+            if (st.get("asset_url") or "").strip() and st.get("asset_content_hash") == current_hash:
+                skipped += 1
+                continue
             fn = out_dir / f"{_slug(item['context'])}_{ctype}{ext}"
             fn.write_text(body, encoding="utf-8")
             ps.write_content_status(tk, ctype, asset_local_path=str(fn))
             if drive is None:
                 continue
             try:
-                r = drive.upload(fn, topic=item["context"], topic_key=tk, mime_type=mime)
-                ps.write_content_status(tk, ctype, asset_url=r["view_link"])
+                target_mime = GOOGLE_DOC_MIME if ctype in _GOOGLE_DOC_CONVERT_TYPES else ""
+                r = drive.upload(fn, topic=item["context"], topic_key=tk, mime_type=mime,
+                                 target_mime_type=target_mime)
+                ps.write_content_status(tk, ctype, asset_url=r["view_link"],
+                                        asset_drive_file_id=r["id"], asset_content_hash=current_hash,
+                                        asset_mime_type=target_mime or mime)
                 print(f"[drive] {ctype} ({len(body)} ký tự, nguyên văn store) -> {r['view_link']}")
                 done += 1
             except Exception as e:   # noqa: BLE001 -- lùi mượt như các nhánh khác
@@ -358,7 +444,8 @@ def run(*, limit: int = 20) -> dict:
         primary = next(iter(png_map), _PRIMARY_RATIO)
         if png_map.get(primary) is None:
             warning = warn_map.get(primary, "lỗi không rõ")
-            board.set_content_cell(item["row"], "Notes", f"NEEDS_HUMAN (render ai_full {primary}): {warning}")
+            _append_notes(item["topic_key"], "infographic",
+                         f"NEEDS_HUMAN (render ai_full {primary}): {warning}")
             print(f"[NEEDS_HUMAN] '{item['context'][:60]}': {warning}")
             needs_human += 1
             continue
@@ -377,6 +464,20 @@ def run(*, limit: int = 20) -> dict:
             log_fn = out_dir / f"{slug}_{suffix}.log.json"
             log_fn.write_text(json.dumps(logs.get(ratio, {}), ensure_ascii=False, indent=2), encoding="utf-8")
             written[ratio] = fn
+
+        # VIỆC A2 — density cap (render/ai_full.apply_density_cap) cắt bớt
+        # market/highlights/related theo priority (ranking) của Composer khi
+        # vượt sức chứa layout của tỷ lệ. Trước bản vá này, sự kiện cắt CHỈ
+        # log ra console/file .log.json CẠNH ảnh — KHÔNG có dấu vết nào trên
+        # Sheet/store dù ảnh vẫn render "thành công" (silently drop items).
+        # Ghi vào Notes (mã RENDER_RANKING_GUARD) để người duyệt Gate 3 biết
+        # có mục bị bỏ mà không cần mở từng .log.json.
+        ranking_entries = [(r, logs[r]["truncated"]) for r in png_map
+                          if logs.get(r, {}).get("truncated")]
+        if ranking_entries:
+            attempt = len(ds.read_history(item["topic_key"], "content_output", "infographic")) + 1
+            _append_notes(item["topic_key"], "infographic",
+                         _ranking_guard_note(ranking_entries, attempt))
 
         primary_fn = written[primary]
         # Drive (2026-07-28) là nguồn link CHÍNH khi bật: link chia sẻ thật,
@@ -421,14 +522,18 @@ def run(*, limit: int = 20) -> dict:
         # chúng — chỉ thiếu đúng người GHI.
         ps.write_content_status(item["topic_key"], "infographic",
                                 asset_url=url, asset_local_path=str(primary_fn))
-        # Ghi thẳng ô Sheet NGAY sau đó: phản hồi tức thì cho đường chạy TAY
-        # (`python scripts/render_production_assets.py`, không có worker render
-        # lại). Giá trị TRÙNG KHỚP cái render_content_to_sheet() sẽ dựng từ
-        # store nên không tạo 2 nguồn sự thật — chỉ là hiển thị sớm hơn.
-        board.set_content_cell(item["row"], "AssetPath", asset_hyperlink_formula(url))
+        # VIỆC A (Lead 02/08) — KHÔNG còn ghi thẳng ô Sheet ở đây nữa (trước
+        # đây có 1 lượt `board.set_content_cell(..., "AssetPath", ...)` "cho
+        # phản hồi tức thì" — nhưng đây CHÍNH LÀ loại "bộ ghi trực tiếp lên
+        # Sheet còn sót" agent-C phát hiện: giá trị không ingest ngược vào
+        # store nên lượt sync kế tiếp có thể ghi đè bằng giá trị CŨ nếu 2
+        # luồng lệch nhịp. store đã có asset_url/asset_local_path (dòng trên)
+        # -- sync_service.render_content_to_sheet() tự đọc và hiển thị theo
+        # cơ chế chung (A3), không cần đường tắt riêng.
         other = "; ".join(f"{r}: {p}" for r, p in written.items() if r != primary)
         if other:
-            board.set_content_cell(item["row"], "Notes", f"Tỷ lệ khác (chưa có cột riêng): {other}")
+            _append_notes(item["topic_key"], "infographic",
+                         f"Tỷ lệ khác (chưa có cột riêng): {other}")
         print(f"[render] '{item['context'][:60]}' -> {len(written)}/{len(png_map)} tỷ lệ ({primary}), "
              f"primary={primary_fn} ({url})")
         rendered += 1
