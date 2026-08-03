@@ -10324,7 +10324,10 @@ def test_content_rows_taller_than_context_rows_for_easier_skimming():
 
     content_reqs = _row_height_requests("CONTENT", CONTENT_HEADER)
     assert len(content_reqs) == 1, f"kỳ vọng ĐÚNG 1 request chiều cao dòng CONTENT: {content_reqs}"
-    assert content_reqs[0]["properties"]["pixelSize"] > 21   # cao hơn mặc định Sheets (~21px)
+    # Trung 02/08 (chốt sau khi đo thật): dải 45-60px, CỐ ĐỊNH (không tự giãn
+    # theo nội dung như trước khi sửa).
+    px = content_reqs[0]["properties"]["pixelSize"]
+    assert 45 <= px <= 60, f"chiều cao dòng CONTENT phải trong dải 45-60px, thực tế {px}"
 
     context_reqs = _row_height_requests("CONTEXT", CONTEXT_HEADER)
     assert context_reqs == [], "CONTEXT KHÔNG được set chiều cao dòng riêng (giữ mặc định)"

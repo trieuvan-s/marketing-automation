@@ -1292,15 +1292,14 @@ _COL_WIDTH_DEFAULT = 140
 _WRAP_COLS = {"title", "hook", "notes", "message", "payload", "context",
               "output", "prompt", "template", "label", "keywords", "sources"}
 
-# CHIỀU CAO DÒNG DỮ LIỆU tab CONTENT (yêu cầu Trung 02/08): Context/Output/
-# Notes ở đây dài hơn hẳn CONTEXT (thân bài/JSON preview), mặc định Google
-# Sheets (~21px) quá thấp để liếc nhanh nhiều dòng — CỐ Ý KHÔNG auto-resize
-# theo độ dài nội dung (Sheets API không có kiểu "chiều cao co giãn theo text"
-# qua batchUpdate, chỉ set 1 giá trị CỐ ĐỊNH cho MỌI dòng) — người cần đọc trọn
-# vẫn double-click mở rộng ô như trước, đây chỉ nới khoảng liếc mặc định.
-# ~50% cao hơn mặc định (~21px) -> 32px. CONTEXT giữ nguyên mặc định (không
-# set gì = Sheets tự dùng chuẩn của nó, không đổi hành vi cũ).
-_CONTENT_ROW_HEIGHT = 32
+# CHIỀU CAO DÒNG DỮ LIỆU tab CONTENT (Trung 02/08, chốt lại sau khi đo THẬT
+# trên Sheet sản xuất — bản đầu 32px SAI: các dòng CONTENT lúc đó đang TỰ
+# GIÃN theo nội dung wrap, 67-84px, cố định 32px sẽ THU NHỎ lại, ngược ý
+# muốn "dễ đọc hơn"). Quyết định cuối: 1 chiều cao CỐ ĐỊNH duy nhất trong dải
+# 45-60px cho MỌI dòng dữ liệu (KHÔNG tự giãn theo nội dung nữa, kể cả dòng
+# dài) — người cần đọc trọn thì double-click mở rộng ô. CONTEXT giữ nguyên
+# mặc định Sheets (không set gì).
+_CONTENT_ROW_HEIGHT = 50
 
 
 def _rgb(hex_str: str) -> dict:
