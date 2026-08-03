@@ -50,7 +50,7 @@ from typing import Callable
 from ._jsonparse import try_json_object
 from .base import LLMCallError, LLMClient
 from .production import (
-    AnalysisWriterAgent, EmptySectionsError, ProductionBrief, _load_content_writer_rules,
+    AnalysisWriterAgent, EmptySectionsError, ProductionBrief, _load_composer_rules,
     analysis_fields_from_data, apply_guardrails, build_analysis_prompt,
     render_analysis,
 )
@@ -61,37 +61,54 @@ from ..models import ContentDraft, ContentFormat
 _PERSONA = AnalysisWriterAgent.system   # persona + QUY TẮC BẮT BUỘC + schema JSON — dùng CHUNG, không lặp
 
 
-def build_writer_system(decision=None) -> str:
+def build_writer_system(decision=None, *, content_type: str = "article", settings=None) -> str:
     """Persona/schema (CHUNG) + voice-lock ĐỘNG (theo `decision`, xem
     agents/voice.assemble_voice — decision=None -> fallback an toàn S1+H3+D) +
-    CONTENT_WRITER_RULES (ACTIVE_TASK — tích hợp rules file, §2+§3, đọc
-    RUNTIME qua production._load_content_writer_rules — ĐÂY là đường Article
-    THẬT đang chạy sản xuất, xem scripts/produce_from_sheet.run() ->
-    run_writer_with_retry() -> run_writer() -> hàm này). Hàm THUẦN (không
-    mạng ngoài đọc file) — tách riêng để test được không cần LLM thật."""
+    CONTENT_WRITER_RULES, đọc RUNTIME qua production._load_composer_rules —
+    ĐÂY là đường Article/Long-Article THẬT đang chạy sản xuất, xem scripts/
+    produce_from_sheet.run() -> run_writer_with_retry() -> run_writer() -> hàm
+    này. `content_type` mặc định "article" (rules nền, 1 file); "long_article"
+    (VIỆC 1, 2026-08-03) nạp THÊM file bổ sung, xem docstring _load_composer_
+    rules(). SỬA CÙNG NGÀY (phát hiện khi nối Long-Article): hàm này trước đây
+    gọi `_load_content_writer_rules(sections=("2","3"))` — cắt mục theo heading
+    "# N. "/"## N. ", KHÔNG khớp cấu trúc "# PHẦN I/II/III" của content-rules-
+    daily-v3.4.md (file cấu hình sản xuất qua `writer.content_rules_path`) nên
+    LUÔN trả rỗng — Article sản xuất thật KHÔNG hề nhận CONTENT_WRITER_RULES
+    nào (lỗi ÂM THẦM, xác nhận thực nghiệm: 0 ký tự). Đổi sang _load_composer_
+    rules() (tôn trọng `writer.rules_load_mode`, mặc định "full" = nạp NGUYÊN
+    VĂN, đã cấu hình sẵn trong settings.yaml) SỬA LUÔN lỗi này — Article giờ
+    nhận đủ rules thật, hành vi sinh bài THAY ĐỔI so với trước (Lead đã xác
+    nhận sửa cùng lượt Việc 1, không phải side-effect ngoài ý muốn).
+    Hàm THUẦN (không mạng ngoài đọc file) — tách riêng để test được không cần
+    LLM thật."""
     voice = assemble_voice(decision)
     system = _PERSONA
     if voice:
         system += f"\n\n---\n\nVOICE-LOCK (giọng văn bắt buộc):\n{voice}"
-    rules = _load_content_writer_rules(sections=("2", "3"))
+    rules = _load_composer_rules(content_type, settings=settings)
     if rules:
         system += f"\n\n---\n\nCONTENT_WRITER_RULES (bắt buộc, nguồn chuẩn):\n{rules}"
     return system
 
 
 def run_writer(llm: LLMClient, brief: ProductionBrief, decision=None, *,
-               model: str | None = None, fail_loud: bool = True) -> ContentDraft:
+               model: str | None = None, fail_loud: bool = True,
+               content_type: str = "article", settings=None) -> ContentDraft:
     """Gọi LLM bước 'writer' -> ContentDraft (CHƯA qua guardrail — caller tự gọi
     apply_guardrails() sau, xem docstring module). `decision` = RouterDecision
     (agents/structure_router.RouterDecision) hoặc None (fallback S1+H3+D).
     `fail_loud=True` MẶC ĐỊNH (khác các bước phụ brief/router) — lỗi RAISE
-    LLMCallError, KHÔNG lùi mượt trả nội dung rỗng."""
-    system = build_writer_system(decision)
+    LLMCallError, KHÔNG lùi mượt trả nội dung rỗng. `content_type` (VIỆC 1)
+    "article" | "long_article" — CHỈ đổi bộ rules nạp (build_writer_system),
+    KHÔNG đổi schema/prompt/persona: dùng CHUNG đường sinh, đúng yêu cầu Lead
+    "KHÔNG dựng producer mới"."""
+    fmt = ContentFormat.LONG_ARTICLE if content_type == "long_article" else ContentFormat.ARTICLE
+    system = build_writer_system(decision, content_type=content_type, settings=settings)
     raw = llm.complete(system, build_analysis_prompt(brief), model=model, fail_loud=fail_loud)
     data = try_json_object(raw)
     title, sapo, sections, disclaimer, sources = analysis_fields_from_data(data, brief)
     body = render_analysis(title, sapo, sections, disclaimer, sources, brief)
-    return ContentDraft(fmt=ContentFormat.ARTICLE, title=title, body=body, brief_topic=brief.topic)
+    return ContentDraft(fmt=fmt, title=title, body=body, brief_topic=brief.topic)
 
 
 class WriterOutcome(str, Enum):
@@ -117,11 +134,14 @@ def run_writer_with_retry(
     state: dict[str, str] | None = None, key: str | None = None,
     notify: Callable[[str, dict], None] | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    content_type: str = "article",
 ) -> WriterResult:
     """Bọc run_writer() bằng retry (Phase 4.5) — xem docstring module. `state`+
     `key` tuỳ chọn cho idempotent (bỏ qua nếu đã DONE); `notify` tuỳ chọn, gọi
     tại retry/failed/needs_human; `sleep` tiêm được cho test ($0 thời gian,
-    giống pattern call_with_retry ở sheets_board.py)."""
+    giống pattern call_with_retry ở sheets_board.py). `content_type` (VIỆC 1)
+    "article" | "long_article" — truyền thẳng xuống run_writer()."""
+    fmt = ContentFormat.LONG_ARTICLE if content_type == "long_article" else ContentFormat.ARTICLE
     settings = settings or load_settings()
     notify = notify or (lambda event, info: None)
 
@@ -135,7 +155,8 @@ def run_writer_with_retry(
     last_reason = ""
     for attempt in range(1, max_attempts + 1):
         try:
-            draft = run_writer(llm, brief, decision, model=model, fail_loud=True)
+            draft = run_writer(llm, brief, decision, model=model, fail_loud=True,
+                               content_type=content_type, settings=settings)
         except LLMCallError as e:
             last_reason = str(e)
             print(f"[ERROR] writer attempt {attempt}/{max_attempts} failed: {last_reason}")
@@ -153,7 +174,7 @@ def run_writer_with_retry(
             reason = str(e)
             print(f"[ERROR] writer NEEDS_HUMAN (composer sections rỗng, KHÔNG retry): {reason}")
             notify("needs_human", {"reason": reason, "attempt": attempt})
-            draft = ContentDraft(fmt=ContentFormat.ARTICLE, title=brief.title, body="",
+            draft = ContentDraft(fmt=fmt, title=brief.title, body="",
                                  brief_topic=brief.topic, compliance_issues=[reason])
             if state is not None and key is not None:
                 state[key] = WriterOutcome.NEEDS_HUMAN.value

@@ -190,7 +190,13 @@ def _load_content_writer_rules(*, sections: tuple[str, ...], settings=None) -> s
 # chạy). Nhánh MỚI "full" (nạp nguyên văn v3+, xem `_load_rules_full`) đứng
 # TRƯỚC, tách bạch hoàn toàn — không tái dùng biến/hàm của nhánh cũ để tránh
 # lẫn 2 hình dạng dữ liệu.
-_LEGACY_SECTIONS_BY_TYPE = {"article": ("2", "3"), "video": ("2", "4"), "infographic": ("2", "5")}
+_LEGACY_SECTIONS_BY_TYPE = {"article": ("2", "3"), "video": ("2", "4"), "infographic": ("2", "5"),
+                           # VIỆC 1 -- lưới an toàn nếu rules_load_mode lùi về
+                           # legacy_sections: long_article dùng CHUNG mục với
+                           # article (KHÔNG có mục riêng ở rules cũ, hàm _load_
+                           # composer_rules() nạp thêm supplement CHỈ ở nhánh
+                           # "full" — nhánh này KHÔNG PHẢI đường sản xuất).
+                           "long_article": ("2", "3")}
 
 # v2.1 core dùng CHUNG mọi loại: §1 mục tiêu, §2 thứ tự ưu tiên, §3 ranh giới
 # bắt buộc, §4 cấu trúc vừa đủ, §5 không gian sáng tạo, §6 chất lượng lập luận/
@@ -199,7 +205,8 @@ _LEGACY_SECTIONS_BY_TYPE = {"article": ("2", "3"), "video": ("2", "4"), "infogra
 # cuối, giống §6-9 content_rules_v1.0.md CŨ cũng không nhúng — input cho
 # guardrail/self-review, không phải "dạy văn").
 _V21_CORE_SECTIONS = ("1", "2", "3", "4", "5", "6")
-_V21_PRODUCT_SUBSECTION = {"article": "7.1", "video": "7.2", "infographic": "7.3"}
+_V21_PRODUCT_SUBSECTION = {"article": "7.1", "video": "7.2", "infographic": "7.3",
+                          "long_article": "7.1"}   # VIỆC 1 -- cùng lưới an toàn, xem _LEGACY_SECTIONS_BY_TYPE
 _V21_SUBSECTION_RE_CACHE: dict[str, re.Pattern] = {}
 
 
@@ -217,6 +224,13 @@ def _v21_subsection_re(num: str) -> re.Pattern:
 # mục -- default dưới đây CHỈ là fallback khi config không set, giống mọi
 # hằng số _DEFAULT_* khác trong repo (config LUÔN thắng).
 _DEFAULT_RULES_FULL_PATH = "prompts/content-rules-daily-v3.4.md"
+
+# VIỆC 1 (2026-08-03, Lead) — content_type="long_article" nạp THÊM file này
+# SAU file nền (_DEFAULT_RULES_FULL_PATH/content_rules_path) -- "bổ sung,
+# không thay thế" (xem header content-rules-deep-v3.0.md: "Nạp độc lập... nạp
+# thêm"). Fallback khi config không set `writer.content_rules_supplement_path`,
+# cùng quy ước A2 với _DEFAULT_RULES_FULL_PATH ở trên.
+_DEFAULT_RULES_SUPPLEMENT_PATH = "prompts/content-rules-deep-v3.0.md"
 
 
 def _load_rules_full(path: Path) -> str:
@@ -287,6 +301,19 @@ def _load_composer_rules(content_type: str, *, settings=None) -> str:
             print(f"[CẢNH BÁO] không thấy {path} (rules_load_mode=full) -> bỏ qua rules (rỗng).")
             return ""
         text = _load_rules_full(path)
+        if content_type == "long_article":
+            # VIỆC 1 -- nạp nền TRƯỚC (đã xong ở trên), bổ sung SAU, NỐI NGUYÊN
+            # VĂN cả 2 (không cắt mục nào) — "nạp KÈM, không thay thế" (header
+            # content-rules-deep-v3.0.md). Thiếu file bổ sung -> LÙI MƯỢT, vẫn
+            # trả nền (KHÔNG rỗng cả 2 vì thiếu 1 file phụ).
+            supp_path = Path(settings.get("writer.content_rules_supplement_path",
+                                          _DEFAULT_RULES_SUPPLEMENT_PATH))
+            if supp_path.exists():
+                supp_text = _load_rules_full(supp_path)
+                if supp_text:
+                    text = text + "\n\n---\n\n" + supp_text if text else supp_text
+            else:
+                print(f"[CẢNH BÁO] không thấy {supp_path} (long_article bổ sung) -> chỉ dùng nền.")
         if text:
             _append_rules_run_state(content_type=content_type, path=path,
                                     sha256=_sha256_text(text), mode=mode, settings=settings)

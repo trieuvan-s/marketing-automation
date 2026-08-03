@@ -100,6 +100,24 @@ def test_render_context_to_sheet_builds_rows_from_store(board, db_path):
     assert row[_header_index(header, "Source")] == "https://cafef.vn/x.chn"
     assert row[_header_index(header, "TopicKey")] == "tk-1"
     assert row[_header_index(header, GATE1_COL)] == "PENDING"
+    # VIỆC Execute (2026-08-03, Lead) — ĐẢO LẠI quyết định 2026-07-28 (khi đó
+    # ép "Waiting" cho Execute rỗng). Gate1=PENDING (chưa duyệt) + store
+    # execute="" -> Sheet PHẢI hiện đúng "" (không tự đoán "Waiting").
+    assert row[_header_index(header, "Execute")] == ""
+
+
+def test_render_context_to_sheet_shows_waiting_once_approved_not_before(board, db_path):
+    """VIỆC Execute (2026-08-03, Lead) — Gate1=APPROVE + store execute=
+    "Waiting" -> Sheet hiện "Waiting" (khác ca PENDING/rỗng ở test trên).
+    Phân biệt RÕ 2 trạng thái theo store, không hardcode 1 chiều."""
+    ps.write_raw("tk-2", {"context": "Bài 2 đã duyệt"}, db_path=db_path)
+    ps.write_gate_status("tk-2", gate1="APPROVE", execute="Waiting", db_path=db_path)
+
+    ss.render_context_to_sheet(board, db_path=db_path)
+    grid = board._tab("CONTEXT").get_all_values()
+    header = grid[0]
+    row = next(r for r in grid[1:] if r[_header_index(header, "TopicKey")] == "tk-2")
+    assert row[_header_index(header, "Execute")] == "Waiting"
 
 
 def test_render_context_to_sheet_reflects_gate1_and_notes_after_ingest(board, db_path):
@@ -190,7 +208,7 @@ def test_render_content_to_sheet_builds_rows_from_store(board, db_path):
     assert grid[0] == CONTENT_HEADER
     header, row = grid[0], grid[1]
     assert row[_header_index(header, "Context")] == "Bài 1"
-    assert row[_header_index(header, "Type")] == "article"
+    assert row[_header_index(header, "Type")] == "Article"   # VIỆC 3: Type ghi NHÃN hiển thị
     assert row[_header_index(header, "Status")] == "DONE"
     assert row[_header_index(header, GATE2_COL)] == "PENDING"
     assert row[_header_index(header, GATE3_COL)] == "PENDING"
@@ -328,6 +346,9 @@ def test_ingest_context_from_sheet_bridges_new_topic_not_in_store(board, db_path
     assert raw["hot_pct"] == 62.5
     gate = ps.read_gate_status("tk-moi", db_path=db_path)
     assert gate["gate1"] == "PENDING"
+    # VIỆC Execute (2026-08-03, Lead) — topic MỚI, gate1=PENDING (chưa duyệt)
+    # -> Execute="" (KHÔNG "Waiting" — đó là ĐẢO LẠI quyết định 2026-07-28).
+    assert gate["execute"] == ""
 
 
 def test_ingest_context_from_sheet_skips_rows_without_topic_key(board, db_path):
@@ -654,16 +675,18 @@ def test_ingest_context_from_sheet_bridges_new_topic_already_approved_bootstraps
 
 
 def test_ingest_context_from_sheet_does_not_bootstrap_when_gate1_still_pending(board, db_path):
-    """Chưa duyệt -> Execute vẫn là "Waiting" (từ 2026-07-28 đây là MẶC ĐỊNH
-    của mọi dòng, không còn để rỗng) nhưng TUYỆT ĐỐI không có job nào — Waiting
-    nghĩa là "hệ thống đã thấy dòng này", KHÔNG phải "sắp chạy dòng này"."""
+    """VIỆC Execute (2026-08-03, Lead) — ĐẢO LẠI quyết định 2026-07-28 (khi đó
+    ép "Waiting" cho MỌI dòng). Chưa duyệt -> Execute = "" (mới crawl, chưa có
+    gì để chờ) — "Waiting" giờ nghĩa CHÍNH XÁC là "đã duyệt, đang xếp hàng",
+    KHÔNG còn dùng cho "hệ thống đã thấy dòng này" nữa. TUYỆT ĐỐI không có
+    job nào."""
     board._tab("CONTEXT").set_rows([
         CONTEXT_HEADER,
         ["24/07/2026", "0.0", "0", "", "", "Bài chưa duyệt", "h", "u1", "PENDING", "", "", "", "", "tk-1"],
     ])
     ss.ingest_context_from_sheet(board, db_path=db_path)
     gate = ps.read_gate_status("tk-1", db_path=db_path)
-    assert gate["execute"] == "Waiting"
+    assert gate["execute"] == ""
     assert qs.list_queue(db_path=db_path) == []
 
 
@@ -886,7 +909,11 @@ def _ctx_row(gate1="APPROVE", output_type="", key="tk-1", execute=""):
 
 def test_cancel_pending_when_gate1_leaves_approve(board, db_path):
     """Người RÚT duyệt -> job đang xếp hàng trở nên vô nghĩa (nó sẽ sinh nội
-    dung cho yêu cầu vừa bị bỏ). Phải huỷ, không để chạy."""
+    dung cho yêu cầu vừa bị bỏ). Phải huỷ, không để chạy.
+
+    VIỆC Execute (2026-08-03, Lead) — Execute về "" (không phải "Waiting")
+    sau khi rút duyệt: "Waiting" giờ nghĩa CHÍNH XÁC "đã duyệt, đang xếp
+    hàng" — rút duyệt thì không còn gì xếp hàng, "" (chưa duyệt) đúng hơn."""
     ps.write_raw("tk-1", {"context": "Bài 1"}, db_path=db_path)
     ps.write_gate_status("tk-1", gate1="APPROVE", execute="Waiting", db_path=db_path)
     qs.enqueue("tk-1", job_type="produce", db_path=db_path)
@@ -896,7 +923,7 @@ def test_cancel_pending_when_gate1_leaves_approve(board, db_path):
 
     jobs = qs.list_queue(db_path=db_path)
     assert [j["status"] for j in jobs] == ["cancelled"]
-    assert ps.read_gate_status("tk-1", db_path=db_path)["execute"] == "Waiting"
+    assert ps.read_gate_status("tk-1", db_path=db_path)["execute"] == ""
 
 
 def test_change_output_type_cancels_old_request_and_creates_new(board, db_path):
@@ -1090,7 +1117,7 @@ def test_restore_keeps_every_user_owned_field(board, db_path):
     assert row_a[_header_index(ctx[0], "Timestamp")] == "28/07/2026"
 
     con = board._tab("CONTENT").get_all_values()
-    art = next(r for r in con[1:] if r[_header_index(con[0], "Type")] == "article")
+    art = next(r for r in con[1:] if r[_header_index(con[0], "Type")] == "Article")   # VIỆC 3: nhãn hiển thị
     assert art[_header_index(con[0], GATE2_COL)] == "APPROVE"
     assert art[_header_index(con[0], GATE3_COL)] == "APPROVE"
     assert art[_header_index(con[0], "Social Link")] == "https://fb.com/p/1"

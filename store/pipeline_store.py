@@ -126,31 +126,51 @@ def read_content_output(topic_key: str, content_type: str, *, db_path=None) -> d
 
 
 def existing_content_keys(*, db_path=None) -> set[tuple[str, str]]:
-    """(topic_key, content_type) đã có content_output -- tương đương
-    `SheetsBoard.existing_content_keys()` (Lớp 5 Phase 2, dedupe across-run)."""
+    """(topic_key, content_type) đã XONG THẬT (status DONE) -- dùng làm `seen`
+    chặn produce_from_sheet.run() sinh lại. Tương đương SheetsBoard.existing_
+    content_keys() cũ (Lớp 5 Phase 2, dedupe across-run).
+
+    SỬA LỖI THẬT (2026-08-03, Lead báo qua ca "Nafoods Group": Execute=DONE
+    sau khi re-approve Gate1/đổi Output Type, nhưng tab CONTENT vẫn hiện dữ
+    liệu ERROR CŨ) -- bản trước chỉ kiểm content_output CÓ TỒN TẠI hay không
+    (is not None), KHÔNG phân biệt DONE/ERROR/SKIPPED. Hệ quả: 1 kênh từng
+    ERROR/NEEDS_HUMAN bị coi là "đã xong" VĨNH VIỄN -- produce_from_sheet.run()
+    gọi lại Composer (tốn LLM) nhưng kết quả bị VỨT ở nhánh `if (topic_key,
+    type_) in seen: continue` (xem dòng gần cuối run()), Execute vẫn báo DONE
+    dù không ghi version mới nào. ERROR/NEEDS_HUMAN giờ KHÔNG tính là "đã
+    xong" -- Gate1 re-approve (hoặc đổi Output Type) sẽ THẬT SỰ thử lại, đúng
+    ý đồ đã ghi sẵn ở nhánh Article (produce_from_sheet.py, comment "KHÔNG
+    seen.add — chưa coi là xong" cạnh WriterOutcome.NEEDS_HUMAN) nhưng trước
+    đây hàm này không tôn trọng cùng phân biệt đó cho TOÀN BỘ kênh.
+
+    SKIPPED (Router chủ động từ chối tuyến) CŨNG không tính "đã xong" -- vô
+    hại khi retry (route-once đã đóng băng quyết định, xem agents/route_once,
+    lượt sau ra CÙNG kết quả SKIPPED, chỉ ghi thêm 1 version giống hệt)."""
     out: set[tuple[str, str]] = set()
     for topic_key in ds.list_topics(layer="content_output", db_path=db_path):
-        for content_type in ("article", "infographic", "video"):
-            if ds.read_latest(topic_key, "content_output", content_type, db_path=db_path) is not None:
+        for content_type in ("article", "long_article", "infographic", "video"):
+            rec = ds.read_latest(topic_key, "content_output", content_type, db_path=db_path)
+            if rec is not None and rec.get("status") == "DONE":
                 out.add((topic_key, content_type))
     return out
 
 
 # --- content_status (per content_type: gate2, gate3, notes, social_link,
 # posting_status, asset_url, asset_local_path, asset_drive_file_id,
-# asset_content_hash -- Bước 3.4) -------------------------------------------
+# asset_content_hash -- Bước 3.4, asset_mime_type -- VIỆC 2.6 2026-08-03) ----
 
 def write_content_status(
     topic_key: str, content_type: str, *, gate2: str | None = None, gate3: str | None = None,
     notes: str | None = None, social_link: str | None = None, posting_status: str | None = None,
     asset_url: str | None = None, asset_local_path: str | None = None,
-    asset_drive_file_id: str | None = None, asset_content_hash: str | None = None, db_path=None,
+    asset_drive_file_id: str | None = None, asset_content_hash: str | None = None,
+    asset_mime_type: str | None = None, db_path=None,
 ) -> int:
     return _merge_write(topic_key, "content_status", content_type, {
         "gate2": gate2, "gate3": gate3, "notes": notes, "social_link": social_link,
         "posting_status": posting_status, "asset_url": asset_url,
         "asset_local_path": asset_local_path, "asset_drive_file_id": asset_drive_file_id,
-        "asset_content_hash": asset_content_hash,
+        "asset_content_hash": asset_content_hash, "asset_mime_type": asset_mime_type,
     }, db_path=db_path)
 
 
