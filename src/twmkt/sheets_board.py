@@ -1446,15 +1446,14 @@ def _tab_requests(t: TabMeta) -> list[dict]:
         c = low.index("enable")
         out.append(_set_validation(sid, 1, fmt_rows, c,
                                    {"condition": {"type": "BOOLEAN"}, "showCustomUi": True}))
-    if t.name == "CONTEXT" and _GATE1_KEY in low:  # -> dropdown quy trình duyệt (cổng 1)
-        # "DELETE" (2026-07-29, quyết định Lead) — XOÁ HẲN chủ đề khỏi DB lẫn
-        # Sheet. CHỈ có ở Gate 1: đây là cổng "chủ đề này có đáng làm không",
-        # nơi duy nhất hợp lý để loại bỏ hoàn toàn. Gate 2/3 nói về SẢN PHẨM
-        # của chủ đề đã nhận, xoá ở đó không có nghĩa gì.
-        # KHÔNG HOÀN TÁC ĐƯỢC — muốn giữ lịch sử thì dùng REJECT.
-        c = low.index(_GATE1_KEY)
-        out.append(_set_validation(sid, 1, fmt_rows, c,
-                                   _one_of_list(["PENDING", "APPROVE", "REJECT", "DELETE"])))
+    # Duyệt Context (Gate 1, CONTEXT): CỐ Ý KHÔNG ghi setDataValidation (Trung
+    # 02/08, cùng lý do Output Type dưới đây) — Trung đã tự bật tay Dropdown
+    # (Chip, chỉ 1 giá trị) qua UI Sheets; mọi lần code ghi validation đè lên
+    # (kể cả plain ONE_OF_LIST) sẽ HẠ CẤP/reset cấu hình chip đó mỗi lượt
+    # --setup. Giá trị hợp lệ (PENDING/APPROVE/REJECT/DELETE, xem "DELETE" —
+    # 2026-07-29, quyết định Lead: xoá hẳn chủ đề, KHÔNG HOÀN TÁC ĐƯỢC, chỉ có
+    # ở Gate 1) vẫn được kiểm ở tầng xử lý (ingest_context_from_sheet), không
+    # cần chặn ở Sheet.
     # Output Type: CỐ Ý KHÔNG ghi setDataValidation (2026-07-28).
     # Ô này là MULTI-SELECT do Lead bật tay qua UI Sheets — API v4 không tạo
     # được kiểu ô đó, nên mọi lần ghi validation từ code đều HẠ CẤP nó về
@@ -1486,14 +1485,12 @@ def _tab_requests(t: TabMeta) -> list[dict]:
         # có validation sót từ lần chèn cột trước đây.
         c = low.index("type")
         out.append({"setDataValidation": {"range": _grid_range(sid, 1, fmt_rows, c, c + 1)}})
-    if t.name == "CONTENT" and _GATE2_KEY in low:  # -> dropdown quy trình duyệt (cổng 2)
-        c = low.index(_GATE2_KEY)
-        out.append(_set_validation(sid, 1, fmt_rows, c,
-                                   _one_of_list(["PENDING", "APPROVE", "REJECT"])))
-    if t.name == "CONTENT" and _GATE3_KEY in low:  # Phase 1.3 -> dropdown quy trình duyệt (cổng 3, duyệt ASSET)
-        c = low.index(_GATE3_KEY)
-        out.append(_set_validation(sid, 1, fmt_rows, c,
-                                   _one_of_list(["PENDING", "APPROVE", "REJECT"])))
+    # Duyệt Content (Gate 2) / Duyệt Public (Gate 3), CONTENT: CỐ Ý KHÔNG ghi
+    # setDataValidation (Trung 02/08, cùng lý do Duyệt Context/Output Type ở
+    # trên) — Trung đã tự bật tay Dropdown (Chip, chỉ 1 giá trị) cho CẢ 2 cột
+    # này qua UI Sheets; ghi validation đè lên mỗi lượt --setup sẽ reset mất.
+    # Giá trị hợp lệ (PENDING/APPROVE/REJECT) vẫn được kiểm ở tầng xử lý
+    # (ingest_content_from_sheet), không cần chặn ở Sheet.
     if t.name == "CONTENT" and "posting status" in low:
         # TRẠNG THÁI ĐĂNG — CỜ MÁY-GHI của khâu publish (2026-07-29, chốt ngữ
         # nghĩa với Lead). Bộ giá trị khớp nếp Execute (Running.../DONE/FAILED):

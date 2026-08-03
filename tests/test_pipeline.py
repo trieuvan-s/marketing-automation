@@ -1018,6 +1018,7 @@ def test_build_format_requests_covers_features_and_is_deterministic():
     from twmkt.sheets_board import (
         build_format_requests, TabMeta, TABS,
         SOURCES_HEADER, CONTEXT_HEADER, CONTENT_HEADER, OUTPUT_TYPE_VALUES,
+        GATE1_COL, GATE2_COL, GATE3_COL,
     )
     tabs = []
     for i, (name, header) in enumerate(TABS.items()):
@@ -1044,10 +1045,16 @@ def test_build_format_requests_covers_features_and_is_deterministic():
     # 2026-07-28 — xem sheets_board.EXECUTE_VALUES) + score + hot% => 3+6+1+1 = 11
     # CONTENT: Duyệt Content(APPROVE/PENDING/REJECT=3, trước đây "Approve(gate 2)") +
     # Duyệt Public (Phase 1.3, trước đây "Gate3", APPROVE/PENDING/REJECT=3) => 12+3+3 = 18
+    # (Conditional-formatting màu vẫn giữ NGUYÊN cho cả 3 cổng dù data
+    # validation đã gỡ bên dưới — tô màu theo TEXT không đụng dropdown/chip.)
     assert kinds.count("addConditionalFormatRule") == 18
     # checkbox: SOURCES.Enable + PROMPTS.Enable (Use đã xoá, KHÔNG còn checkbox CONTEXT)
-    # dropdown: CONTEXT.Duyệt Context + CONTENT.Duyệt Content
-    # + CONTENT.Duyệt Public (Phase 1.3) + CONTENT.Posting Status => 4
+    # dropdown CÒN LẠI: CHỈ CONTENT.Posting Status (khâu publish chưa xây, chưa
+    # ai bật tay Dropdown Chip cho cột này).
+    # CONTEXT.Duyệt Context + CONTENT.Duyệt Content + CONTENT.Duyệt Public
+    # KHÔNG còn ghi validation (Trung 02/08, cùng lý do Output Type) — cả 3 cột
+    # này Trung đã tự bật tay Dropdown (Chip, 1 giá trị) qua UI Sheets, code ghi
+    # đè mỗi lượt --setup sẽ reset mất cấu hình chip đó.
     # CONTENT.Status + CONTENT.Type GỠ dropdown 2026-07-28 (máy-ghi, read-only).
     # CONTEXT.Output Type KHÔNG còn ghi validation (2026-07-28): ô đó là
     # MULTI-SELECT Lead bật tay qua UI, code ghi đè là XOÁ cấu hình đó và API
@@ -1057,7 +1064,7 @@ def test_build_format_requests_covers_features_and_is_deterministic():
     # có mặt trong `sd` nhưng KHÔNG đếm vào ONE_OF_LIST.
     sd = [r["setDataValidation"] for r in reqs if "setDataValidation" in r]
     conds = [v["rule"]["condition"]["type"] for v in sd if "rule" in v]
-    assert conds.count("BOOLEAN") == 2 and conds.count("ONE_OF_LIST") == 4
+    assert conds.count("BOOLEAN") == 2 and conds.count("ONE_OF_LIST") == 1
 
     # 3 request XOÁ validation (không "rule") cho 3 cột read-only:
     # CONTEXT.Execute + CONTENT.Status + CONTENT.Type.
@@ -1082,6 +1089,17 @@ def test_build_format_requests_covers_features_and_is_deterministic():
                         if "setDataValidation" in r
                         and r["setDataValidation"]["range"]["startColumnIndex"] == output_type_col]
     assert output_type_reqs == [], "KHÔNG được ghi validation lên cột Output Type"
+
+    # 3 cổng duyệt (Duyệt Context/Duyệt Content/Duyệt Public): TUYỆT ĐỐI KHÔNG
+    # được có setDataValidation nào nữa (Trung 02/08, CÙNG lý do Output Type ở
+    # trên — Trung đã tự bật tay Dropdown Chip 1-giá-trị cho cả 3 cột qua UI
+    # Sheets, ghi validation đè lên mỗi lượt --setup sẽ reset mất cấu hình đó).
+    low_con = [c.lower() for c in CONTENT_HEADER]
+    gate_cols = [low_ctx.index(GATE1_COL.lower()),
+                low_con.index(GATE2_COL.lower()), low_con.index(GATE3_COL.lower())]
+    gate_reqs = [r for r in reqs if "setDataValidation" in r
+                and r["setDataValidation"]["range"]["startColumnIndex"] in gate_cols]
+    assert gate_reqs == [], f"KHÔNG được ghi validation lên 3 cổng duyệt: {gate_reqs}"
 
     # determinism = idempotent theo cấu trúc
     assert build_format_requests(tabs) == reqs
