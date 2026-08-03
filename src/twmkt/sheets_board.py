@@ -313,6 +313,20 @@ _DEFAULT_VI_NOTES_CODE_LABELS = {
     "RENDER_RANKING_GUARD": "Cảnh báo cắt theo mức ưu tiên",
 }
 
+# VIỆC 3 (2026-08-03, Lead) — cột Type (CONTENT) PHẢI khớp CHÍNH XÁC (kể cả
+# hoa/thường + gạch nối) với giá trị dropdown cột Output Type (CONTEXT) —
+# Lead sẽ dựng data validation cho cột Type dùng CHUNG danh sách 4 giá trị
+# này. Khoá STORE (content_type, "long_article"...) giữ NGUYÊN tiếng Anh chữ
+# thường — bảng dưới CHỈ đổi CHỮ NGƯỜI NHÌN THẤY (cùng cơ chế _vi_labels() với
+# sheet_status/notes_codes, KHÔNG dựng đường ánh xạ thứ hai). Đọc từ config
+# `labels.vi.content_type`; dict dưới CHỈ là mặc định lùi mượt.
+_DEFAULT_VI_TYPE_LABELS = {
+    "article": "Article",
+    "long_article": "Long-Article",
+    "infographic": "Infographic",
+    "video": "Video",
+}
+
 
 def _vi_labels(section: str, default: dict[str, str]) -> dict[str, str]:
     """Đọc bảng dịch tiếng Việt từ config/settings.yaml (`labels.vi.<section>`)
@@ -339,6 +353,15 @@ def _display_status(value: str) -> str:
     return _vi_labels("sheet_status", _DEFAULT_VI_STATUS_LABELS).get(value, value)
 
 
+def _display_type(value: str) -> str:
+    """VIỆC 3 — content_type STORE (article/long_article/infographic/video) ->
+    nhãn hiển thị cột Type (CONTENT), PHẢI khớp TỪNG KÝ TỰ với giá trị dropdown
+    Output Type (OUTPUT_TYPE_VALUES, trừ "AUTO" — Type không bao giờ ghi
+    "AUTO" cho 1 loại thật, xem VIỆC 4 cho ca gộp AUTO riêng). Giá trị lạ
+    (không có trong bảng) giữ NGUYÊN — không đoán/không nổ."""
+    return _vi_labels("content_type", _DEFAULT_VI_TYPE_LABELS).get(value, value)
+
+
 def _display_notes(notes: str) -> str:
     """Dịch mã lý do SKIP/RENDER_RANKING_GUARD xuất hiện TRONG Notes (dạng
     "MÃ: phần còn lại..." — scripts/produce_from_sheet._channel_skip_reason —
@@ -354,6 +377,115 @@ def _display_notes(notes: str) -> str:
     for code, label in labels.items():
         notes = re.sub(rf"\b{re.escape(code)}\b", label, notes)
     return notes
+
+
+# VIỆC 5 (2026-08-03, Lead) — Notes viết cho BIÊN TẬP VIÊN, không phải kỹ sư.
+# _display_notes() ở trên (B3) chỉ thay 1 TOKEN, để nguyên phần câu kỹ thuật
+# xung quanh ("NO_USABLE_CONTENT: Brief đọc được nguồn nhưng KHÔNG tìm thấy...
+# xem agents/brief.BriefResult.brief_status" — vẫn lộ tên hàm/module). Bộ dưới
+# đây THAY THẾ CẢ CÂU cho các thông điệp kỹ thuật đã biết, đọc bảng câu từ
+# `labels.vi.notes_messages` (CHUNG cơ chế _vi_labels() — KHÔNG dựng đường ánh
+# xạ thứ hai). Áp DUY NHẤT tại content_row() — điểm ghi Notes RA SHEET, KHÔNG
+# đụng store (mã lý do gốc giữ nguyên tiếng Anh, xem docstring content_row()).
+_DEFAULT_VI_NOTES_MESSAGES = {
+    "NO_USABLE_CONTENT_FULL": "Bài gốc không có nội dung thực chất (trang điều hướng hoặc trang trống)",
+    "INFOGRAPHIC_NOT_WORTHY": "Nội dung không đủ dữ liệu để dựng thành Infographic có ý nghĩa",
+    "CONTENT_UNITS_EMPTY": "Không trích được dữ kiện nào từ bài gốc",
+    "EMPTY_SECTIONS": "Không dựng được bài viết từ nguồn này",
+    "INSUFFICIENT_SCENES": "Nguồn không đủ chất liệu để dựng video",
+    "RENDER_RANKING_GUARD_FULL": "Ảnh tự thêm số thứ tự xếp hạng không có trong dữ liệu",
+    "SOURCE_BROKEN_FULL": "Không đọc được nguồn",
+    "DUPLICATE_FULL": "Trùng với bài đã xử lý",
+    "BOILERPLATE_FULL": "Trang không có nội dung thực chất",
+    "GENERIC_FALLBACK": "Không xử lý được, cần kiểm tra lại",
+}
+
+# Nhãn TỰ NHIÊN (không phải Type-column) dùng riêng cho câu "Nội dung không
+# phù hợp để làm {loại}" (VIỆC 5, Router-decline) — cố ý KHÁC _DEFAULT_VI_TYPE_
+# LABELS (đó là nhãn CỘT, viết hoa; đây là danh từ giữa câu, viết thường).
+_ROUTER_DECLINE_CHANNEL_VI = {"article": "bài viết", "infographic": "infographic", "video": "video"}
+
+# Marker (chuỗi con NHẬN DIỆN thông điệp kỹ thuật GỐC) -> khoá tra trong
+# `labels.vi.notes_messages`/_DEFAULT_VI_NOTES_MESSAGES. Kiểm THEO THỨ TỰ,
+# khớp ĐẦU TIÊN thắng — marker càng đặc hiệu càng đứng TRƯỚC (vd BOILERPLATE
+# đứng SAU NO_USABLE_CONTENT vì _NO_USABLE_CONTENT_REASON có nhắc "BOILERPLATE
+# dùng chung mã này" trong câu, dễ khớp nhầm nếu đảo thứ tự).
+_NOTES_WHOLE_MARKERS = (
+    ("nghi nguồn boilerplate/trang điều hướng/placeholder", "NO_USABLE_CONTENT_FULL"),
+    ("KHÔNG đạt ngưỡng dựng Infographic", "INFOGRAPHIC_NOT_WORTHY"),
+    ("content_units[] rỗng (Brief chưa trích được số liệu", "CONTENT_UNITS_EMPTY"),
+    ("Composer trả sections rỗng", "EMPTY_SECTIONS"),
+    ("Composer trả scenes rỗng", "INSUFFICIENT_SCENES"),
+    ("KHÔNG bịa cảnh đệm cho đủ số", "INSUFFICIENT_SCENES"),
+    ("RENDER_RANKING_GUARD", "RENDER_RANKING_GUARD_FULL"),
+    ("SOURCE_BROKEN", "SOURCE_BROKEN_FULL"),
+    ("DUPLICATE", "DUPLICATE_FULL"),
+    ("BOILERPLATE", "BOILERPLATE_FULL"),
+)
+
+# Guardrail (agents/production.apply_guardrails) — số bịa/không khớp nguồn,
+# CÓ giá trị động (vd "28%") nên KHÔNG thể map tĩnh qua notes_messages.
+_PCT_MISMATCH_RE = re.compile(r"Số liệu không thấy trong evidence/background:\s*([^\s;|]+)")
+# Router từ chối 1 tuyến (produce_from_sheet._channel_skip_reason) — GIỮ
+# rationale (đã là câu tiếng Việt tự nhiên do Router/LLM viết), chỉ thay PHẦN
+# ĐẦU kỹ thuật ("FORMAT_MISMATCH: Router quyết định tuyến X không hợp tin
+# này:") bằng câu nghiệp vụ + nêu rõ loại (yêu cầu 5.2: "nêu rõ loại nào").
+_ROUTER_DECLINE_RE = re.compile(
+    r"FORMAT_MISMATCH: Router quyết định tuyến (article|infographic|video) không hợp tin này:\s*(.*)",
+    re.S)
+
+# LƯỚI AN TOÀN 5.6 — mã lý do MỚI phát sinh sau này (chưa có trong bảng ánh
+# xạ trên) KHÔNG được lọt thuật ngữ kỹ thuật ra Sheet. Nếu sau khi áp hết các
+# luật trên mà câu VẪN còn 1 trong các dấu hiệu này -> thay bằng GENERIC_
+# FALLBACK + ghi log cảnh báo (KHÔNG raise, notes vẫn phải hiển thị được).
+_BANNED_NOTES_MARKERS = (
+    "content_units[]", "facts[]", "brief_status", "evidence/background",
+    "schema", "payload", "JSON", "NO_USABLE_CONTENT", "FORMAT_MISMATCH",
+    ".py:", "agents/", "scripts/", "None", "null",
+)
+
+
+def _translate_notes_clause(clause: str, messages: dict) -> str:
+    """1 mệnh đề Notes (đã tách theo "; ") -> câu nghiệp vụ tiếng Việt. Mệnh đề
+    KHÔNG khớp mẫu kỹ thuật nào (vd rationale Router đã viết sẵn tiếng Việt tự
+    nhiên, hoặc câu "Output Type không chọn tuyến...") -> giữ NGUYÊN — hàm này
+    CHỈ thay thứ ĐÃ XÁC NHẬN là kỹ thuật, không đụng câu đã sạch."""
+    m = _PCT_MISMATCH_RE.search(clause)
+    if m:
+        return f"Số liệu {m.group(1)} trong bài không có trong nguồn"
+    m = _ROUTER_DECLINE_RE.match(clause.strip())
+    if m:
+        loai = _ROUTER_DECLINE_CHANNEL_VI.get(m.group(1), m.group(1))
+        rationale = m.group(2).strip()
+        return f"Nội dung không phù hợp để làm {loai}. {rationale}" if rationale else \
+               f"Nội dung không phù hợp để làm {loai}."
+    for marker, key in _NOTES_WHOLE_MARKERS:
+        if marker in clause:
+            return messages.get(key, _DEFAULT_VI_NOTES_MESSAGES[key])
+    return clause
+
+
+def _display_notes_business(notes: str) -> str:
+    """VIỆC 5 — Notes hiển thị Sheet, ngôn ngữ NGHIỆP VỤ cho biên tập viên
+    (thay _display_notes() làm điểm ghi CHÍNH tại content_row(), xem đó).
+    Tách theo "; " (dấu nối compliance_issues/_channel_skip_reason dùng xuyên
+    suốt code) -> dịch TỪNG mệnh đề -> lưới an toàn 5.6 (mã lạ chưa có bảng
+    -> câu chung + log cảnh báo, KHÔNG lộ kỹ thuật) -> nối lại. Notes rỗng ->
+    trả y nguyên."""
+    if not notes:
+        return notes
+    messages = _vi_labels("notes_messages", _DEFAULT_VI_NOTES_MESSAGES)
+    out_clauses = []
+    for clause in (c.strip() for c in notes.split("; ")):
+        if not clause:
+            continue
+        translated = _translate_notes_clause(clause, messages)
+        if any(term in translated for term in _BANNED_NOTES_MARKERS):
+            print(f"[CẢNH BÁO] Notes còn thuật ngữ kỹ thuật sau khi dịch (mã lý do mới, "
+                 f"chưa có trong labels.vi.notes_messages) -> dùng câu chung. Gốc: {clause!r}")
+            translated = messages.get("GENERIC_FALLBACK", _DEFAULT_VI_NOTES_MESSAGES["GENERIC_FALLBACK"])
+        out_clauses.append(translated)
+    return "; ".join(out_clauses)
 
 
 CONTEXT_HEADER = ["Timestamp", "Hot%", "Score", "Group", "Topic", "Context", "Hook",
@@ -498,7 +630,7 @@ _LEGACY_TABS = {"Sheet1", "ResearchReview", "ContentReview"}
 # TOÀN nhất, giống default context_row() tự đặt) — KHÔNG khôi phục được lựa
 # chọn APPROVE/REJECT thật đã mất (phải sửa tay nếu gặp lại, như phiên này).
 _MIGRATE_DEFAULTS: dict[str, dict[str, str]] = {
-    "CONTEXT": {"Execute": EXECUTE_WAITING, "TopicKey": "", GATE1_COL: "PENDING"},
+    "CONTEXT": {"Execute": "", "TopicKey": "", GATE1_COL: "PENDING"},
     "CONTENT": {GATE2_COL: "PENDING", "TopicKey": "",
                "Facts": "", "AssetPath": "", "Social Link": "",
                GATE3_COL: "PENDING", "Posting Status": ""},
@@ -719,12 +851,18 @@ def _source_cell(source_url: str, other_sources: list[str] | None) -> str:
 def context_row(*, title: str, hook_line: str, source_url: str, score: int, hot_pct: float,
                 topic: str = "", group: str = "", other_sources: list[str] | None = None,
                 tickers: list[str] | None = None, status: str = "PENDING",
-                execute: str = EXECUTE_WAITING, topic_key: str = "", ts: str | None = None,
+                execute: str = "", topic_key: str = "", ts: str | None = None,
                 notes: str = "", output_type: list[str] | None = None) -> list[str]:
     """Một hàng CONTEXT ĐÚNG thứ tự CONTEXT_HEADER (Timestamp đầu tiên).
 
-    Status mặc định PENDING, Execute mặc định rỗng (tự chuyển RUN khi Status=
-    APPROVE — xem SheetsBoard.sync_approve_execute_flags). score/hot_pct do
+    Status mặc định PENDING, Execute mặc định rỗng "" — SỬA LỖI THẬT (2026-08-03,
+    Lead): docstring này TỪ TRƯỚC đã ghi "Execute mặc định rỗng" nhưng tham số
+    `execute` lại default = EXECUTE_WAITING ("Waiting") — dòng vừa crawl, CHƯA
+    qua Gate 1 hiện "Waiting" như thể đã xếp hàng, sai. Chuỗi trạng thái ĐÚNG
+    (VIỆC Execute 2026-08-03): "" (mới crawl, chưa duyệt) -> Waiting (Gate 1
+    APPROVE, đã vào hàng đợi) -> Running... (Composer đang xử lý) -> DONE/
+    FAILED (xong)/NEEDS_HUMAN (cần người xem lại nội dung — GIỮ, không gộp
+    vào FAILED). score/hot_pct do
     curation.enrich tính; Group/Topic từ classify (nhóm marketing). Source gộp
     url bài chính + các báo khác đưa cùng tin (dedup chéo nguồn, xem review_to_sheet).
     Publisher/Field KHÔNG ghi ra sheet (chỉ dùng nội bộ cho cluster/tiebreak).
@@ -788,8 +926,8 @@ def content_row(*, context: str, type_: str, status: str, output: str,
     người tự đổi qua dropdown khi thật sự duyệt asset. Xem
     test_no_machine_write_path_touches_gate3 (tests/test_pipeline.py) — khoá
     bất biến này VĨNH VIỄN, KHÔNG thêm lại tham số gate3 ở đây dù có lý do gì."""
-    return [ts or _now_ddmmyyyy(), context, type_, _display_status(status), output,
-           _display_notes(notes), approve, topic_key, facts, asset_path, "", "PENDING", ""]
+    return [ts or _now_ddmmyyyy(), context, _display_type(type_), _display_status(status), output,
+           _display_notes_business(notes), approve, topic_key, facts, asset_path, "", "PENDING", ""]
 
 
 def facts_to_json(facts: list) -> str:
@@ -1066,9 +1204,14 @@ def content_rows_for_render(header: list[str], rows: list[list[str]], *,
         i = idx.get(col)
         return row[i].strip() if i is not None and i < len(row) else ""
 
+    # VIỆC 3 (2026-08-03) — cột Type trên Sheet giờ ghi NHÃN hiển thị
+    # (_display_type(), vd "Infographic") chứ không còn content_type thô
+    # ("infographic") — so khớp qua CÙNG hàm dịch, giữ API `type_` NHẬN content_
+    # type thô như trước (KHÔNG đổi chữ ký, tránh phá caller/test hiện có).
+    want = _display_type(type_)
     out: list[dict] = []
     for offset, row in enumerate(rows):
-        if g(row, "type") != type_:
+        if g(row, "type") != want:
             continue
         out.append({
             "row": offset + 2,

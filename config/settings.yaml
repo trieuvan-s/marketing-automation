@@ -549,6 +549,12 @@ writer:
   # (code tự lùi về _DEFAULT_RULES_FULL_PATH = prompts/content-rules-daily-v3.4.md
   # khi mode=full) — set tường minh dưới đây theo quyết định Lead 2026-07-3x.
   content_rules_path: "prompts/content-rules-daily-v3.4.md"
+  # VIỆC 1 (2026-08-03, Lead) — riêng content_type="long_article": nạp NGUYÊN
+  # VĂN content_rules_path (nền) TRƯỚC, rồi nạp NGUYÊN VĂN file này (bổ sung)
+  # SAU — "nạp KÈM, không thay thế; mâu thuẫn thì daily thắng" (xem header
+  # content-rules-deep-v3.0.md). Article (content_type="article") KHÔNG đụng
+  # tới key này. Xem agents/production._load_composer_rules().
+  content_rules_supplement_path: "prompts/content-rules-deep-v3.0.md"
 
 # --- Thông báo vận hành (PHASE TELE, src/twmkt/utils/telegram_notifier.py) --
 # 1 chiều, KHÔNG chặn luồng chính — báo qua Telegram khi bắt đầu xử lý/đổi nội
@@ -579,13 +585,48 @@ labels:
     sheet_status:              # Sheet: Status (CONTENT) + Execute (CONTEXT)
       SKIPPED: "BỎ QUA"
       NEEDS_HUMAN: "Cần người review lại nội dung"
+    content_type:              # VIỆC 3 (2026-08-03) — Sheet: Type (CONTENT),
+                               # PHẢI khớp TỪNG KÝ TỰ dropdown Output Type
+                               # (CONTEXT) — xem sheets_board._display_type().
+                               # Khoá STORE (article/long_article/infographic/
+                               # video) giữ NGUYÊN, chỉ đổi CHỮ hiển thị.
+      article: "Article"
+      long_article: "Long-Article"
+      infographic: "Infographic"
+      video: "Video"
     notes_codes:                # Sheet: mã lý do TRONG câu Notes (prefix "MÃ:")
+                               # — CƠ CHẾ CŨ (B3), CHỈ thay 1 TỪ/TOKEN, giữ
+                               # nguyên phần câu còn lại. VIỆC 5 (2026-08-03)
+                               # thay THẾ CẢ CÂU cho các mã này bằng
+                               # `notes_messages` bên dưới (xem sheets_board.
+                               # _display_notes_business()) — bảng này GIỮ LẠI
+                               # cho _display_notes() cũ (vẫn có test khoá
+                               # hành vi token-swap riêng, KHÔNG xoá).
       SOURCE_BROKEN: "Nguồn lỗi"
       DUPLICATE: "Trùng lặp"
       BOILERPLATE: "Nội dung mẫu/điều hướng"
       NO_USABLE_CONTENT: "Không có nội dung dùng được"
       FORMAT_MISMATCH: "Không hợp định dạng"
       RENDER_RANKING_GUARD: "Cảnh báo cắt theo mức ưu tiên"
+    notes_messages:              # VIỆC 5 (2026-08-03, Lead) — Sheet: Notes,
+                               # THAY THẾ CẢ CÂU (không phải 1 token) — người
+                               # duyệt Gate là biên tập viên, không phải kỹ
+                               # sư. Mã lý do GỐC (tiếng Anh) giữ nguyên trong
+                               # STORE — bảng này CHỈ đổi câu hiển thị. Xem
+                               # sheets_board._display_notes_business(); cấm
+                               # xuất hiện content_units[]/facts/brief/
+                               # evidence/background/schema/payload/JSON/tên
+                               # hàm/tên file/mã lý do thô trong CÂU THAY THẾ.
+      NO_USABLE_CONTENT_FULL: "Bài gốc không có nội dung thực chất (trang điều hướng hoặc trang trống)"
+      INFOGRAPHIC_NOT_WORTHY: "Nội dung không đủ dữ liệu để dựng thành Infographic có ý nghĩa"
+      CONTENT_UNITS_EMPTY: "Không trích được dữ kiện nào từ bài gốc"
+      EMPTY_SECTIONS: "Không dựng được bài viết từ nguồn này"
+      INSUFFICIENT_SCENES: "Nguồn không đủ chất liệu để dựng video"
+      RENDER_RANKING_GUARD_FULL: "Ảnh tự thêm số thứ tự xếp hạng không có trong dữ liệu"
+      SOURCE_BROKEN_FULL: "Không đọc được nguồn"
+      DUPLICATE_FULL: "Trùng với bài đã xử lý"
+      BOILERPLATE_FULL: "Trang không có nội dung thực chất"
+      GENERIC_FALLBACK: "Không xử lý được, cần kiểm tra lại"
     telegram_events:             # Telegram: tên event (dòng in đậm đầu tin)
       start: "Bắt đầu xử lý nội dung"
       new_topic: "Chủ đề mới"

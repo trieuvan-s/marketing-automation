@@ -40,6 +40,11 @@ from pathlib import Path
 #     được vì ta chỉ truyền id nó làm `parents`, không cần đọc nội dung nó.
 _SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 _FOLDER_MIME = "application/vnd.google-apps.folder"
+# VIỆC 2 (2026-08-03, Lead) — mimeType ĐÍCH khi muốn Drive convert file văn bản
+# thành Google Docs NATIVE (heading/mục lục thật, không còn hiển thị dấu #).
+# ĐỪNG tự dựng bộ chuyển đổi markdown->docx — Drive tự parse khi mimeType
+# metadata KHÁC mimeType của phần media upload (xem upload()).
+GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
 
 
 class DriveConfigError(RuntimeError):
@@ -174,15 +179,26 @@ class DriveAssetStore:
 
     def upload(self, local_path: Path | str, *, content_type: str = "",
                folder_date: datetime | None = None, topic: str = "",
-               topic_key: str = "", mime_type: str = "image/png") -> dict:
+               topic_key: str = "", mime_type: str = "image/png",
+               target_mime_type: str = "") -> dict:
         """Đẩy 1 file lên `<tên chủ đề>-<dd-mm-yyyy>/` và trả
         {"id", "view_link", "download_link", "folder_id"}. `content_type` giữ
         lại cho tương thích chữ ký cũ nhưng KHÔNG còn tạo tầng thư mục riêng.
 
+        `target_mime_type` (VIỆC 2, 2026-08-03) — khi khác rỗng (vd
+        GOOGLE_DOC_MIME), Drive TỰ convert nội dung `mime_type` (vd
+        "text/markdown") sang định dạng native đó lúc upload — KHÔNG tự dựng
+        bộ chuyển đổi markdown->docx ở đây, chỉ khai đúng 2 mimeType để Drive
+        làm hộ (metadata mimeType KHÁC mimeType media -> Drive hiểu là yêu cầu
+        convert). Rỗng (mặc định) -> giữ nguyên hành vi cũ (ảnh/video/json,
+        không convert gì).
+
         Trùng tên trong CÙNG thư mục -> GHI ĐÈ (update) thay vì tạo bản thứ 2:
         render lại cùng 1 chủ đề trong ngày là chuyện thường (sửa Output rồi
         duyệt lại), 2 file cùng tên khiến người duyệt Gate 3 không biết tin cái
-        nào."""
+        nào. `update()` KHÔNG nhận lại `mimeType` (Drive không cho đổi mimeType
+        qua update cho file NATIVE đã tồn tại) — media convertible (text/
+        markdown) tự động re-convert vào ĐÚNG file Docs đã có, không tạo file mới."""
         from googleapiclient.http import MediaFileUpload
 
         path = Path(local_path)
@@ -202,8 +218,11 @@ class DriveAssetStore:
                 fileId=existing[0]["id"], media_body=media, fields="id",
                 supportsAllDrives=True).execute()["id"]
         else:
+            body = {"name": path.name, "parents": [folder_id]}
+            if target_mime_type:
+                body["mimeType"] = target_mime_type
             file_id = self.svc.files().create(
-                body={"name": path.name, "parents": [folder_id]}, media_body=media,
+                body=body, media_body=media,
                 fields="id", supportsAllDrives=True).execute()["id"]
 
         if self.make_public:

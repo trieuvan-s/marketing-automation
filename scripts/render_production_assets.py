@@ -25,6 +25,7 @@ Chạy:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -42,7 +43,7 @@ ensure_utf8_stdio()
 from twmkt.asset_server import DEFAULT_PORT, asset_url  # noqa: E402
 from twmkt.config import data_path, load_settings  # noqa: E402
 from twmkt.agents.production import VALID_RATIOS  # noqa: E402
-from twmkt.publishers.drive_store import build_drive_store  # noqa: E402
+from twmkt.publishers.drive_store import GOOGLE_DOC_MIME, build_drive_store  # noqa: E402
 from twmkt.render.ai_full import render_ai_full  # noqa: E402
 from twmkt.sheets_board import SheetsBoard  # noqa: E402
 
@@ -175,8 +176,25 @@ _TEXT_OUTPUTS = {
     # OmniVoice TTS + ffmpeg), CHƯA nối vào luồng này. Đặt tên .json cho đúng
     # bản chất thay vì .mp4 gây hiểu nhầm là đã có video thành phẩm.
     "article": (".md", "text/markdown"),
+    # VIỆC 1 (2026-08-03) — Long-Article dùng CHUNG định dạng .md/text/markdown
+    # với article (KHÔNG có định dạng ra riêng, xem models.ContentFormat.
+    # LONG_ARTICLE); thiếu dòng này thì Long-Article DONE nhưng KHÔNG BAO GIỜ
+    # có AssetPath (run_text_assets() chỉ lặp qua các khoá trong dict này).
+    "long_article": (".md", "text/markdown"),
     "video": (".json", "application/json"),
 }
+
+# VIỆC 2 (2026-08-03, Lead) — CHỈ Article/Long-Article convert sang Google
+# Docs native (2.3: Infographic .png/Video .mp4/.json GIỮ NGUYÊN, không đụng).
+_GOOGLE_DOC_CONVERT_TYPES = {"article", "long_article"}
+
+
+def _content_hash(body: str) -> str:
+    """VIỆC 2.4 — khoá idempotent: cùng TopicKey + cùng loại + cùng NỘI DUNG
+    (hash) -> KHÔNG upload lại, dùng fileId đã lưu. Nội dung đổi (bài viết lại/
+    sửa) -> hash khác -> upload lại (update() cùng file, không tạo bản thứ 2,
+    xem DriveAssetStore.upload())."""
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 def upload_text_outputs(drive, *, topic_key: str, topic: str, out_dir: Path) -> dict[str, str]:
@@ -202,7 +220,12 @@ def upload_text_outputs(drive, *, topic_key: str, topic: str, out_dir: Path) -> 
         fn = out_dir / f"{_slug(topic)}_{ctype}{ext}"
         fn.write_text(body, encoding="utf-8")
         try:
-            r = drive.upload(fn, topic=topic, topic_key=topic_key, mime_type=mime)
+            target_mime = GOOGLE_DOC_MIME if ctype in _GOOGLE_DOC_CONVERT_TYPES else ""
+            r = drive.upload(fn, topic=topic, topic_key=topic_key, mime_type=mime,
+                             target_mime_type=target_mime)
+            ps.write_content_status(topic_key, ctype, asset_drive_file_id=r["id"],
+                                    asset_content_hash=_content_hash(body),
+                                    asset_mime_type=target_mime or mime)
             links[ctype] = r["view_link"]
             print(f"[drive] {ctype} ({len(body)} ký tự, nguyên văn từ store) -> {r['view_link']}")
         except Exception as e:   # noqa: BLE001 -- cùng lý do lùi mượt như ảnh
@@ -330,23 +353,33 @@ def run_text_assets(*, settings, board, drive, out_dir: Path, limit: int = 20) -
                 skipped += 1
                 continue
             tk = item.get("topic_key", "")
-            st = ps.read_content_status(tk, ctype)
-            if (st.get("asset_url") or "").strip():
-                skipped += 1
-                continue   # IDEMPOTENT: hỏi STORE, không hỏi ô Sheet
             rec = ps.read_content_output(tk, ctype)
             body = (rec or {}).get("output") or ""
             if not body.strip():
                 skipped += 1
                 continue   # SKIPPED/rỗng -> không có gì để đẩy
+            # VIỆC 2.4 (2026-08-03, Lead) — IDEMPOTENT theo TopicKey + loại +
+            # content-hash: đã có asset_url VÀ hash KHÔNG đổi -> bỏ qua, dùng
+            # fileId đã lưu. Nội dung đổi (viết lại/sửa) -> hash khác -> upload
+            # lại (update() cùng file trong DriveAssetStore.upload(), KHÔNG
+            # tạo bản thứ 2). Đọc STORE, không đọc ô Sheet (cùng nếp cũ).
+            st = ps.read_content_status(tk, ctype)
+            current_hash = _content_hash(body)
+            if (st.get("asset_url") or "").strip() and st.get("asset_content_hash") == current_hash:
+                skipped += 1
+                continue
             fn = out_dir / f"{_slug(item['context'])}_{ctype}{ext}"
             fn.write_text(body, encoding="utf-8")
             ps.write_content_status(tk, ctype, asset_local_path=str(fn))
             if drive is None:
                 continue
             try:
-                r = drive.upload(fn, topic=item["context"], topic_key=tk, mime_type=mime)
-                ps.write_content_status(tk, ctype, asset_url=r["view_link"])
+                target_mime = GOOGLE_DOC_MIME if ctype in _GOOGLE_DOC_CONVERT_TYPES else ""
+                r = drive.upload(fn, topic=item["context"], topic_key=tk, mime_type=mime,
+                                 target_mime_type=target_mime)
+                ps.write_content_status(tk, ctype, asset_url=r["view_link"],
+                                        asset_drive_file_id=r["id"], asset_content_hash=current_hash,
+                                        asset_mime_type=target_mime or mime)
                 print(f"[drive] {ctype} ({len(body)} ký tự, nguyên văn store) -> {r['view_link']}")
                 done += 1
             except Exception as e:   # noqa: BLE001 -- lùi mượt như các nhánh khác

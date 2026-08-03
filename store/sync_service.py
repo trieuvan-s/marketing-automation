@@ -39,7 +39,7 @@ migrate.
 from __future__ import annotations
 
 from twmkt.sheets_board import (  # noqa: F401
-    _col_a1,
+    _col_a1, _display_notes_business,
     CONTENT_HEADER, CONTEXT_HEADER, EXECUTE_WAITING, GATE1_COL, GATE2_COL, GATE3_COL,
     OUTPUT_TYPE_COL, SheetsBoard, content_row, context_row, facts_to_json,
 )
@@ -48,7 +48,7 @@ from . import document_store as ds
 from . import pipeline_store as ps
 from . import queue_store as qs
 
-_ALL_TYPES = ("article", "infographic", "video")
+_ALL_TYPES = ("article", "long_article", "infographic", "video")
 
 # Nhãn AssetPath khi Gate 2 đã duyệt mà asset chưa có (xem _asset_cell()).
 ASSET_PROCESSING_LABEL = "Processing..."
@@ -222,6 +222,37 @@ def _asset_cell(status_data: dict) -> str:
     return ""
 
 
+# VIỆC 4 (2026-08-03, Lead) — Output Type=AUTO nghĩa là NGƯỜI ỦY QUYỀN cho
+# Composer tự định tuyến; khi cả 3 tuyến đều KHÔNG sinh ra gì (0 DONE), hiển
+# thị riêng từng dòng ERROR/SKIPPED là NHIỄU (người không hề yêu cầu tuyến cụ
+# thể nào để cần giải thích riêng từng tuyến). Nhãn TỰ NHIÊN dùng trong câu gộp
+# — thứ tự CỐ ĐỊNH (Bài viết trước, khớp ví dụ Nafoods Lead đưa).
+_AUTO_MERGE_CHANNEL_LABEL_VI = (("article", "Bài viết"), ("infographic", "Ảnh"), ("video", "Video"))
+
+
+def _is_auto_output_type(output_type: list[str] | None) -> bool:
+    """AUTO = output_type rỗng HOẶC có "AUTO" — CÙNG ngữ nghĩa với scripts/
+    produce_from_sheet._allowed_output_types() (KHÔNG import chéo qua scripts/,
+    store/ không phụ thuộc tầng vận hành — xem docstring module)."""
+    return not output_type or "AUTO" in output_type
+
+
+def _auto_merge_notes(type_outs: list[tuple[str, dict]]) -> str:
+    """VIỆC 4.2/4.3 — GỘP Ở TẦNG HIỂN THỊ (hàm này chỉ dựng 1 CÂU cho Sheet,
+    KHÔNG đụng store — store vẫn giữ đủ bản ghi từng loại kèm mã lý do gốc,
+    xem render_content_to_sheet()). Mỗi nguyên nhân dịch qua _display_notes_
+    business() (VIỆC 5, câu nghiệp vụ, không thuật ngữ kỹ thuật) TRƯỚC khi gộp."""
+    parts = []
+    for type_, out in type_outs:
+        label = dict(_AUTO_MERGE_CHANNEL_LABEL_VI).get(type_)
+        if label is None:
+            continue
+        msg = _display_notes_business(out.get("notes", "")).rstrip(". ") or "không rõ nguyên nhân"
+        parts.append(f"{label}: {msg}")
+    body = ". ".join(parts)
+    return f"Không tạo được nội dung nào. {body}." if body else "Không tạo được nội dung nào."
+
+
 def _preview_output(output: str) -> str:
     if len(output) <= _OUTPUT_PREVIEW:
         return output
@@ -287,9 +318,14 @@ def render_context_to_sheet(board: SheetsBoard, *, db_path=None, settings=None) 
             score=int(raw.get("score", 0) or 0), hot_pct=float(raw.get("hot_pct", 0.0) or 0.0),
             topic=raw.get("topic", ""), group=raw.get("group", ""),
             tickers=raw.get("tickers", []), status=gate.get("gate1", "PENDING"),
-            # Mặc định Waiting, KHÔNG để rỗng (2026-07-28) — ô trống trông như
-            # "hệ thống chưa thấy dòng này", đúng thứ gây hiểu nhầm khi chờ lâu.
-            execute=gate.get("execute") or EXECUTE_WAITING,
+            # VIỆC Execute (2026-08-03, Lead) — ĐẢO LẠI quyết định 2026-07-28
+            # (khi đó ép "Waiting" cho MỌI Execute rỗng để tránh trông như "hệ
+            # thống chưa thấy dòng này"). Lead giờ muốn phân biệt RÕ 2 trạng
+            # thái: "" = mới crawl, CHƯA qua Gate 1 (chưa có gì để chờ) khác
+            # "Waiting" = ĐÃ duyệt, đang xếp hàng. Hiển thị ĐÚNG giá trị store
+            # (ingest_context_from_sheet() đã tự set "Waiting" đúng lúc Gate 1
+            # chuyển APPROVE — xem đó), không tự đoán/ép ở đây nữa.
+            execute=gate.get("execute", ""),
             topic_key=topic_key, notes=gate.get("notes", ""),
             output_type=gate.get("output_type") or [],
             # BUG THẬT (Lead báo 2026-07-29): KHÔNG truyền `ts` thì context_row
@@ -335,9 +371,42 @@ def render_content_to_sheet(board: SheetsBoard, *, db_path=None, settings=None) 
     for topic_key in ds.list_topics(layer="content_output", db_path=db_path):
         raw = ps.read_raw(topic_key, db_path=db_path) or {}
         context_title = raw.get("context", "")
+        gate = ps.read_gate_status(topic_key, db_path=db_path)
+        is_auto = _is_auto_output_type(gate.get("output_type"))
+
+        type_outs: list[tuple[str, dict]] = []
         for type_ in _ALL_TYPES:
             out = ps.read_content_output(topic_key, type_, db_path=db_path)
-            if out is None:
+            if out is not None:
+                type_outs.append((type_, out))
+
+        # VIỆC 4.1 — CHỈ áp gộp khi AUTO. Output Type tường minh (Article/
+        # Long-Article/Infographic/Video) GIỮ NGUYÊN hành vi cũ: mỗi loại 1
+        # dòng, kể cả ERROR (người CHỌN loại đó, hỏng thì phải thấy Status=
+        # ERROR đúng loại đã chọn — che thành AUTO là giấu việc hệ thống không
+        # làm được điều người yêu cầu).
+        has_done = any(out.get("status") == "DONE" for _, out in type_outs)
+        if is_auto and not has_done and type_outs:
+            # VIỆC 4.2 — định tuyến AUTO thất bại HOÀN TOÀN (0 DONE trong mọi
+            # tuyến đã thử) -> ĐÚNG 1 dòng Type=AUTO/Status=ERROR/Notes gộp đủ
+            # nguyên nhân từng loại (VIỆC 4.3: GỘP Ở TẦNG HIỂN THỊ, store vẫn
+            # giữ nguyên `type_outs` từng bản ghi — không đụng gì ở đây).
+            merged_notes = _auto_merge_notes(type_outs)
+            first_out = type_outs[0][1]
+            row = content_row(
+                context=context_title, type_="AUTO", status="ERROR",
+                output="", notes=merged_notes, approve="PENDING", topic_key=topic_key,
+                facts="", ts=first_out.get("timestamp") or None, asset_path="",
+            )
+            out_rows.append(row)
+            continue
+
+        for type_, out in type_outs:
+            if is_auto and has_done and out.get("status") == "ERROR":
+                # VIỆC 4.2 — AUTO định tuyến THÀNH CÔNG (≥1 tuyến DONE): BỎ
+                # dòng của loại LỖI (Status=ERROR) — SKIPPED (Router chủ động
+                # từ chối, đã có Notes giải thích riêng, KHÔNG PHẢI lỗi) vẫn
+                # hiện bình thường, không đụng.
                 continue
             status_data = ps.read_content_status(topic_key, type_, db_path=db_path)
             row = content_row(
@@ -482,8 +551,15 @@ def ingest_context_from_sheet(board: SheetsBoard, *, db_path=None) -> int:
                 "timestamp": _cell(row, i_ts),
             }, db_path=db_path)
             writes += 1
+            # VIỆC Execute (2026-08-03, Lead) — topic MỚI CHƯA duyệt (gate1=
+            # PENDING/REJECT, đa số trường hợp) hiện Execute="" (mới crawl,
+            # chưa có gì để chờ); CHỈ topic đã APPROVE SẴN lúc ingest đầu tiên
+            # (người duyệt nhanh trước khi lượt ingest kịp chạy) mới vào thẳng
+            # "Waiting" — TRƯỚC ĐÂY ép "Waiting" cho MỌI topic mới bất kể gate1,
+            # khiến dòng CHƯA duyệt trông như đã xếp hàng.
             ps.write_gate_status(topic_key, gate1=sheet_gate1,
-                                 execute=EXECUTE_WAITING, notes=sheet_notes or None,
+                                 execute=(EXECUTE_WAITING if sheet_gate1 == "APPROVE" else ""),
+                                 notes=sheet_notes or None,
                                  output_type=sheet_output_type or None,
                                  db_path=db_path)
             writes += 1
@@ -542,15 +618,21 @@ def ingest_context_from_sheet(board: SheetsBoard, *, db_path=None) -> int:
                 print(f"[sync] Huỷ {n} job chờ của {topic_key[:8]} "
                       f"({'rút duyệt' if left_approve else 'đổi Output Type'}).")
             if left_approve:
-                # Rút duyệt -> đưa cờ về Waiting, KHÔNG giữ DONE/NEEDS_HUMAN cũ
-                # (trạng thái đó nói về lượt chạy của yêu cầu đã bị rút).
-                updates["execute"] = EXECUTE_WAITING
+                # VIỆC Execute (2026-08-03, Lead) — rút duyệt đưa cờ về "" (mới
+                # crawl/chưa duyệt), KHÔNG phải "Waiting" (TRƯỚC ĐÂY dùng
+                # Waiting — nhưng "Waiting" giờ nghĩa CHÍNH XÁC là "đã duyệt,
+                # đang xếp hàng"; rút duyệt thì không còn gì xếp hàng cả, GIỮ
+                # NGUYÊN DONE/NEEDS_HUMAN cũ mới đúng là sai — trạng thái đó
+                # nói về lượt chạy của yêu cầu đã bị rút, nên vẫn phải xoá).
+                updates["execute"] = ""
 
         if rerun:
             updates["execute"] = EXECUTE_WAITING
-        elif not gate.get("execute"):
-            # Dòng CŨ (trước 2026-07-28) còn Execute rỗng -> điền Waiting cho
-            # đúng từ vựng mới. KHÔNG enqueue: không có chuyển tiếp nào cả.
+        elif not gate.get("execute") and sheet_gate1 == "APPROVE":
+            # Dòng CŨ (trước bản vá VIỆC Execute 2026-08-03) Gate 1 ĐÃ APPROVE
+            # nhưng Execute còn rỗng (chưa kịp backfill) -> điền Waiting.
+            # Gate 1 CHƯA APPROVE thì Execute rỗng là ĐÚNG mặc định mới, không
+            # phải lỗi cần "sửa". KHÔNG enqueue: không có chuyển tiếp nào cả.
             updates["execute"] = EXECUTE_WAITING
 
         # THỨ TỰ QUAN TRỌNG (bug thật 2026-07-29): enqueue TRƯỚC, ghi
