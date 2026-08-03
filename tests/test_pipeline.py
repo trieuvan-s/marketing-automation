@@ -8986,6 +8986,120 @@ def test_render_one_missing_topic_key_in_store_returns_error_reason(monkeypatch,
     assert "khong-ton-tai" in warn_map[rpa._PRIMARY_RATIO]
 
 
+def test_render_production_assets_run_ranking_guard_notes_survive_resync(monkeypatch, tmp_path):
+    """VIỆC A5 (Lead 02/08) — PHÉP THỬ DUY NHẤT chứng minh vá đúng: chạy 1 job
+    có ranking giả (spec 4 highlights, cap tỷ lệ "4:5" chỉ giữ 3 -> density
+    cap CẮT 1, xem render/ai_full.apply_density_cap/_priority_rank) qua
+    render_production_assets.run() THẬT, rồi gọi LẠI store/sync_service.
+    render_content_to_sheet() (mô phỏng lượt sync kế tiếp) -- Notes PHẢI CÒN
+    nguyên mã RENDER_RANKING_GUARD trên Sheet SAU khi sync chạy lại.
+
+    Trước bản vá (VIỆC A): renderer ghi Notes THẲNG board.set_content_cell()
+    (KHÔNG ingest ngược store) -> render_content_to_sheet() dựng lại TOÀN BỘ
+    tab từ store (không có Notes đó) -> mất trắng. Test này khoá ĐÚNG luồng
+    ngược lại: ghi store trước (A1), rồi để sync hiển thị theo cơ chế chung
+    (A3) -- không phải test riêng lẻ render_one()/set_content_cell()."""
+    import json as _json
+    import httpx
+    from store import document_store as ds
+    from store import pipeline_store as ps
+    from store import sync_service as ss
+    from twmkt.config import Settings
+    from twmkt.sheets_board import CONTENT_HEADER, SheetsBoard, content_row
+
+    rpa = _render_prod_assets_module()
+    tiny_png_b64 = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+
+    def _fake_success(*a, **kw):
+        return httpx.Response(200, json={"data": [{"b64_json": tiny_png_b64}]},
+                              request=httpx.Request("POST", "https://api.openai.com/v1/images/generations"))
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-fake-key-not-real")
+    monkeypatch.setattr(httpx, "post", _fake_success)
+
+    db_path = tmp_path / "store.db"
+    monkeypatch.setenv("DOCUMENT_STORE_PATH", str(db_path))
+    ds.init_db(db_path)
+
+    # Spec "ranking giả": 4 highlights, tỷ lệ "4:5" (cap highlights=3, xem
+    # render.ai_full._DEFAULT_DENSITY_CAPS) -> density cap CHẮC CHẮN cắt 1.
+    spec = {
+        "title": "Tin ranking giả", "subtitle": "", "hero": [{"label": "X", "value": "1%"}],
+        "market": [], "highlights": ["A", "B", "C", "D"], "related": [],
+        "priority": {"primary": [], "secondary": [], "minor": []},
+        "source": "test.vn", "render_hint": {"ratio": "4:5"},
+    }
+    ps.write_content_output("tk-rank", "infographic", {"output": _json.dumps(spec), "status": "DONE"},
+                            db_path=db_path)
+
+    row = content_row(context="Tin ranking giả", type_="infographic", status="DONE",
+                      output=_json.dumps(spec), topic_key="tk-rank", approve="APPROVE")
+
+    class _FakeContentWS:
+        id = 1
+        def __init__(self, values):
+            self._v = [list(r) for r in values]
+        def get_all_values(self):
+            return [list(r) for r in self._v]
+
+    fake_board = SheetsBoard(spreadsheet_id="X", creds_path="Y")
+    fake_board._ws["CONTENT"] = _FakeContentWS([list(CONTENT_HEADER), row])
+
+    test_settings = Settings({"storage": {"data_root": str(tmp_path / "data")}})
+    monkeypatch.setattr(rpa, "load_settings", lambda: test_settings)
+    monkeypatch.setattr(rpa, "_open_board", lambda settings: fake_board)
+
+    result = rpa.run(limit=1)
+    assert result["rendered"] == 1
+
+    # (1) content_output.notes trong STORE có mã RENDER_RANKING_GUARD ngay
+    # sau render — xác nhận A1 (ghi store, không ghi thẳng Sheet).
+    rec = ps.read_content_output("tk-rank", "infographic", db_path=db_path)
+    assert "RENDER_RANKING_GUARD" in rec["notes"], f"thiếu mã lý do trong store: {rec['notes']!r}"
+    assert "highlights" in rec["notes"] and "4:5" in rec["notes"]
+
+    # (2) PHÉP THỬ A5 THẬT: mô phỏng lượt SYNC KẾ TIẾP (store/sync_service.
+    # render_content_to_sheet(), CHÍNH nơi trước đây "dựng lại toàn bộ tab từ
+    # store" XOÁ MẤT Notes ghi thẳng Sheet) -- Notes PHẢI CÒN NGUYÊN sau đó.
+    class _FakeSyncWS:
+        def __init__(self):
+            self._v: list[list[str]] = []
+        def get_all_values(self):
+            return [list(r) for r in self._v]
+        def update(self, range_str, values, value_input_option="RAW"):
+            start = int(range_str[1:]) if len(range_str) > 1 else 1
+            need = start - 1 + len(values)
+            while len(self._v) < need:
+                self._v.append([])
+            for i, r in enumerate(values):
+                self._v[start - 1 + i] = [str(c) for c in r]
+        def batch_clear(self, ranges):
+            import re as _re
+            for rng in ranges:
+                m = _re.match(r"A(\d+):", rng)
+                if m:
+                    self._v = self._v[: int(m.group(1)) - 1]
+
+    class _FakeSyncBoard:
+        def __init__(self):
+            self._tabs = {"CONTENT": _FakeSyncWS()}
+        def _tab(self, name):
+            return self._tabs[name]
+
+    sync_board = _FakeSyncBoard()
+    ss.render_content_to_sheet(sync_board, db_path=db_path)
+    grid = sync_board._tab("CONTENT").get_all_values()
+    header = grid[0]
+    i_tk = [h.strip().lower() for h in header].index("topickey")
+    i_notes = [h.strip().lower() for h in header].index("notes")
+    row_out = next(r for r in grid[1:] if r[i_tk] == "tk-rank")
+    assert "RENDER_RANKING_GUARD" in row_out[i_notes], (
+        f"Notes bị MẤT sau lượt sync kế tiếp -- đúng lỗi VIỆC A mô tả, thực tế: {row_out[i_notes]!r}"
+    )
+
+
 # =============================================================================
 # PHASE QUEUE (2026-07-27) — scripts/queue_worker.py::run_once()
 # =============================================================================
