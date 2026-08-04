@@ -210,9 +210,34 @@ _BOLD_HINT_CANDIDATES = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
 ]
 
-# Logo THẬT (ảnh, không phải chữ vẽ) -- mặc định trỏ tới bản đã tách nền
-# (assets/icon_transparent.png, cạnh assets/icon.png gốc KHÔNG có alpha).
-_DEFAULT_LOGO_PATH = Path(__file__).resolve().parents[3] / "assets" / "icon_transparent.png"
+# SỬA LỖI THẬT (2026-08-04, Lead: logo/icon cũ nhoè màu) -- 2 file cũ
+# (icon_transparent.png/logo_transparent.png) ĐÃ BỊ XOÁ khỏi assets/, thay
+# bằng brand-kit/icon mới (xem config/brand.yaml: brand.active_asset/brand.
+# assets). `_default_logo_path()` giờ là HÀM (không phải hằng số module-level)
+# -- đọc LẠI config mỗi lần gọi, giống mọi `_resolve_*` khác trong file này,
+# để đổi active_asset trong brand.yaml có hiệu lực NGAY không cần khởi động
+# lại tiến trình. Rơi về đường dẫn cứng NÀY chỉ khi config thiếu/hỏng (an
+# toàn -- không raise giữa chừng 1 lượt render).
+_LEGACY_DEFAULT_LOGO_PATH = Path(__file__).resolve().parents[3] / "assets" / "icon_transparent.png"
+
+
+def _resolve_active_logo_asset() -> dict:
+    """Đọc `brand.active_asset` + `brand.assets[active_asset]` từ brand.yaml
+    (VIỆC brand-kit mới 2026-08-04) -- trả {"path": Path, "width_ratio":
+    float}. Thiếu/hỏng config -> lùi về _LEGACY_DEFAULT_LOGO_PATH + tỷ lệ cũ
+    0.148 (KHÔNG raise -- lớp trình bày, hỏng cosmetic không đáng chặn render)."""
+    b = load_brand()
+    active = b.get("active_asset") or "standard_icon"
+    asset = (b.get("assets") or {}).get(active) or {}
+    raw_path = asset.get("path")
+    width_ratio = asset.get("width_ratio")
+    repo_root = Path(__file__).resolve().parents[3]
+    path = (repo_root / raw_path) if raw_path else _LEGACY_DEFAULT_LOGO_PATH
+    return {"path": path, "width_ratio": float(width_ratio) if width_ratio is not None else 0.148}
+
+
+def _default_logo_path() -> Path:
+    return _resolve_active_logo_asset()["path"]
 
 # Font disclaimer/nguồn = 75% cỡ chữ CŨ (yêu cầu Lead 2026-07-22: "thông tin
 # phụ, giảm size 70-80% để tránh lấn chiếm/đè nội dung chính") -- GIỮ áp dụng
@@ -281,14 +306,24 @@ def _resolve_stamp_style() -> dict[str, float]:
 
 
 def _resolve_overlay_style() -> dict[str, float]:
-    """Đọc hình học overlay full-canvas từ brand.yaml."""
+    """Đọc hình học overlay full-canvas từ brand.yaml.
+
+    SỬA LỖI THẬT (2026-08-04, Lead: brand-kit mới) — kích thước logo giờ NEO
+    THEO BỀ RỘNG (`logo_width_ratio`, nguồn = brand.assets[active_asset].
+    width_ratio, xem _resolve_active_logo_asset()) thay vì bề cao
+    (`logo_height_ratio` cũ) — brand-kit MỚI có thêm dòng chữ tagline bên
+    dưới biểu tượng (khung ảnh gốc RỘNG hơn, không còn vuông như icon cũ),
+    neo theo cao sẽ làm bề rộng biến thiên khó kiểm soát tuỳ khung ảnh gốc.
+    `infographic_overlay.logo.height_ratio` trong config VẪN đọc được (lùi
+    mượt/tương thích ngược) nhưng KHÔNG còn dùng để tính kích thước — chỉ giữ
+    lại nếu code cũ/tài liệu còn tham chiếu tên khoá này."""
     cfg = load_brand().get("infographic_overlay") or {}
     logo_cfg = cfg.get("logo") or {}
     metadata_cfg = cfg.get("metadata") or {}
     style = {
         "logo_right_ratio": float(logo_cfg.get("right_ratio", 0.035)),
         "logo_top_ratio": float(logo_cfg.get("top_ratio", 0.025)),
-        "logo_height_ratio": float(logo_cfg.get("height_ratio", 0.055)),
+        "logo_width_ratio": _resolve_active_logo_asset()["width_ratio"],
         "metadata_side_ratio": float(metadata_cfg.get("side_ratio", 0.035)),
         "metadata_bottom_ratio": float(metadata_cfg.get("bottom_ratio", 0.012)),
         "image_body_font_ratio": float(metadata_cfg.get("image_body_font_ratio", 0.028)),
@@ -301,8 +336,8 @@ def _resolve_overlay_style() -> dict[str, float]:
     ):
         if not 0.0 <= style[key] <= 0.20:
             raise ValueError(f"brand.infographic_overlay.{key} phải nằm trong [0, 0.20]")
-    if not 0.02 <= style["logo_height_ratio"] <= 0.15:
-        raise ValueError("brand.infographic_overlay.logo.height_ratio phải nằm trong [0.02, 0.15]")
+    if not 0.02 <= style["logo_width_ratio"] <= 0.30:
+        raise ValueError("brand.assets.<active_asset>.width_ratio phải nằm trong [0.02, 0.30]")
     if not 0.01 <= style["image_body_font_ratio"] <= 0.08:
         raise ValueError(
             "brand.infographic_overlay.metadata.image_body_font_ratio phải nằm trong [0.01, 0.08]"
@@ -908,13 +943,16 @@ def overlay_brand_full_canvas(
     overlay = Image.new("RGBA", (final_w, output_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
-    resolved_logo_path = Path(logo_path) if logo_path else _DEFAULT_LOGO_PATH
+    resolved_logo_path = Path(logo_path) if logo_path else _default_logo_path()
     logo_in_bounds = False
     logo_bbox: list[int] | None = None
     if resolved_logo_path.is_file():
         logo = Image.open(resolved_logo_path).convert("RGBA")
-        logo_h = max(round(final_h * style["logo_height_ratio"]), 24)
-        logo_w = max(round(logo.width * logo_h / max(logo.height, 1)), 1)
+        # SỬA LỖI THẬT (2026-08-04) — neo theo BỀ RỘNG (logo_width_ratio, xem
+        # docstring _resolve_overlay_style), bề cao suy theo tỷ lệ khung ảnh
+        # gốc (ĐẢO chiều tính so với bản height-anchored cũ).
+        logo_w = max(round(final_w * style["logo_width_ratio"]), 24)
+        logo_h = max(round(logo.height * logo_w / max(logo.width, 1)), 1)
         logo_margin = max(round(final_w * style["logo_right_ratio"]), 16)
         logo_x = final_w - logo_margin - logo_w
         logo_y = max(round(final_h * style["logo_top_ratio"]), 12)
@@ -1081,7 +1119,7 @@ def stamp_brand(
     final_w, final_h = _resolve_final_size(ratio, settings)
     band_min_px = _resolve_band_min_px(settings)
     nominal_band_h = max(round(final_h * 0.075), band_min_px)
-    resolved_logo_path = Path(logo_path) if logo_path else _DEFAULT_LOGO_PATH
+    resolved_logo_path = Path(logo_path) if logo_path else _default_logo_path()
     logo_w, logo_h, pad = _logo_dimensions(resolved_logo_path, final_w=final_w, final_h=final_h)
     min_top_pad = logo_h + 2 * pad
 

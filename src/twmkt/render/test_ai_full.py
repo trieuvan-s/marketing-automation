@@ -518,6 +518,32 @@ def test_full_canvas_overlay_keeps_image_full_and_places_brand_at_edges():
     assert log["metadata_font_px"] == round(log["image_body_font_px"] * 0.80)
 
 
+def test_full_canvas_overlay_uses_real_brand_kit_asset_across_all_ratios():
+    """SỬA LỖI THẬT (2026-08-04, Lead: brand-kit mới thay logo cũ nhoè màu) --
+    KHÔNG truyền `logo_path` -> dùng ĐÚNG _default_logo_path() thật (đọc
+    config/brand.yaml: active_asset="brand_kit", asset thật trên đĩa tại
+    assets/fva-brand-kit-navy-gold-transparent.png -- KHÔNG mock, xác nhận
+    asset thật + kích thước width_ratio=0.178 mới KHÔNG làm logo vượt biên
+    ảnh (ValueError "vượt biên") ở CẢ 3 tỷ lệ hỗ trợ -- brand-kit có thêm
+    dòng chữ tagline nên khung ảnh RỘNG hơn icon cũ (1536x1024 vs 1254x1254),
+    logo_h suy theo tỷ lệ đó có thể lớn hơn hẳn logo_height_ratio cũ."""
+    from twmkt.render.brand_stamp import _default_logo_path
+
+    assert _default_logo_path().name == "fva-brand-kit-navy-gold-transparent.png"
+    assert _default_logo_path().is_file(), "asset brand-kit thật phải tồn tại trên đĩa"
+
+    raw_sizes = {"4:5": (1280, 1600), "9:16": (1152, 2048), "1:1": (1280, 1280)}
+    for ratio, (w, h) in raw_sizes.items():
+        raw = _real_png_bytes(w, h, color=(245, 248, 252))
+        rendered, log = bs.overlay_brand_full_canvas(
+            raw, ratio=ratio, theme="bright", source="CafeF",
+            disclaimer="Nội dung mang tính tham khảo, không phải khuyến nghị đầu tư.",
+        )
+        assert log["logo_in_bounds"] is True, f"logo vượt biên ở tỷ lệ {ratio}"
+        image = Image.open(io.BytesIO(rendered))
+        assert image.size[0] > 0 and image.size[1] > 0
+
+
 def test_full_canvas_overlay_rejects_wrong_real_image_ratio():
     raw = _real_png_bytes(1280, 1280)
     with pytest.raises(ValueError, match="lệch tỷ lệ"):

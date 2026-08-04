@@ -1025,10 +1025,17 @@ def test_build_format_requests_covers_features_and_is_deterministic():
     )
     tabs = []
     for i, (name, header) in enumerate(TABS.items()):
-        # CONTEXT có sẵn 1 banding + 3 conditional -> phải sinh request XÓA.
+        # CONTEXT có sẵn 1 banding + 3 conditional (ĐỀU nằm ở cột CODE quản —
+        # Duyệt Context/Execute/Score) -> phải sinh request XÓA cho cả 3 (SỬA
+        # LỖI THẬT 2026-08-04: giờ chỉ xoá rule ở cột managed, xem test riêng
+        # test_build_format_requests_keeps_unmanaged_conditional_format_rules
+        # cho ca rule Lead tự thêm ở cột KHÁC không bị đụng).
         if name == "CONTEXT":
+            low_hdr = [h.strip().lower() for h in header]
+            existing_cols = [low_hdr.index(GATE1_COL.lower()), low_hdr.index("execute"),
+                             low_hdr.index("score")]
             tabs.append(TabMeta(name, header, i, n_rows=5, banding_ids=[7],
-                                cond_format_count=3))
+                                cond_format_cols=existing_cols))
         else:
             tabs.append(TabMeta(name, header, i, n_rows=3))
     reqs = build_format_requests(tabs)
@@ -1038,8 +1045,9 @@ def test_build_format_requests_covers_features_and_is_deterministic():
               "updateBorders", "addBanding", "setDataValidation",
               "addConditionalFormatRule"):
         assert k in kinds, f"thiếu request {k}"
-    # idempotent: banding cũ + rule cũ của CONTEXT bị xóa trước khi thêm lại
-    # (CONTENT.cond_format_count=0 trong test này -> không sinh xóa cho CONTENT).
+    # idempotent: banding cũ + rule cũ của CONTEXT (đều ở cột managed) bị xóa
+    # trước khi thêm lại (CONTENT.cond_format_cols=[] trong test này -> không
+    # sinh xóa cho CONTENT).
     assert kinds.count("deleteBanding") == 1
     assert kinds.count("deleteConditionalFormatRule") == 3
     # CONTEXT: Duyệt Context(PENDING/APPROVE/REJECT/DELETE=4 — DELETE thêm
@@ -1058,7 +1066,9 @@ def test_build_format_requests_covers_features_and_is_deterministic():
     # KHÔNG còn ghi validation (Trung 02/08, cùng lý do Output Type) — cả 3 cột
     # này Trung đã tự bật tay Dropdown (Chip, 1 giá trị) qua UI Sheets, code ghi
     # đè mỗi lượt --setup sẽ reset mất cấu hình chip đó.
-    # CONTENT.Status + CONTENT.Type GỠ dropdown 2026-07-28 (máy-ghi, read-only).
+    # CONTENT.Status + CONTENT.Type KHÔNG còn ghi validation (SỬA LỖI THẬT
+    # 2026-08-04 — xem chi tiết bên dưới): Lead tự bật tay Dropdown Chip có
+    # màu cho 2 cột này, code ghi đè (kể cả "xoá rule") reset mất cấu hình đó.
     # CONTEXT.Output Type KHÔNG còn ghi validation (2026-07-28): ô đó là
     # MULTI-SELECT Lead bật tay qua UI, code ghi đè là XOÁ cấu hình đó và API
     # không dựng lại được.
@@ -1069,18 +1079,32 @@ def test_build_format_requests_covers_features_and_is_deterministic():
     conds = [v["rule"]["condition"]["type"] for v in sd if "rule" in v]
     assert conds.count("BOOLEAN") == 2 and conds.count("ONE_OF_LIST") == 1
 
-    # 3 request XOÁ validation (không "rule") cho 3 cột read-only:
-    # CONTEXT.Execute + CONTENT.Status + CONTENT.Type.
+    # 1 request XOÁ validation (không "rule") cho CONTEXT.Execute — CONTENT.
+    # Status/Type KHÔNG còn nhánh xoá nữa (SỬA LỖI THẬT 2026-08-04, Lead báo
+    # "Type + Status vẫn bị ghi đè thiết lập màu": Lead đã tự bật tay Dropdown
+    # Chip có màu cho 2 cột này qua Sheet UI — gửi setDataValidation dù KHÔNG
+    # kèm rule vẫn xoá mất chip đó, cùng lý do đã áp dụng cho Duyệt Context/
+    # Output Type/3 cổng duyệt bên dưới).
     low_ctx_hdr = [c.strip().lower() for c in CONTEXT_HEADER]
     low_con_hdr = [c.strip().lower() for c in CONTENT_HEADER]
     clears = [v for v in sd if "rule" not in v]
-    assert len(clears) == 3
+    assert len(clears) == 1
     # So theo CHỈ SỐ CỘT, không hard-code sheetId (id do TabMeta trong test này
     # cấp phát, đổi là test gãy oan).
     cleared_cols = sorted(v["range"]["startColumnIndex"] for v in clears)
-    assert cleared_cols == sorted([low_ctx_hdr.index("execute"),
-                                   low_con_hdr.index("status"),
-                                   low_con_hdr.index("type")])
+    assert cleared_cols == [low_ctx_hdr.index("execute")]
+
+    # CONTENT.Status/Type: TUYỆT ĐỐI KHÔNG được có setDataValidation nào nữa
+    # (cùng lý do Output Type/3 cổng duyệt — Lead tự cấu hình chip màu tay).
+    # Lọc CẢ sheetId (không chỉ cột) — cột cùng chỉ số có thể trùng tình cờ
+    # với 1 tab KHÁC (vd SOURCES.Enable) nếu chỉ so cột suông.
+    content_sid = list(TABS.keys()).index("CONTENT")
+    status_type_cols = [low_con_hdr.index("status"), low_con_hdr.index("type")]
+    status_type_reqs = [r for r in reqs
+                        if "setDataValidation" in r
+                        and r["setDataValidation"]["range"]["sheetId"] == content_sid
+                        and r["setDataValidation"]["range"]["startColumnIndex"] in status_type_cols]
+    assert status_type_reqs == [], "KHÔNG được ghi validation lên cột Status/Type"
 
     # Output Type: TUYỆT ĐỐI KHÔNG được có setDataValidation nào (2026-07-28).
     # Ô này là MULTI-SELECT Lead bật tay qua UI Sheets — API v4 không tạo được
@@ -1112,6 +1136,35 @@ def test_build_format_requests_covers_features_and_is_deterministic():
     assert "use" not in low and low[0] == "timestamp"
 
 
+def test_build_format_requests_keeps_unmanaged_conditional_format_rules():
+    """SỬA LỖI THẬT (2026-08-04, Lead báo "Type + Status vẫn bị ghi đè thiết
+    lập màu trên sheet UI") — TRƯỚC ĐÂY build_format_requests() xoá SẠCH MỌI
+    conditional-format rule đang có trên CONTEXT/CONTENT (chỉ đếm SỐ LƯỢNG qua
+    `cond_format_count`), kể cả rule Lead tự thêm tay cho cột KHÁC (vd tô màu
+    Type/Status) — code không quản cột đó nên không dựng lại được, mất vĩnh
+    viễn mỗi lượt ensure_tabs() phát hiện header đổi. Khoá lại: rule nằm ở cột
+    KHÔNG thuộc danh sách CODE quản (Gate1/execute/score/hot% CONTEXT;
+    Gate2/Gate3 CONTENT) phải được GIỮ NGUYÊN — không sinh deleteConditional
+    FormatRule cho index của nó."""
+    from twmkt.sheets_board import build_format_requests, TabMeta, CONTENT_HEADER
+
+    low_con_hdr = [c.strip().lower() for c in CONTENT_HEADER]
+    type_col = low_con_hdr.index("type")
+    status_col = low_con_hdr.index("status")
+    gate2_col = low_con_hdr.index("duyệt content")
+
+    # 3 rule hiện có trên CONTENT: index 0 = Type (Lead tự thêm), index 1 =
+    # Status (Lead tự thêm), index 2 = Duyệt Content (CODE quản).
+    t = TabMeta(name="CONTENT", header=list(CONTENT_HEADER), sheet_id=1, n_rows=3,
+               cond_format_cols=[type_col, status_col, gate2_col])
+    reqs = build_format_requests([t])
+    deletes = [r["deleteConditionalFormatRule"]["index"] for r in reqs
+              if "deleteConditionalFormatRule" in r]
+    # CHỈ index 2 (Duyệt Content, CODE quản) bị xoá — index 0/1 (Type/Status,
+    # Lead tự thêm) PHẢI giữ nguyên, không nằm trong danh sách xoá.
+    assert deletes == [2], f"chỉ được xoá rule ở cột CODE quản, nhận: {deletes}"
+
+
 def test_format_board_smoke_no_network():
     """format_board dựng + gửi batchUpdate qua fake spreadsheet, KHÔNG chạm mạng."""
     from twmkt.sheets_board import SheetsBoard, TABS
@@ -1125,13 +1178,27 @@ def test_format_board_smoke_no_network():
         def fetch_sheet_metadata(self, params=None): return self._meta
         def batch_update(self, body): self.last_body = body; return {}
 
+    from twmkt.sheets_board import GATE1_COL
+
     sheets = []
     for i, name in enumerate(TABS):
         s = {"properties": {"sheetId": i, "title": name,
                             "gridProperties": {"rowCount": 1000}}}
         if name == "CONTEXT":     # có sẵn banding + rule -> nhánh idempotent
             s["bandedRanges"] = [{"bandedRangeId": 42}]
-            s["conditionalFormats"] = [{}, {}]
+            # SỬA LỖI THẬT (2026-08-04) — rule PHẢI có "ranges" thật (cột
+            # Duyệt Context, CODE quản) để build_format_requests() (giờ chỉ
+            # xoá rule ở cột managed, xem TabMeta.cond_format_cols) còn nhận
+            # ra đây là rule cần xoá; rule rỗng "{}" cũ không tra được cột nên
+            # bị bỏ qua an toàn, làm mất nhánh deleteConditionalFormatRule
+            # khỏi smoke test này.
+            gate1_col = [h.strip().lower() for h in TABS["CONTEXT"]].index(GATE1_COL.lower())
+            s["conditionalFormats"] = [
+                {"ranges": [{"sheetId": i, "startColumnIndex": gate1_col,
+                            "endColumnIndex": gate1_col + 1}]},
+                {"ranges": [{"sheetId": i, "startColumnIndex": gate1_col,
+                            "endColumnIndex": gate1_col + 1}]},
+            ]
         sheets.append(s)
 
     board = SheetsBoard(spreadsheet_id="SID", creds_path="creds")

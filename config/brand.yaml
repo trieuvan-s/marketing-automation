@@ -19,6 +19,29 @@ brand:
   # wire text/màu; nhúng ảnh logo thật vào SVG là việc kế tiếp khi có file).
   logo_path: null
 
+  # VIỆC brand-kit mới (2026-08-04, Lead: logo/brand-kit cũ nhoè màu) — bản
+  # thay thế THẬT, dùng cho brand_stamp.py::overlay_brand_full_canvas() (tuyến
+  # ai_full, ĐANG sản xuất) và src/twmkt/render/brand_stamp.py's _default_
+  # logo_path(). "path" tương đối GỐC REPO. width_ratio = bề rộng logo / bề
+  # rộng ảnh cuối (thay height_ratio cũ — brand_kit có thêm dòng chữ tagline
+  # nên neo theo BỀ RỘNG cho ổn định hình dạng, chiều cao suy theo tỷ lệ khung
+  # ảnh gốc). "active_asset" chọn asset nào đang DÙNG THẬT — đổi giá trị này
+  # để chuyển giữa "brand_kit" (đủ chữ, MẶC ĐỊNH theo yêu cầu Lead — ưu tiên
+  # brand-kit thay logo cũ) và "standard_icon" (chỉ biểu tượng, gọn hơn) mà
+  # KHÔNG cần sửa code. Chỉ cần lưu bản MÀU "navy-gold" — theme sáng/tối tự tô
+  # lại phần màu trung tính (navy) theo màu chủ đạo của theme lúc render (xem
+  # overlay_brand_full_canvas(), nhánh `theme in ("bright","light")`), phần
+  # vàng đồng (chroma cao) giữ nguyên mọi theme — KHÔNG cần bản "white-gold"
+  # riêng cho theme tối (vẫn giữ file đó trong assets/ làm bản tham chiếu).
+  active_asset: "brand_kit"
+  assets:
+    brand_kit:
+      path: "assets/fva-brand-kit-navy-gold-transparent.png"
+      width_ratio: 0.178
+    standard_icon:
+      path: "assets/fva-icon-navy-gold-transparent.png"
+      width_ratio: 0.148
+
   # Màu ước theo logo đã nhận (nền navy đậm, chữ trắng bạc, nhấn vàng đồng) —
   # CHƯA lấy mã hex CHÍNH XÁC từ file gốc (chỉ có ảnh xem qua chat, chưa có
   # asset lưu đĩa để soi màu pixel-chính-xác). Cập nhật lại khi có file logo

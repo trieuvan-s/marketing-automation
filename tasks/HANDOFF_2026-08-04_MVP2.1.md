@@ -9,8 +9,8 @@
 > `docs/VPS_MIGRATION_BACKLOG.md`.
 
 **MỤC LỤC** — §1 trạng thái · §2 việc đã làm từ MVP v2.0 · §3 SỰ CỐ THẬT (đã
-sửa) · §4 hạ tầng đang chạy · §5 git · §6 test · §7 nợ còn lại · §8 lệnh hay
-dùng.
+sửa) · §3B Sheet UI (Ticker/Source/Type/Status) · §3C Brand-kit mới (ảnh +
+video) · §4 hạ tầng đang chạy · §5 git · §6 test · §7 nợ còn lại.
 
 ---
 
@@ -79,6 +79,22 @@ Gate 2 → render asset → Gate 3), cộng thêm:
 9. **SỰ CỐ THẬT + đã sửa** — xem §3, KHÔNG được bỏ qua.
 10. Restart `queue_worker.py`, đồng bộ Sheet thật (`sync_store_sheet.py`),
     bật lịch crawl qua Task Scheduler (§4).
+11. **CONTEXT: cột Ticker/Source tràn ra ô khác** — thêm `wrapStrategy=WRAP`
+    (trước đây 2 cột này có độ rộng cố định nhưng KHÔNG wrap, nên nội dung
+    dài hơn độ rộng tràn ra ô kế bên, hoặc bị Sheets CẮT nếu ô kế bên có dữ
+    liệu — đúng hiện tượng Lead mô tả "Source bị chui ẩn đi"). Xem §3B.
+12. **CONTENT: Type/Status bị ghi đè màu Sheet UI** — sự cố THẬT, GỐC chính
+    là việc thêm cột "Người thực hiện" ở #8 kích hoạt 1 lượt `format_board()`
+    ĐẦY ĐỦ (dò header đổi), lượt đó XOÁ SẠCH mọi conditional-format rule +
+    validation trên CONTEXT/CONTENT rồi CHỈ dựng lại đúng phần code tự quản
+    — cấu hình màu Lead tự thêm tay cho Type/Status (validation/chip hoặc
+    conditional formatting) bị xoá theo, không có gì dựng lại. Đã sửa GỐC
+    (không chỉ vá triệu chứng) — xem §3B.
+13. **Brand-kit/logo mới thay bản cũ nhoè màu** — cấu hình `config/brand.yaml`
+    (`active_asset`/`assets`), wire vào `brand_stamp.py` (tuyến ai_full đang
+    sản xuất thật), RE-RENDER 9 infographic của phiên 3/8 (cache-first, $0
+    trừ 1 ca cache miss — xem §3C), VÀ sửa asset video bên `aigen-pipeline`
+    (repo riêng, theo yêu cầu Lead). Xem §3C.
 
 ---
 
@@ -122,6 +138,124 @@ sự cố, khoá lại vĩnh viễn.
 hỏi "Sheet đang giữ ảnh của ngưỡng/quy tắc CŨ nào, và ingest sẽ đọc phải nó
 trước khi render kịp làm mới không?" — kiểm tra ngay sau lượt sync đầu
 tiên bằng SQL trực tiếp, đừng chỉ tin `n == 0`/`n > 0` ở log.
+
+---
+
+## 3B. SHEET UI — Ticker/Source tràn, Type/Status mất màu (ĐÃ SỬA)
+
+**Ticker/Source tràn ô** (`src/twmkt/sheets_board.py::_WRAP_COLS`): thêm
+`"tickers"` và `"source"` vào tập cột được áp `wrapStrategy=WRAP`. Trước đây
+2 cột này CÓ độ rộng cố định (`_COL_WIDTH`) nhưng KHÔNG wrap — nội dung dài
+hơn độ rộng tràn ngang (nếu ô kế trống) hoặc bị Sheets cắt/ẩn (nếu ô kế có
+dữ liệu, đúng hiện tượng Lead báo). Đã áp lại lên Sheet thật qua
+`board.format_board()`.
+
+**Type/Status mất màu — SỰ CỐ THẬT, ĐÃ SỬA GỐC**: nguyên nhân là 2 cơ chế
+trong `_tab_requests()`/`build_format_requests()`:
+
+1. Code CHỦ ĐỘNG gửi `setDataValidation` KHÔNG kèm rule cho cột Type/Status
+   mỗi lượt `format_board()` (ý định cũ: "dọn validation sót") — nhưng lệnh
+   này XOÁ LUÔN dropdown Chip có màu nếu Lead đã tự cấu hình tay qua Sheet
+   UI (giống hệt lý do Gate1/Gate2/Gate3/Output Type đã được CHỪA riêng từ
+   trước — Type/Status trước đây KHÔNG có ngoại lệ này). **Đã xoá 2 nhánh
+   này** — Type/Status giờ CÙNG quy tắc với 4 cột kia: code không đụng
+   validation.
+2. `build_format_requests()` XOÁ SẠCH MỌI conditional-format rule đang có
+   trên CONTEXT/CONTENT (`deleteConditionalFormatRule` theo index, không
+   phân biệt rule nào), rồi CHỈ dựng lại đúng rule code tự quản (Gate1/
+   Execute/Score/Hot%/Gate2/Gate3) — rule Lead tự thêm cho cột KHÁC (vd tô
+   màu Type/Status) bị xoá vĩnh viễn mỗi khi `ensure_tabs()` phát hiện
+   header đổi (chính là điều đã xảy ra ở Việc #8 khi thêm cột "Người thực
+   hiện"). **Đã sửa GỐC**: `TabMeta.cond_format_cols` giờ giữ CỘT của TỪNG
+   rule hiện có (đọc từ `conditionalFormats[].ranges[0].startColumnIndex`
+   qua Sheets API) — chỉ xoá rule nằm ĐÚNG cột code sắp ghi lại, rule ở cột
+   khác GIỮ NGUYÊN vĩnh viễn, không phụ thuộc số lần `ensure_tabs()` chạy.
+
+Test hồi quy: `test_build_format_requests_keeps_unmanaged_conditional_format_
+rules` (tests/test_pipeline.py).
+
+⚠️ **Màu Type/Status Lead đã cấu hình trước đó (nếu có) đã bị XOÁ THẬT bởi
+sự cố ở Việc #8** — code giờ sẽ KHÔNG đụng gì nữa, nhưng phần đã mất thì
+KHÔNG phục hồi được từ code (đó là cấu hình UI, không phải dữ liệu trong
+store) — Lead cần cấu hình lại 1 LẦN DUY NHẤT trên Sheet thật, sau đó an
+toàn vĩnh viễn.
+
+---
+
+## 3C. BRAND-KIT MỚI (2026-08-04, Lead: logo/brand-kit cũ nhoè màu)
+
+**Asset mới** (Lead cung cấp): 4 file `assets/fva-{brand-kit,icon}-{navy,
+white}-gold-transparent.png` — "brand-kit" = biểu tượng FVA + dòng chữ
+"FINANCE | VALUATION | ANALYSIS" + tagline; "icon" = chỉ biểu tượng. 2 màu
+(navy-gold cho nền sáng, white-gold cho nền tối) — code TỰ tô lại phần
+trung tính (navy) theo màu chủ đạo theme lúc render (`overlay_brand_full_
+canvas`, nhánh `theme in ("bright","light")`), phần vàng đồng giữ nguyên
+mọi theme, nên CHỈ CẦN khai 1 đường dẫn (navy-gold) trong config cho phía
+ảnh — bản white-gold còn lại là tham chiếu/dùng riêng cho phía video (nền
+navy đặc, không qua cơ chế tự tô màu này).
+
+**Config mới** (`config/brand.yaml`, theo Lead chỉ định):
+```yaml
+active_asset: "brand_kit"     # đổi sang "standard_icon" nếu muốn dùng bản gọn
+assets:
+  brand_kit:
+    path: "assets/fva-brand-kit-navy-gold-transparent.png"
+    width_ratio: 0.178
+  standard_icon:
+    path: "assets/fva-icon-navy-gold-transparent.png"
+    width_ratio: 0.148
+```
+`brand_stamp.py::_resolve_active_logo_asset()` đọc config này;
+`overlay_brand_full_canvas()` (tuyến ai_full ĐANG sản xuất thật — `stamp_
+brand()` TOP_PAD cũ đã không còn caller nào, chỉ còn trong test) đổi từ neo
+theo BỀ CAO (`logo_height_ratio` cũ) sang neo theo BỀ RỘNG (`logo_width_
+ratio`) — brand-kit CÓ thêm chữ tagline nên khung ảnh RỘNG hơn icon cũ
+(1536×1024 so với 1254×1254 vuông), neo theo cao sẽ làm bề rộng biến thiên
+khó kiểm soát.
+
+**Re-render infographic phiên 3/8**: 9/10 bản ghi `infographic` DONE có
+`timestamp`/`published_at`=03/08/2026 (1 bản ERROR, không có nội dung để
+render, bỏ qua) — render lại qua `render_one()` (cache-first: spec/theme/
+ratio KHÔNG đổi nên HẦU HẾT trúng cache ảnh AI gốc, $0, chỉ tính lại lớp
+brand-kit tất định), upload lại Drive CÙNG thư mục `03-08-2026/` (khớp tên
+file → Drive tự GHI ĐÈ, không tạo bản trùng), ghi `asset_url` mới vào
+`content_status` (version mới, lịch sử cũ vẫn còn). **1/9 bị cache MISS**
+(chủ đề "giá bán H2SO4 tăng 249%...", topic_key `6736e4397cf1b5bc`) — tốn
+1 lượt gọi OpenAI Images API thật (lý do nghi vấn: bản gốc có thể từng qua
+1 lượt postflight-retry với `postflight_instruction` khác rỗng, không tái
+lập được từ `content_output` lưu lại — KHÔNG phải lỗi, chỉ là chi phí nhỏ
+không tránh được cho đúng 1 bài). Kết quả đã kiểm bằng mắt (xem ảnh mẫu
+"FPT tái sinh") — brand-kit hiện rõ nét, đúng vị trí góc trên-trái, không
+đè nội dung.
+
+**Video (`aigen-pipeline`, repo riêng `D:/trung-temp/aigen-pipeline`)**:
+theo yêu cầu Lead, đã sửa asset (KHÔNG phải code logic — hệ thống video
+dùng file tĩnh tham chiếu qua `<img src="assets/fva-icon.png">` trong
+template HTML, không có cơ chế width_ratio động như phía ảnh). Đã kiểm
+NỀN của MỌI khung hình video đều NAVY ĐẬM (`#12224a`/`#13234c`/... hoặc tím
+đậm `#1e1b4b` ở frame-liquid-bg-hero) → dùng bản **WHITE-GOLD** (KHÔNG phải
+navy-gold) để đủ tương phản — navy trên navy sẽ gần như vô hình:
+- 5 khung hiện `.brand-icon`/`.logo-img` NHỎ (50-96px, watermark góc) —
+  `templates/{frame-avatar-presenter,frame-liquid-bg-hero,frame-market-
+  ticker,frame-news-lower-third,frame-quote-pull}/assets/fva-icon.png` →
+  ghi đè bằng `fva-icon-white-gold-transparent.png` (standard_icon).
+- `templates/frame-logo-outro/assets/fva-icon.png` (khung ĐÓNG video, ô
+  `.logo-wrap` 420×210/460×230, `object-fit:contain` nên không méo/không
+  cắt) → ghi đè bằng `fva-brand-kit-white-gold-transparent.png` (brand-kit
+  — ưu tiên theo đúng yêu cầu Lead "dùng brand-kit thay logo cũ" ở khung
+  thương hiệu chính). File `fva-logo.png` cùng thư mục (trước đây KHÔNG
+  được code nào tham chiếu, mồ côi) cũng cập nhật cho nhất quán.
+- `npm test` (vitest) trong aigen-pipeline: **244 passed**, không hồi quy.
+- ⚠️ **Thay đổi này CHƯA COMMIT trong repo `aigen-pipeline`** (git status
+  cho thấy Lead đã tự XOÁ 4 asset cũ + thêm 4 asset mới trước khi tôi vào,
+  cộng 7 file tôi vừa ghi đè — tất cả đang ở working tree). Tôi KHÔNG tự ý
+  commit ở repo khác ngoài phạm vi được giao — Lead xác nhận rồi tự
+  commit, hoặc yêu cầu tôi làm cụ thể ở repo đó.
+- KHÔNG kiểm được bằng ảnh chụp thật (khung hình video render qua pipeline
+  Node/HTML riêng, ngoài công cụ trình duyệt phiên này chạm tới do khác
+  thư mục dự án) — chỉ xác nhận qua lý luận tương phản màu + test suite
+  xanh. Đề nghị Lead xem 1 video render thật gần nhất để xác nhận logo rõ
+  nét đúng ý trước khi coi là XONG HẲN.
 
 ---
 
@@ -176,8 +310,11 @@ push lên remote** — chờ xác nhận riêng.
 
 ## 6. TEST
 
-`python -m pytest` (đầy đủ, không lọc path) — **774 passed**, 0 fail, 40
-warning (Pillow deprecation, không liên quan code này).
+`python -m pytest` (đầy đủ, không lọc path, marketing-automation) —
+**776 passed**, 0 fail, 43 warning (Pillow deprecation, không liên quan
+code này).
+
+`npm test` (aigen-pipeline, repo riêng) — **244 passed**, 0 fail.
 
 ---
 
@@ -197,3 +334,13 @@ warning (Pillow deprecation, không liên quan code này).
   cần thêm 1 layer store riêng, hiện CHƯA xây (đúng ý Lead: "để trống, tôi
   sẽ tự tạo trên sheet UI" — chỉ cần hiển thị + không mất, chưa cần machine
   đọc lại).
+- **Cần Lead cấu hình lại màu Type/Status trên Sheet UI 1 lần** (nếu trước
+  đây có) — đã bị sự cố §3B xoá mất, code giờ KHÔNG còn đụng tới nữa nên an
+  toàn vĩnh viễn sau lần cấu hình lại này.
+- **`aigen-pipeline` (repo riêng) có thay đổi CHƯA COMMIT** — 4 asset cũ đã
+  xoá + 4 asset mới + 7 file logo template ghi đè theo brand-kit mới (xem
+  §3C). KHÔNG tự ý commit ngoài phạm vi marketing-automation — Lead xác
+  nhận rồi tự commit ở đó, hoặc giao việc rõ để làm tiếp.
+- **Video brand-kit mới CHƯA kiểm bằng mắt** (không render/screenshot được
+  qua công cụ phiên này, khác thư mục dự án) — chỉ xác nhận qua test suite
+  + lý luận tương phản màu. Đề nghị Lead xem 1 video render thật để chốt.

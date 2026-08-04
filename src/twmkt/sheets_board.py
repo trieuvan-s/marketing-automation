@@ -1510,8 +1510,17 @@ _COL_WIDTH = {
 }
 _COL_WIDTH_DEFAULT = 140
 # Cột nội dung dài -> wrap text.
+# SỬA LỖI THẬT (2026-08-04, Lead báo CONTEXT.Tickers/Source tràn sang ô khác
+# cùng dòng, Source "bị chui ẩn đi") — 2 cột này CÓ độ rộng CỐ ĐỊNH
+# (_COL_WIDTH ở trên) nhưng KHÔNG wrap, nên nội dung dài hơn độ rộng đó tràn
+# ra ngoài: nếu ô kế bên RỖNG thì tràn nhìn tạm ổn, nếu ô kế bên CÓ dữ liệu
+# thì phần tràn bị Sheets CẮT/che mất (đúng hiện tượng "chui ẩn đi" Lead mô
+# tả). Thêm WRAP để nội dung tự xuống dòng, LUÔN nằm trọn trong ô — "tickers"
+# có thể nhiều mã cổ phiếu nối dấu phẩy, "source" có thể nhiều URL nối dòng
+# (xem context_row() -- source gộp url bài chính + các báo khác).
 _WRAP_COLS = {"title", "hook", "notes", "message", "payload", "context",
-              "output", "prompt", "template", "label", "keywords", "sources"}
+              "output", "prompt", "template", "label", "keywords", "sources",
+              "tickers", "source"}
 
 # CHIỀU CAO DÒNG DỮ LIỆU tab CONTENT (Trung 02/08, chốt lại sau khi đo THẬT
 # trên Sheet sản xuất — bản đầu 32px SAI: các dòng CONTENT lúc đó đang TỰ
@@ -1538,7 +1547,17 @@ class TabMeta:
     n_rows: int                 # số hàng CÓ dữ liệu (gồm header)
     grid_rows: int = 1000       # rowCount cấp phát (giới hạn range)
     banding_ids: list[int] = field(default_factory=list)
-    cond_format_count: int = 0
+    # SỰ CỐ THẬT (2026-08-04, Lead báo "Type + Status vẫn bị ghi đè thiết lập
+    # màu trên sheet UI") -- TRƯỚC ĐÂY chỉ giữ 1 SỐ ĐẾM (`cond_format_count`),
+    # nên build_format_requests() XOÁ SẠCH mọi conditional-format rule đang có
+    # trên CONTEXT/CONTENT rồi chỉ dựng lại đúng các rule CODE tự quản (Gate1/
+    # execute/score/hot%/Gate2/Gate3) -- rule Lead tự thêm tay cho cột KHÁC (vd
+    # Type/Status) bị xoá theo, không có gì dựng lại. Giữ CỘT (startColumnIndex)
+    # của TỪNG rule hiện có, theo ĐÚNG thứ tự index gốc, để chỉ xoá rule nằm
+    # trên cột CODE sắp ghi lại -- rule ở cột khác (Lead tự cấu hình) không bị
+    # đụng tới. `None` nếu rule không tra được cột (an toàn: KHÔNG xoá, thà bỏ
+    # sót dọn rác còn hơn xoá nhầm cấu hình người dùng).
+    cond_format_cols: list[int | None] = field(default_factory=list)
 
     @property
     def n_cols(self) -> int:
@@ -1691,27 +1710,16 @@ def _tab_requests(t: TabMeta) -> list[dict]:
         # chỉ là lớp gợi ý thị giác.
         c = low.index("execute")
         out.append({"setDataValidation": {"range": _grid_range(sid, 1, fmt_rows, c, c + 1)}})
-    if t.name == "CONTENT" and "status" in low:
-        # 2026-07-28 (yêu cầu Lead): Status là KẾT QUẢ XỬ LÝ do máy ghi, người
-        # CHỈ XEM -> GỠ dropdown (gửi setDataValidation không kèm "rule" = xoá
-        # validation cũ). Cùng lý do đã làm với Execute: dropdown mời người bấm,
-        # mà bấm vào đây không có tác dụng gì ngoài làm sai lệch hiển thị tới
-        # lượt render kế tiếp. Khoá ghi thật ở Protected Range, xem
-        # protect_readonly_columns().
-        c = low.index("status")
-        out.append({"setDataValidation": {"range": _grid_range(sid, 1, fmt_rows, c, c + 1)}})
-    if t.name == "CONTENT" and "type" in low:
-        # Type do Output Type người chọn quyết định (1 loại = 1 dòng) — máy
-        # sinh, người chỉ xem. Chưa từng có dropdown; thêm nhánh XOÁ để dọn nếu
-        # có validation sót từ lần chèn cột trước đây.
-        c = low.index("type")
-        out.append({"setDataValidation": {"range": _grid_range(sid, 1, fmt_rows, c, c + 1)}})
-    # Duyệt Content (Gate 2) / Duyệt Public (Gate 3), CONTENT: CỐ Ý KHÔNG ghi
-    # setDataValidation (Trung 02/08, cùng lý do Duyệt Context/Output Type ở
-    # trên) — Trung đã tự bật tay Dropdown (Chip, chỉ 1 giá trị) cho CẢ 2 cột
-    # này qua UI Sheets; ghi validation đè lên mỗi lượt --setup sẽ reset mất.
-    # Giá trị hợp lệ (PENDING/APPROVE/REJECT) vẫn được kiểm ở tầng xử lý
-    # (ingest_content_from_sheet), không cần chặn ở Sheet.
+    # Type / Status (CONTENT), Duyệt Content (Gate 2) / Duyệt Public (Gate 3):
+    # CỐ Ý KHÔNG ghi setDataValidation (SỬA LỖI THẬT 2026-08-04, Lead báo "Type
+    # + Status vẫn bị ghi đè thiết lập màu trên sheet UI" — cùng lý do Duyệt
+    # Context/Output Type ở trên). TRƯỚC ĐÂY Type/Status có nhánh CHỦ ĐỘNG gửi
+    # setDataValidation KHÔNG kèm "rule" ("dọn nếu có validation sót"), nhưng
+    # Lead đã tự bật tay Dropdown (Chip, có màu theo giá trị) cho CẢ 2 cột này
+    # qua UI Sheets — gửi setDataValidation dù KHÔNG kèm rule vẫn XOÁ MẤT chip
+    # đó (Sheets coi đây là 1 lệnh ghi validation, "xoá rule" cũng tính là ghi
+    # đè). Giá trị hợp lệ vẫn được kiểm ở tầng xử lý (ingest_content_from_
+    # sheet/produce_from_sheet.run), không cần chặn ở Sheet.
     if t.name == "CONTENT" and "posting status" in low:
         # TRẠNG THÁI ĐĂNG — CỜ MÁY-GHI của khâu publish (2026-07-29, chốt ngữ
         # nghĩa với Lead). Bộ giá trị khớp nếp Execute (Running.../DONE/FAILED):
@@ -1727,10 +1735,28 @@ def _tab_requests(t: TabMeta) -> list[dict]:
         out.append(_set_validation(sid, 1, fmt_rows, c,
                                    _one_of_list(["POSTING...", "DONE", "FAILED"])))
 
-    # 8) Conditional formatting cho CONTEXT/CONTENT (xóa rule cũ trước -> idempotent).
+    # 8) Conditional formatting cho CONTEXT/CONTENT — CHỈ xoá rule NẰM Ở CỘT
+    # code sắp ghi lại (Gate1/execute/score/hot% cho CONTEXT; Gate2/Gate3 cho
+    # CONTENT), rule ở CỘT KHÁC (vd Type/Status — Lead tự cấu hình màu qua
+    # Sheet UI) GIỮ NGUYÊN. SỬA LỖI THẬT 2026-08-04 (Lead báo "Type + Status
+    # vẫn bị ghi đè thiết lập màu"): bản cũ xoá SẠCH mọi rule đang có trên cả
+    # tab (idempotent theo nghĩa CODE, nhưng xoá LUÔN rule người dùng tự thêm
+    # tay không nằm trong danh sách CODE quản — mất vĩnh viễn, không có gì
+    # dựng lại). Xoá theo index CAO->THẤP (tránh lệch index khi xoá nhiều rule
+    # trong cùng batch).
+    managed_cols: set[int] = set()
+    if t.name == "CONTEXT":
+        for _name in (_GATE1_KEY, "execute", "score", "hot%"):
+            if _name in low:
+                managed_cols.add(low.index(_name))
+    if t.name == "CONTENT":
+        for _name in (_GATE2_KEY, _GATE3_KEY):
+            if _name in low:
+                managed_cols.add(low.index(_name))
     if t.name in ("CONTEXT", "CONTENT"):
-        for i in range(t.cond_format_count - 1, -1, -1):
-            out.append({"deleteConditionalFormatRule": {"sheetId": sid, "index": i}})
+        for i in range(len(t.cond_format_cols) - 1, -1, -1):
+            if t.cond_format_cols[i] in managed_cols:
+                out.append({"deleteConditionalFormatRule": {"sheetId": sid, "index": i}})
     if t.name == "CONTEXT":
         if _GATE1_KEY in low:
             c = low.index(_GATE1_KEY)
@@ -1910,10 +1936,17 @@ class SheetsBoard:
                 n_rows = 1
             banding_ids = [b["bandedRangeId"] for b in s.get("bandedRanges", [])
                            if b.get("bandedRangeId") is not None]
-            cond_count = len(s.get("conditionalFormats", []))
+            # Cột (startColumnIndex) của TỪNG rule hiện có, ĐÚNG thứ tự index
+            # gốc -- xem docstring TabMeta.cond_format_cols cho lý do (SỬA LỖI
+            # THẬT 2026-08-04: chỉ xoá rule ở cột code quản, không đụng rule
+            # Lead tự thêm tay ở cột khác).
+            cond_format_cols: list[int | None] = []
+            for cf in s.get("conditionalFormats", []):
+                ranges = cf.get("ranges") or []
+                cond_format_cols.append(ranges[0].get("startColumnIndex") if ranges else None)
             tabs.append(TabMeta(name=name, header=header, sheet_id=props["sheetId"],
                                 n_rows=n_rows, grid_rows=grid_rows,
-                                banding_ids=banding_ids, cond_format_count=cond_count))
+                                banding_ids=banding_ids, cond_format_cols=cond_format_cols))
 
         requests = build_format_requests(tabs)
         requests = self._drop_stale_delete_banding(sh, requests)
