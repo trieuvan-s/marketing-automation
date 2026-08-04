@@ -1651,10 +1651,21 @@ def _tab_requests(t: TabMeta) -> list[dict]:
         "top": border, "bottom": border, "left": border, "right": border,
         "innerHorizontal": border, "innerVertical": border}})
 
-    # 5) Banding: xóa cái cũ (idempotent) rồi thêm mới cho hàng dữ liệu.
+    # 5) Banding: xóa cái cũ (idempotent) rồi thêm mới cho hàng dữ liệu — TRỪ
+    # CONTEXT/CONTENT. SỰ CỐ THẬT (2026-08-04, Lead báo "block dữ liệu theo
+    # ngày lại mất") — 2 tab này tô NỀN THEO NGÀY/TOPICKEY riêng bằng
+    # `repeatCell` (_band_day() -> band_context_by_day()/regroup_and_band_
+    # content(), gọi mỗi lượt render_*_to_sheet()), nhưng "banding" NGUYÊN
+    # SINH của Google Sheets (addBanding ở đây) LUÔN HIỂN THỊ ĐÈ lên màu nền
+    # cell thường trong phạm vi của nó — mỗi khi format_board() chạy (dò
+    # header đổi qua ensure_tabs(), hoặc gọi tay), banding trắng/xanh nhạt
+    # NGUYÊN SINH này che mất toàn bộ khối màu ngày vừa tô, dù giá trị
+    # backgroundColor của từng cell bên dưới vẫn đúng — cell chỉ "trông như"
+    # mất màu trên giao diện. VẪN xoá banding CŨ (nếu còn sót từ trước khi
+    # sửa) để dọn sạch, chỉ KHÔNG thêm banding MỚI cho CONTEXT/CONTENT nữa.
     for bid in t.banding_ids:
         out.append({"deleteBanding": {"bandedRangeId": bid}})
-    if fmt_rows > 1:
+    if fmt_rows > 1 and t.name not in ("CONTEXT", "CONTENT"):
         out.append({"addBanding": {"bandedRange": {
             "range": _grid_range(sid, 1, fmt_rows, 0, ncols),
             "rowProperties": {"firstBandColor": _rgb("#FFFFFF"),

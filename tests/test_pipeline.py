@@ -1215,6 +1215,39 @@ def test_format_board_smoke_no_network():
             "deleteConditionalFormatRule"} <= kinds
 
 
+def test_build_format_requests_never_adds_native_banding_on_context_or_content():
+    """SỰ CỐ THẬT (2026-08-04, Lead báo "block dữ liệu theo ngày lại mất") —
+    CONTEXT/CONTENT tô NỀN THEO NGÀY/TOPICKEY riêng bằng `repeatCell`
+    (_band_day() -> band_context_by_day()/regroup_and_band_content(), gọi
+    mỗi lượt render_*_to_sheet()) -- nhưng "banding" NGUYÊN SINH Google
+    Sheets (addBanding) LUÔN HIỂN THỊ ĐÈ lên màu nền cell thường trong phạm
+    vi của nó. Mỗi lần format_board() chạy (ensure_tabs() dò header đổi,
+    hoặc gọi tay) từng thêm 1 banding trắng/xanh nhạt CHUNG cho MỌI tab kể
+    cả CONTEXT/CONTENT, che mất toàn bộ khối màu ngày vừa tô dù giá trị
+    backgroundColor từng cell vẫn đúng bên dưới. Khoá lại: CONTEXT/CONTENT
+    KHÔNG BAO GIỜ được addBanding (banding CŨ vẫn được dọn qua deleteBanding
+    nếu còn sót từ trước khi sửa); các tab KHÁC (không có nền tự tô) vẫn giữ
+    banding xen kẽ như cũ để dễ đọc."""
+    from twmkt.sheets_board import build_format_requests, TabMeta, TABS
+
+    tabs = [TabMeta(name, header, i, n_rows=5, banding_ids=[7] if name in ("CONTEXT", "CONTENT") else [])
+           for i, (name, header) in enumerate(TABS.items())]
+    reqs = build_format_requests(tabs)
+
+    context_sid = list(TABS.keys()).index("CONTEXT")
+    content_sid = list(TABS.keys()).index("CONTENT")
+    add_banding_sids = {r["addBanding"]["bandedRange"]["range"]["sheetId"]
+                        for r in reqs if "addBanding" in r}
+    assert context_sid not in add_banding_sids, "CONTEXT KHÔNG được addBanding -- đè mất màu ngày"
+    assert content_sid not in add_banding_sids, "CONTENT KHÔNG được addBanding -- đè mất màu TopicKey/ngày"
+    # banding CŨ (sót từ trước khi sửa) vẫn phải được dọn cho cả 2 tab.
+    delete_banding_ids = [r["deleteBanding"]["bandedRangeId"] for r in reqs if "deleteBanding" in r]
+    assert delete_banding_ids.count(7) == 2, "vẫn phải xoá banding cũ sót lại của CONTEXT lẫn CONTENT"
+    # tab KHÁC (vd SOURCES) vẫn giữ banding như cũ.
+    sources_sid = list(TABS.keys()).index("SOURCES")
+    assert sources_sid in add_banding_sids, "tab không tự tô màu vẫn phải giữ banding xen kẽ"
+
+
 def test_write_context_dedup_by_url():
     """write_context bỏ trùng theo url (cột Source): url đã có -> không ghi, trả False."""
     from twmkt.sheets_board import SheetsBoard, CONTEXT_HEADER, context_row
