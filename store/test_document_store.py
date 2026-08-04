@@ -110,6 +110,21 @@ def test_list_topics_without_layer_returns_all_distinct_topics(db_path):
     assert ds.list_topics(db_path=db_path) == ["t1", "t2"]
 
 
+def test_first_created_at_returns_version_1_not_latest(db_path):
+    """VIỆC sắp xếp Sheet (2026-08-03, Lead) -- first_created_at() phải trả
+    created_at của bản ghi ĐẦU TIÊN (version 1), không đổi dù ghi thêm version
+    mới sau đó -- đây là khoá sắp xếp CHRONOLOGICAL sync_service.py dùng thay
+    Hot%/alphabetical (xem docstring hàm)."""
+    ds.write_document("t1", "raw", {"v": 1}, "ma", db_path=db_path)
+    ds.write_document("t1", "raw", {"v": 2}, "ma", db_path=db_path)
+    history = ds.read_history("t1", "raw", "", db_path=db_path)
+    assert ds.first_created_at("t1", "raw", "", db_path=db_path) == history[0][2]
+
+
+def test_first_created_at_returns_none_when_never_written(db_path):
+    assert ds.first_created_at("nope", "raw", "", db_path=db_path) is None
+
+
 def test_invalid_layer_raises_value_error_before_touching_db(db_path):
     with pytest.raises(ValueError):
         ds.write_document("t1", "not-a-real-layer", {}, "ma", db_path=db_path)

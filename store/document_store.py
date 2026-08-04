@@ -230,6 +230,25 @@ def read_history(
     return [(r["version"], json.loads(r["payload_json"]), r["created_at"]) for r in rows]
 
 
+def first_created_at(
+    topic_key: str, layer: str, content_type: str = "", *, db_path: str | Path | None = None
+) -> str | None:
+    """created_at của version 1 (bản ghi ĐẦU TIÊN, KHÔNG phải mới nhất) —
+    "" nếu chưa từng ghi. VIỆC sắp xếp Sheet (2026-08-03, Lead) — list_topics()
+    trả topic_key theo BẢNG CHỮ CÁI (ORDER BY topic_key), không phản ánh thời
+    điểm crawl/xử lý thật -> Sheet sắp trong cùng ngày theo thứ tự GẦN NHƯ
+    NGẪU NHIÊN. Hàm này cho sync_service.py khoá sắp xếp THẬT (thời điểm bản
+    ghi ĐẦU TIÊN — với layer='raw' đó là lúc topic vào hệ thống, KHÔNG đổi
+    dù raw không ghi thêm version nào sau)."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT created_at FROM documents WHERE topic_key = ? AND layer = ? "
+            "AND content_type = ? ORDER BY version ASC LIMIT 1",
+            (topic_key, layer, content_type),
+        ).fetchone()
+    return row["created_at"] if row else None
+
+
 def list_topics(layer: str | None = None, *, db_path: str | Path | None = None) -> list[str]:
     """`topic_key` DISTINCT, sắp xếp theo bảng chữ cái -- lọc theo `layer`
     nếu truyền, không thì trả mọi topic_key có ít nhất 1 bản ghi ở BẤT KỲ

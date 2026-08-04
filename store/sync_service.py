@@ -57,7 +57,14 @@ ASSET_PROCESSING_LABEL = "Processing..."
 # TRUNCATE CHỈ còn ở đây, điểm đẩy sang Sheet cho người LIẾC nhanh. Bất kỳ
 # code nào cần parse lại nội dung (vd render_production_assets.py) PHẢI đọc
 # thẳng ps.read_content_output() từ store, KHÔNG BAO GIỜ đọc lại ô Sheet này.
-_OUTPUT_PREVIEW = 1500
+#
+# VIỆC 2 (2026-08-04, Lead: "tăng kích thước cell lên tối đa 5k ký tự... user
+# xem và sửa tay nội dung nếu cần trước khi phê duyệt Gate 2") -- nâng 1500 ->
+# 5000 để cột Output đủ chứa TRỌN bài (không cắt) cho phần lớn bài viết, đồng
+# thời cho phép người sửa tay trực tiếp trên Sheet (xem
+# ingest_content_from_sheet() -- Output giờ là cột HYBRID, xem ghi chú ở
+# _CONTENT_MACHINE_COLS/_CONTENT_USER_COLS bên dưới).
+_OUTPUT_PREVIEW = 5000
 
 
 def _band_day(board, method: str, tab: str) -> None:
@@ -125,13 +132,6 @@ def _day_key(ts: str) -> tuple[int, int, int]:
         return (y, m, d)
     except ValueError:
         return (0, 0, 0)
-
-
-def _num(v: str) -> float:
-    try:
-        return float(str(v).replace(",", "."))
-    except ValueError:
-        return 0.0
 
 
 def _write_rows(board: SheetsBoard, tab: str, header: list[str], rows: list[list[str]]) -> None:
@@ -253,10 +253,26 @@ def _auto_merge_notes(type_outs: list[tuple[str, dict]]) -> str:
     return f"Không tạo được nội dung nào. {body}." if body else "Không tạo được nội dung nào."
 
 
+# SỰ CỐ THẬT (2026-08-04, phát hiện ngay lượt sync_all() đầu tiên sau khi
+# nâng _OUTPUT_PREVIEW 1500->5000) — hậu tố này PHẢI là hằng số dùng chung
+# giữa _preview_output() (ghi) và ingest_content_from_sheet() (đọc, kiểm
+# tra). Trước đó ingest chỉ so `sheet_output != store_output.strip()` để
+# quyết "người vừa sửa tay" — lượt sync ĐẦU TIÊN sau khi đổi ngưỡng, Sheet
+# còn giữ NGUYÊN bản CẮT Ở NGƯỠNG CŨ (1500) từ trước khi deploy, ingest chạy
+# TRƯỚC render (xem sync_all()) nên đọc phải bản cắt cũ đó, so với store đủ
+# 2000-5000 ký tự -> luôn "khác nhau" giả -> ghi ĐÈ content_output THẬT bằng
+# bản CẮT + hậu tố này (đã xảy ra thật: 17 bản ghi production bị ghi đè
+# thành 1550 ký tự, phải phục hồi tay từ version trước). Sửa: sheet_output
+# TRÙNG hậu tố này (đuôi) -> chắc chắn là ảnh còn sót của 1 lượt render CẮT
+# nào đó (dù ngưỡng cũ hay mới) -- KHÔNG BAO GIỜ coi là người sửa tay, bất kể
+# so khớp độ dài thế nào.
+_TRUNCATION_SUFFIX = "\n…(bản đầy đủ nằm trong Store, xem content_output)"
+
+
 def _preview_output(output: str) -> str:
     if len(output) <= _OUTPUT_PREVIEW:
         return output
-    return output[:_OUTPUT_PREVIEW] + "\n…(bản đầy đủ nằm trong Store, xem content_output)"
+    return output[:_OUTPUT_PREVIEW] + _TRUNCATION_SUFFIX
 
 # --- Quyền sở hữu cột (Nguyên tắc 3.3) --------------------------------------
 # MÁY-SỞ-HỮU (store->Sheet, render ghi đè KHÔNG hỏi) — dữ liệu NGUỒN từ raw/
@@ -269,9 +285,17 @@ _CONTEXT_MACHINE_COLS = ("Timestamp", "Hot%", "Score", "Group", "Topic", "Contex
 # (Bước 4) — người chọn giới hạn Content Factory, xem OUTPUT_TYPE_VALUES.
 _CONTEXT_USER_COLS = (GATE1_COL, "Notes", OUTPUT_TYPE_COL)
 
-_CONTENT_MACHINE_COLS = ("Timestamp", "Context", "Type", "Status", "Output",
+_CONTENT_MACHINE_COLS = ("Timestamp", "Context", "Type", "Status",
                          "Notes", "TopicKey", "Facts", "AssetPath")
 _CONTENT_USER_COLS = (GATE2_COL, "Social Link", GATE3_COL, "Posting Status")
+# "Output" -- NGOẠI LỆ CỐ Ý duy nhất khỏi "KHÔNG CỘT NÀO 2 CHIỀU" (Việc 2,
+# 2026-08-04, Lead): máy ghi TRƯỚC lúc sản xuất xong, nhưng người có thể sửa
+# tay TRÊN SHEET trước khi duyệt Gate 2 -- sửa PHẢI ghi ngược vào
+# content_output (xem ingest_content_from_sheet()). CHỈ áp dụng khi bản lưu
+# store <= _OUTPUT_PREVIEW ký tự (không bị _preview_output() cắt) -- so khớp
+# 1 bản Sheet đã cắt với bản store nguyên văn dài hơn sẽ luôn "khác nhau" giả,
+# nên ingest CHỦ ĐỘNG bỏ qua write-back khi phát hiện đã cắt (không đoán, không
+# ghi đè nhầm bài dài thành bản cụt).
 
 
 def _read_sheet_rows(board: SheetsBoard, tab_name: str) -> tuple[list[str], list[list[str]]]:
@@ -308,11 +332,11 @@ def render_context_to_sheet(board: SheetsBoard, *, db_path=None, settings=None) 
     khi ingest kịp chạy sẽ làm mất thao tác đó (đã tự phát hiện qua
     test_sync_all_full_recovery_after_accidental_deletion khi viết hàm này —
     lỗi thật, không phải giả định)."""
-    out_rows: list[list[str]] = []
+    keyed_rows: list[tuple[str, list[str]]] = []
     for topic_key in ds.list_topics(layer="raw", db_path=db_path):
         raw = ps.read_raw(topic_key, db_path=db_path) or {}
         gate = ps.read_gate_status(topic_key, db_path=db_path)
-        out_rows.append(context_row(
+        keyed_rows.append((topic_key, context_row(
             title=raw.get("context", ""), hook_line=raw.get("hook", ""),
             source_url=raw.get("source", ""),
             score=int(raw.get("score", 0) or 0), hot_pct=float(raw.get("hot_pct", 0.0) or 0.0),
@@ -334,16 +358,23 @@ def render_context_to_sheet(board: SheetsBoard, *, db_path=None, settings=None) 
             # biệt được tin ngày nào — đúng thứ Lead cần để lọc/nhóm theo ngày.
             # `raw["timestamp"]` ghi MỘT LẦN lúc ingest đầu, không đổi về sau.
             ts=raw.get("timestamp") or None,
-        ))
+        )))
 
     i_ts = CONTEXT_HEADER.index("Timestamp")
-    i_hot = CONTEXT_HEADER.index("Hot%")
-    out_rows = _visible_rows(out_rows, i_ts, settings=settings)
-    # NGÀY TĂNG DẦN -> tin MỚI NHẤT nằm DƯỚI CÙNG (quy ước Lead): người vận
-    # hành cuộn xuống cuối là thấy việc hôm nay, và dòng mới thêm vào không đẩy
-    # dòng cũ trôi chỗ. Trong cùng 1 ngày vẫn Hot% giảm dần.
-    out_rows.sort(key=lambda r: (_day_key(r[i_ts]), _num(r[i_hot])))
-    out_rows.sort(key=lambda r: _day_key(r[i_ts]))
+    visible = {id(r) for r in _visible_rows([r for _, r in keyed_rows], i_ts, settings=settings)}
+    keyed_visible = [(tk, r) for tk, r in keyed_rows if id(r) in visible]
+    # VIỆC sắp xếp (2026-08-03, Lead) — BỎ tie-break theo Hot% (dữ liệu mới
+    # crawl cùng ngày bị xếp lẫn lộn vì Hot% không phản ánh THỨ TỰ VÀO HỆ
+    # THỐNG). Thay bằng first_created_at() (thời điểm bản ghi "raw" ĐẦU TIÊN
+    # của topic — xem docstring document_store.first_created_at) làm khoá phụ:
+    # NGÀY TĂNG DẦN, trong cùng ngày THEO ĐÚNG THỨ TỰ CRAWL -> tin mới nhất
+    # luôn nằm dưới cùng, không còn xáo trộn theo alphabet của topic_key (thứ
+    # tự list_topics() trả về, vốn KHÔNG có ý nghĩa thời gian).
+    keyed_visible.sort(key=lambda tr: (
+        _day_key(tr[1][i_ts]),
+        ds.first_created_at(tr[0], "raw", "", db_path=db_path) or "",
+    ))
+    out_rows = [r for _, r in keyed_visible]
 
     _write_rows(board, "CONTEXT", CONTEXT_HEADER, out_rows)
     _band_day(board, "band_context_by_day", "CONTEXT")
@@ -360,14 +391,45 @@ def render_content_to_sheet(board: SheetsBoard, *, db_path=None, settings=None) 
     người-sở-hữu SAU khi gọi, bằng giá trị đọc từ content_status — vẫn KHÔNG
     máy TỰ SINH giá trị, chỉ phản ánh lại cái người đã ghi (qua ingest).
 
-    Cột Output ghi lên Sheet đi qua `_preview_output()` (cắt 1500 ký tự) —
-    CHỈ để người liếc, KHÔNG phải nguồn parse lại. `out.get("output", "")`
-    (từ content_output) là bản NGUYÊN VĂN, không cắt."""
+    Cột Output ghi lên Sheet đi qua `_preview_output()` (cắt ở _OUTPUT_PREVIEW
+    ký tự, hiện 5000 — Việc 2, 2026-08-04). Bài NGẮN hơn ngưỡng hiện NGUYÊN
+    VĂN (không cắt) — người có thể sửa tay ô này, `ingest_content_from_sheet()`
+    đọc lại và ghi ngược vào content_output (xem ghi chú _CONTENT_USER_COLS).
+
+    VIỆC 3 (2026-08-04, Lead):
+    (a) Timestamp hiển thị đổi sang `published_at` (ngày ĐĂNG BÀI GỐC, cùng ý
+        nghĩa cột Timestamp bên tab CONTEXT), lùi về `timestamp` (ngày XỬ LÝ)
+        khi bản ghi cũ chưa có published_at.
+    (b) Thứ tự dòng: NGÀY tăng dần, trong cùng ngày theo `first_created_at()`
+        của chính bản ghi content_output đó (KHÔNG theo alphabet topic_key) —
+        cùng cách CONTEXT đã sửa (Task #75).
+    (c) "Người thực hiện" — đọc giá trị HIỆN CÓ trên Sheet (không có store
+        backing, người tự gõ tay) TRƯỚC khi dựng lại, khoá theo (TopicKey,
+        Type hiển thị) vì thứ tự dòng đổi mỗi lượt sort, rồi carry-forward
+        sang dòng mới — máy KHÔNG được tự xoá giá trị người gõ."""
+    i_h_type = CONTENT_HEADER.index("Type")
     i_h_social = CONTENT_HEADER.index("Social Link")
     i_h_g3 = CONTENT_HEADER.index(GATE3_COL)
     i_h_posting = CONTENT_HEADER.index("Posting Status")
+    i_h_nguoi = CONTENT_HEADER.index("Người thực hiện")
 
-    out_rows: list[list[str]] = []
+    existing_header, existing_rows = _read_sheet_rows(board, "CONTENT")
+    nguoi_thuc_hien_by_key: dict[tuple[str, str], str] = {}
+    if existing_header:
+        j_tk = _col_index(existing_header, "TopicKey")
+        j_type = _col_index(existing_header, "Type")
+        j_nguoi = _col_index(existing_header, "Người thực hiện")
+        if j_tk is not None and j_type is not None and j_nguoi is not None:
+            for r in existing_rows:
+                tk = _cell(r, j_tk)
+                if tk:
+                    nguoi_thuc_hien_by_key[(tk, _cell(r, j_type))] = _cell(r, j_nguoi)
+
+    # (topic_key, content_type dùng để tra first_created_at(), row) — content_type
+    # riêng vì AUTO gộp vẫn cần khoá theo tuyến ĐẦU TIÊN thử (type_outs[0]) để
+    # sắp xếp có ý nghĩa (topic_key một mình không đủ phân biệt các dòng khác
+    # type cùng topic_key).
+    keyed_rows: list[tuple[str, str, list[str]]] = []
     for topic_key in ds.list_topics(layer="content_output", db_path=db_path):
         raw = ps.read_raw(topic_key, db_path=db_path) or {}
         context_title = raw.get("context", "")
@@ -392,13 +454,15 @@ def render_content_to_sheet(board: SheetsBoard, *, db_path=None, settings=None) 
             # nguyên nhân từng loại (VIỆC 4.3: GỘP Ở TẦNG HIỂN THỊ, store vẫn
             # giữ nguyên `type_outs` từng bản ghi — không đụng gì ở đây).
             merged_notes = _auto_merge_notes(type_outs)
-            first_out = type_outs[0][1]
+            first_type, first_out = type_outs[0]
             row = content_row(
                 context=context_title, type_="AUTO", status="ERROR",
                 output="", notes=merged_notes, approve="PENDING", topic_key=topic_key,
-                facts="", ts=first_out.get("timestamp") or None, asset_path="",
+                facts="", ts=first_out.get("published_at") or first_out.get("timestamp") or None,
+                asset_path="",
             )
-            out_rows.append(row)
+            row[i_h_nguoi] = nguoi_thuc_hien_by_key.get((topic_key, row[i_h_type]), "")
+            keyed_rows.append((topic_key, first_type, row))
             continue
 
         for type_, out in type_outs:
@@ -414,9 +478,10 @@ def render_content_to_sheet(board: SheetsBoard, *, db_path=None, settings=None) 
                 output=_preview_output(out.get("output", "")), notes=out.get("notes", ""),
                 approve=status_data.get("gate2", "PENDING"), topic_key=topic_key,
                 facts=out.get("facts", ""),
-                # Cùng lý do CONTEXT (xem render_context_to_sheet): không
-                # truyền `ts` thì mỗi lượt render ghi đè Timestamp thành hôm nay.
-                ts=out.get("timestamp") or None,
+                # VIỆC 3.1 (2026-08-04) — Timestamp CONTENT giờ ưu tiên ngày
+                # ĐĂNG BÀI GỐC (published_at, cùng ý nghĩa cột CONTEXT), lùi về
+                # ngày XỬ LÝ (timestamp) cho bản ghi cũ chưa có published_at.
+                ts=out.get("published_at") or out.get("timestamp") or None,
                 # Store giữ URL THUẦN (asset_url) — bọc thành công thức
                 # HYPERLINK ở ĐÚNG biên đẩy sang Sheet, cùng nếp
                 # `_preview_output()`: định dạng cho người xem là việc của lớp
@@ -428,11 +493,21 @@ def render_content_to_sheet(board: SheetsBoard, *, db_path=None, settings=None) 
             row[i_h_social] = status_data.get("social_link", "")
             row[i_h_g3] = status_data.get("gate3", "PENDING")
             row[i_h_posting] = status_data.get("posting_status", "")
-            out_rows.append(row)
+            row[i_h_nguoi] = nguoi_thuc_hien_by_key.get((topic_key, row[i_h_type]), "")
+            keyed_rows.append((topic_key, type_, row))
 
     i_ts_c = CONTENT_HEADER.index("Timestamp")
-    out_rows = _visible_rows(out_rows, i_ts_c, settings=settings)
-    out_rows.sort(key=lambda r: _day_key(r[i_ts_c]))   # mới nhất DƯỚI CÙNG
+    visible = {id(r) for r in _visible_rows([r for _, _, r in keyed_rows], i_ts_c, settings=settings)}
+    keyed_visible = [(tk, ct, r) for tk, ct, r in keyed_rows if id(r) in visible]
+    # VIỆC 3.2/3.3 — cùng cách CONTEXT (Task #75): NGÀY tăng dần, trong cùng
+    # ngày theo first_created_at() của CHÍNH bản ghi content_output (không
+    # theo alphabet topic_key) -> "mới nhất luôn dưới cùng" đúng nghĩa CRAWL/
+    # XỬ LÝ, không lẫn lộn trong 1 ngày.
+    keyed_visible.sort(key=lambda tr: (
+        _day_key(tr[2][i_ts_c]),
+        ds.first_created_at(tr[0], "content_output", tr[1], db_path=db_path) or "",
+    ))
+    out_rows = [r for _, _, r in keyed_visible]
     _write_rows(board, "CONTENT", CONTENT_HEADER, out_rows)
 
     # BĂNG MÀU theo TopicKey + viền theo NGÀY (Lead báo thiếu 2026-07-29).
@@ -697,12 +772,24 @@ def ingest_content_from_sheet(board: SheetsBoard, *, db_path=None) -> int:
     """Đọc CONTENT hiện tại, ghi version MỚI vào content_status cho các
     (TopicKey, Type) có Duyệt Content/Social Link/Duyệt Public/Posting Status
     đổi so với store. KHÔNG tạo content_output mới (đó là việc pipeline, xem
-    Nguyên tắc 1) -- chỉ ghi khi (TopicKey, Type) ĐÃ có content_output."""
+    Nguyên tắc 1) -- chỉ ghi khi (TopicKey, Type) ĐÃ có content_output.
+
+    VIỆC 2 (2026-08-04) — cột Output là NGOẠI LỆ HYBRID (xem ghi chú cạnh
+    _CONTENT_USER_COLS): nếu người sửa tay ô Output trên Sheet khác bản lưu
+    content_output.output, ghi version MỚI vào content_output (giữ nguyên mọi
+    field khác — status/notes/facts/timestamp/published_at — CHỈ đổi
+    "output"). Bỏ qua write-back khi bản lưu > _OUTPUT_PREVIEW ký tự (Sheet
+    đang hiện bản CẮT, so sánh sẽ luôn sai) HOẶC khi cell còn mang hậu tố cắt
+    _TRUNCATION_SUFFIX (ảnh sót từ 1 lượt render CẮT trước đó — SỰ CỐ THẬT đã
+    xảy ra: nâng ngưỡng cắt 1500->5000 rồi sync ngay, ingest chạy TRƯỚC render
+    nên đọc phải bản cắt CŨ, ghi đè 17 content_output thật thành bản 1550 ký
+    tự — đã phục hồi tay từ version trước, xem _TRUNCATION_SUFFIX)."""
     header, rows = _read_sheet_rows(board, "CONTENT")
     if not header:
         return 0
     i_key = _col_index(header, "TopicKey")
     i_type = _col_index(header, "Type")
+    i_output = _col_index(header, "Output")
     i_g2 = _col_index(header, GATE2_COL)
     i_social = _col_index(header, "Social Link")
     i_g3 = _col_index(header, GATE3_COL)
@@ -717,8 +804,27 @@ def ingest_content_from_sheet(board: SheetsBoard, *, db_path=None) -> int:
         # (VIỆC 3, vd "Infographic"), KHÔNG còn là content_type thô ("infographic")
         # — phải dịch ngược trước khi tra store, xem docstring raw_content_type().
         type_ = raw_content_type(type_display)
-        if ps.read_content_output(topic_key, type_, db_path=db_path) is None:
+        current_out = ps.read_content_output(topic_key, type_, db_path=db_path)
+        if current_out is None:
             continue   # content_output chưa tồn tại -- không có content_status để ingest vào
+
+        store_output = current_out.get("output", "")
+        sheet_output = _cell(row, i_output)
+        # SỰ CỐ THẬT (2026-08-04, xem docstring _TRUNCATION_SUFFIX) — cell còn
+        # mang hậu tố cắt (của NGƯỠNG NÀO cũng vậy, cũ hay mới) -> chắc chắn là
+        # ảnh sót của 1 lượt render CẮT, TUYỆT ĐỐI không coi là người sửa tay,
+        # bất kể so khớp độ dài với ngưỡng HIỆN TẠI ra sao.
+        if len(store_output) <= _OUTPUT_PREVIEW and not sheet_output.endswith(_TRUNCATION_SUFFIX.strip()):
+            # `_cell()` LUÔN .strip() (quy ước chung của hàm, mọi cột khác ở
+            # đây cũng vậy) -- so với `store_output.strip()`, KHÔNG phải bản
+            # thô, để 1 vòng render->ingest KHÔNG người đụng vào không tự sinh
+            # "khác nhau" giả chỉ vì khoảng trắng đầu/cuối, rồi ghi version rác
+            # mỗi lượt sync.
+            if sheet_output != store_output.strip():
+                ps.write_content_output(topic_key, type_,
+                                        {**current_out, "output": sheet_output}, db_path=db_path)
+                writes += 1
+
         sheet_gate2 = _cell(row, i_g2) or "PENDING"
         sheet_social = _cell(row, i_social)
         sheet_gate3 = _cell(row, i_g3) or "PENDING"

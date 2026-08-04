@@ -758,9 +758,15 @@ publishers:
 #   (run_on_start=true) rồi lặp lại theo interval_minutes.
 schedule:
   enabled: true                   # true = bật vòng lặp nội bộ
-  mode: "interval"                # interval | daily
+  mode: "daily"                   # interval | daily
   interval_minutes: 240           # dùng khi mode=interval (mặc định 4h — khớp SOURCES.Interval)
-  at_times: ["08:30", "16:00"]    # dùng khi mode=daily (giờ địa phương theo timezone)
+  # VIỆC (2026-08-04, Lead: "Thời gian bắt đầu chạy crawl: 7h30' sáng, 3h/lần")
+  # -- đổi sang mode=daily với 8 mốc cố định cách nhau 3h, bắt đầu 07:30. Lý do
+  # KHÔNG dùng mode=interval: interval tính từ lúc TIẾN TRÌNH khởi động (system_
+  # power_on.py hoặc Task Scheduler --once), không neo vào 1 giờ cụ thể mỗi
+  # ngày -- daily+at_times mới đúng nghĩa "bắt đầu 7h30, lặp 3h" bất kể tiến
+  # trình khởi động lúc nào/khởi động lại bao nhiêu lần.
+  at_times: ["07:30", "10:30", "13:30", "16:30", "19:30", "22:30", "01:30", "04:30"]
   timezone: "Asia/Ho_Chi_Minh"
   jitter_s: 30                    # nhiễu +[0..jitter_s]s tránh dồn tải đúng mốc
   run_on_start: true              # chạy ngay 1 lần khi khởi động loop

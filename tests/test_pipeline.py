@@ -2590,18 +2590,25 @@ def test_content_day_border_ranges_splits_topic_group_across_days():
     assert ranges == [(1, 3), (3, 5)]
 
 
-def test_regroup_and_band_content_reorders_and_sends_band_requests():
-    """Sheet UI cleanup Phase 1 — regroup_and_band_content THAY regroup_and_
-    merge_content cũ: sắp lại CONTENT (TopicKey liền kề) + gửi repeatCell (tô
-    nền, alternating theo thứ tự dải) + updateBorders (viền trên đậm) cho MỌI
-    nhóm TopicKey — KHÔNG còn ngưỡng số loại (tk-a 3 loại VÀ tk-b 1 loại đều có
-    dải), và TUYỆT ĐỐI KHÔNG có request mergeCells/unmergeCells nào."""
+def test_regroup_and_band_content_paints_day_background_and_topickey_top_border():
+    """VIỆC 3.3b (2026-08-04, Lead qua AskUserQuestion: "Đổi sang dùng nền
+    theo Ngày, đồng bộ màu với tab Context") — ĐẢO kênh thị giác so với hành
+    vi cũ (2026-07-23, đã xoá): KHÔNG còn tự sắp lại hàng (regroup_content_
+    rows) — thứ tự dòng do render_content_to_sheet() quyết định rồi, hàm này
+    CHỈ tô. NỀN xen kẽ giờ theo khối NGÀY; TopicKey chỉ còn VIỀN TRÊN đậm ở
+    đầu mỗi dải LIÊN TỤC — tk-a bị "b_info" (tk-b) chen giữa 2 lần xuất hiện
+    (khác ngày) nên tính là 2 dải TopicKey riêng, KHÔNG gộp giả. TUYỆT ĐỐI
+    KHÔNG có request mergeCells/unmergeCells nào."""
     from twmkt.sheets_board import SheetsBoard, CONTENT_HEADER, content_row
 
-    a_info = content_row(context="A", type_="infographic", status="DONE", output="x", topic_key="tk-a")
-    b_info = content_row(context="B", type_="infographic", status="DONE", output="x", topic_key="tk-b")
-    a_art = content_row(context="A", type_="article", status="DONE", output="x", topic_key="tk-a")
-    a_vid = content_row(context="A", type_="video", status="DONE", output="x", topic_key="tk-a")
+    # Thứ tự ĐÃ đúng theo ngày (giống output render_content_to_sheet()) --
+    # 22/07: a_info (tk-a), b_info (tk-b) CHEN GIỮA -- 23/07: a_vid (tk-a).
+    a_info = content_row(context="A", type_="infographic", status="DONE", output="x",
+                         topic_key="tk-a", ts="22/07/2026")
+    b_info = content_row(context="B", type_="infographic", status="DONE", output="x",
+                         topic_key="tk-b", ts="22/07/2026")
+    a_vid = content_row(context="A", type_="video", status="DONE", output="x",
+                        topic_key="tk-a", ts="23/07/2026")
 
     class _FakeContentWS:
         id = 7
@@ -2617,35 +2624,31 @@ def test_regroup_and_band_content_reorders_and_sends_band_requests():
         def __init__(self): self.last_body = None
         def batch_update(self, body): self.last_body = body; return {}
 
-    ws = _FakeContentWS([list(CONTENT_HEADER), list(a_info), list(b_info),
-                         list(a_art), list(a_vid)])
+    ws = _FakeContentWS([list(CONTENT_HEADER), list(a_info), list(b_info), list(a_vid)])
     board = SheetsBoard(spreadsheet_id="X", creds_path="Y")
     board._ws["CONTENT"] = ws
     board._sh = _FakeSheet()
 
     n = board.regroup_and_band_content()
-    assert n == 2                                    # tk-a (3 loại) VÀ tk-b (1 loại) đều có dải
-    assert ws._v[1:] == [a_info, a_art, a_vid, b_info]   # tk-a liền kề (thứ tự trong-nhóm giữ), tk-b sau
+    assert n == 3   # tk-a (2 dải, cắt bởi b_info xen giữa) + tk-b (1 dải)
+    assert ws._v[1:] == [a_info, b_info, a_vid]   # KHÔNG sắp lại -- giữ NGUYÊN thứ tự đã render
+    assert ws.updated == []   # KHÔNG gọi update() ghi lại dữ liệu -- hàm này CHỈ tô
 
     reqs = board._sh.last_body["requests"]
     assert not any("mergeCells" in r or "unmergeCells" in r for r in reqs)   # KHÔNG merge ô nào
     fills = [r["repeatCell"] for r in reqs if "repeatCell" in r]
     top_borders = [r["updateBorders"] for r in reqs if "updateBorders" in r and "top" in r["updateBorders"]]
     left_borders = [r["updateBorders"] for r in reqs if "updateBorders" in r and "left" in r["updateBorders"]]
-    assert len(fills) == 2 and len(top_borders) == 2  # 1 nền + 1 viền trên / dải TopicKey, toàn bộ chiều rộng hàng
+    assert len(fills) == 2      # 2 khối NGÀY (22/07, 23/07)
+    assert len(top_borders) == 3   # 3 dải TopicKey (tk-a, tk-b, tk-a lại)
+    assert left_borders == []   # viền trái ngày (cũ) KHÔNG còn dùng nữa -- nền đã thay thế
     assert fills[0]["range"]["startColumnIndex"] == 0 and fills[0]["range"]["endColumnIndex"] == len(CONTENT_HEADER)
-    assert fills[0]["range"]["startRowIndex"] == 1 and fills[0]["range"]["endRowIndex"] == 4   # tk-a: dòng 1-3
-    assert fills[1]["range"]["startRowIndex"] == 4 and fills[1]["range"]["endRowIndex"] == 5   # tk-b: dòng 4
+    assert fills[0]["range"]["startRowIndex"] == 1 and fills[0]["range"]["endRowIndex"] == 3   # 22/07: dòng 1-2
+    assert fills[1]["range"]["startRowIndex"] == 3 and fills[1]["range"]["endRowIndex"] == 4   # 23/07: dòng 3
     assert fills[0]["cell"]["userEnteredFormat"]["backgroundColor"] != \
-           fills[1]["cell"]["userEnteredFormat"]["backgroundColor"]   # 2 dải liền kề PHẢI khác màu (xen kẽ)
+           fills[1]["cell"]["userEnteredFormat"]["backgroundColor"]   # 2 khối ngày liền kề PHẢI khác màu (xen kẽ)
     for b in top_borders:
         assert b["top"]["style"] == "SOLID_THICK"
-    # 2026-07-23: content_row() không truyền `ts` -> mọi hàng CÙNG Timestamp
-    # ("bây giờ") -> đúng 1 dải NGÀY duy nhất phủ hết 4 hàng -> 1 viền TRÁI
-    # (kênh thị giác TÁCH BIỆT viền trên TopicKey, không đấu nhau).
-    assert len(left_borders) == 1
-    assert left_borders[0]["left"]["style"] == "SOLID_THICK"
-    assert left_borders[0]["left"]["color"] not in (b["top"]["color"] for b in top_borders)
 
 
 def test_regroup_and_band_content_noop_when_empty():
@@ -8551,25 +8554,28 @@ def test_content_row_shape():
     "Approve(gate 2)"/"Gate3" cũ — so bằng hằng số, KHÔNG hard-code lại literal.
     Sheet UI cleanup Phase 6: "Social Link" chen giữa AssetPath và GATE3_COL,
     "Posting Status" append sau GATE3_COL — cả 2 đều NGƯỜI điền tay, mặc định
-    rỗng cho hàng máy ghi."""
+    rỗng cho hàng máy ghi. VIỆC 3 (2026-08-04): "Người thực hiện" chen giữa
+    AssetPath và Social Link — NGƯỜI điền tay, không có tham số ở content_row()
+    (xem docstring hàm), mặc định rỗng cho hàng máy ghi."""
     from twmkt.sheets_board import GATE2_COL, GATE3_COL, content_row, CONTENT_HEADER
     assert CONTENT_HEADER == ["Timestamp", "Context", "Type", "Status", "Output",
                              "Notes", GATE2_COL, "TopicKey",
-                             "Facts", "AssetPath", "Social Link", GATE3_COL,
+                             "Facts", "AssetPath", "Người thực hiện", "Social Link", GATE3_COL,
                              "Posting Status"]
     row = content_row(context="Bài A", type_="article", status="DONE",
                       output="nội dung", notes="ok", ts="ts", topic_key="key-a")
     d = dict(zip(CONTENT_HEADER, row))
     assert d == {"Timestamp": "ts", "Context": "Bài A", "Type": "Article", "Status": "DONE",
                  "Output": "nội dung", "Notes": "ok", GATE2_COL: "PENDING",
-                 "TopicKey": "key-a", "Facts": "", "AssetPath": "", "Social Link": "",
-                 GATE3_COL: "PENDING", "Posting Status": ""}
+                 "TopicKey": "key-a", "Facts": "", "AssetPath": "", "Người thực hiện": "",
+                 "Social Link": "", GATE3_COL: "PENDING", "Posting Status": ""}
     row2 = content_row(context="Bài B", type_="video", status="ERROR",
                        output="x", approve="APPROVE", ts="ts2")
     d2 = dict(zip(CONTENT_HEADER, row2))
     assert d2[GATE2_COL] == "APPROVE"
     assert d2["TopicKey"] == ""   # mặc định rỗng nếu caller chưa truyền
     assert d2["Facts"] == "" and d2["AssetPath"] == "" and d2[GATE3_COL] == "PENDING"
+    assert d2["Người thực hiện"] == ""
     assert d2["Social Link"] == "" and d2["Posting Status"] == ""
 
 

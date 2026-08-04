@@ -566,9 +566,18 @@ README_HEADER = [f"{_BRAND_NAME} — Bảng duyệt nội dung (Sheets là UI, t
 #   "Posting Status"  — NGƯỜI điền tay, KHÔNG khoá, dropdown (Đã đăng|Lỗi|
 #                       Đang chờ) — SAU GATE3_COL (cổng duyệt cuối, hợp lý về
 #                       thứ tự: duyệt xong mới tới trạng thái đăng).
+# "Người thực hiện" (VIỆC 3, 2026-08-04, yêu cầu Lead — điều phối nhân sự
+# trong team) — chèn NGAY SAU "AssetPath", TRƯỚC "Social Link". An toàn theo
+# đúng quy tắc đã ghi ở trên (chèn SAU AssetPath không đụng chỉ số TopicKey/
+# Facts, 2 cột hiddenByUser bám theo INDEX) — cột này để TRỐNG, KHÔNG máy nào
+# tự ghi giá trị (Lead tự gõ tay qua Sheet UI); `content_row()` luôn trả ""
+# cho cột này, `render_content_to_sheet()` (store/sync_service.py) đọc lại
+# giá trị HIỆN CÓ trên Sheet trước khi dựng lại và CARRY FORWARD sang dòng
+# mới (khoá theo TopicKey+Type vì thứ tự dòng đổi mỗi lượt sort lại) — không
+# có store backing nên máy không tự sinh lại được nếu để mất.
 CONTENT_HEADER = ["Timestamp", "Context", "Type", "Status", "Output", "Notes",
-                  GATE2_COL, "TopicKey", "Facts", "AssetPath", "Social Link",
-                  GATE3_COL, "Posting Status"]
+                  GATE2_COL, "TopicKey", "Facts", "AssetPath", "Người thực hiện",
+                  "Social Link", GATE3_COL, "Posting Status"]
 
 # Sheet UI cleanup Phase 4 — cột MÁY-SỞ-HỮU (người không nên sửa tay): TopicKey
 # (CONTEXT + CONTENT), Facts (chỉ CONTENT). CHỈ ẨN (hideColumn), KHÔNG chuyển
@@ -651,7 +660,7 @@ _LEGACY_TABS = {"Sheet1", "ResearchReview", "ContentReview"}
 _MIGRATE_DEFAULTS: dict[str, dict[str, str]] = {
     "CONTEXT": {"Execute": "", "TopicKey": "", GATE1_COL: "PENDING"},
     "CONTENT": {GATE2_COL: "PENDING", "TopicKey": "",
-               "Facts": "", "AssetPath": "", "Social Link": "",
+               "Facts": "", "AssetPath": "", "Người thực hiện": "", "Social Link": "",
                GATE3_COL: "PENDING", "Posting Status": ""},
 }
 
@@ -936,7 +945,10 @@ def content_row(*, context: str, type_: str, status: str, output: str,
     "Social Link" và "Posting Status" (Sheet UI cleanup Phase 6) KHÔNG có tham
     số ở đây — CỐ Ý, giống Gate3: cả 2 đều do NGƯỜI điền tay trực tiếp trên
     Sheet (link bài đã đăng / trạng thái đăng), luôn rỗng cho hàng MỚI do máy
-    ghi.
+    ghi. "Người thực hiện" (VIỆC 3, 2026-08-04) CŨNG KHÔNG có tham số ở đây —
+    CÙNG lý do, luôn "" cho hàng MỚI do máy ghi; caller (render_content_to_
+    sheet()) tự carry-forward giá trị NGƯỜI đã gõ từ Sheet hiện có, KHÔNG phải
+    việc của hàm THUẦN này.
 
     INVARIANT (sự cố THẬT trên Sheet production, xem PROJECT_HANDOFF_P5.md):
     Gate3 KHÔNG có tham số ở đây — CỐ Ý, KHÔNG phải thiếu sót. Gate3 là cổng
@@ -946,7 +958,7 @@ def content_row(*, context: str, type_: str, status: str, output: str,
     test_no_machine_write_path_touches_gate3 (tests/test_pipeline.py) — khoá
     bất biến này VĨNH VIỄN, KHÔNG thêm lại tham số gate3 ở đây dù có lý do gì."""
     return [ts or _now_ddmmyyyy(), context, _display_type(type_), _display_status(status), output,
-           _display_notes_business(notes), approve, topic_key, facts, asset_path, "", "PENDING", ""]
+           _display_notes_business(notes), approve, topic_key, facts, asset_path, "", "", "PENDING", ""]
 
 
 def facts_to_json(facts: list) -> str:
@@ -1044,14 +1056,17 @@ def regroup_content_rows(header: list[str], rows: list[list[str]]) -> list[list[
 
 def content_band_ranges(header: list[str], rows: list[list[str]]) -> list[tuple[int, int]]:
     """Sheet UI cleanup Phase 1 — THAY content_merge_ranges cũ (đã xoá cùng
-    mergeCells). `rows` PHẢI đã regroup (regroup_content_rows) trước — hàm này
-    chỉ tìm dải, KHÔNG tự sắp lại. Trả list (start, end) 0-based/end-exclusive
-    TÍNH THEO SHEET (offset +1 vì hàng 1 là header) — mỗi dải là 1 TopicKey liên
-    tục, KHÔNG PHÂN BIỆT số loại (khác _MIN_MERGE_TYPES cũ, vốn chỉ merge Context
-    có >=2 loại) — banding là phân nhóm THỊ GIÁC theo CHỦ ĐỀ, áp dụng cho MỌI
-    nhóm kể cả 1 dòng, để người đọc luôn thấy ranh giới chủ đề rõ ràng. Dùng để
-    TÔ MÀU/VIỀN xen kẽ (regroup_and_band_content) — KHÔNG merge ô, không xoá
-    giá trị bất kỳ cột nào."""
+    mergeCells). Hàm CHỈ tìm dải TopicKey LIÊN TỤC trong THỨ TỰ HÀNG HIỆN CÓ,
+    KHÔNG tự sắp lại (KHÔNG còn tiền điều kiện "đã regroup_content_rows" từ
+    VIỆC 3.3b, 2026-08-04 — thứ tự dòng CONTENT giờ do render_content_to_sheet()
+    quyết định theo ngày, không theo TopicKey; 1 TopicKey có loại rơi vào
+    NHIỀU ngày sẽ tự nhiên cho NHIỀU dải ngắn thay vì 1 dải dài, đúng thực tế).
+    Trả list (start, end) 0-based/end-exclusive TÍNH THEO SHEET (offset +1 vì
+    hàng 1 là header) — mỗi dải là 1 TopicKey liên tục, KHÔNG PHÂN BIỆT số
+    loại (khác _MIN_MERGE_TYPES cũ, vốn chỉ merge Context có >=2 loại) —
+    banding là phân nhóm THỊ GIÁC theo CHỦ ĐỀ, áp dụng cho MỌI nhóm kể cả 1
+    dòng. Dùng để VIỀN TRÊN đậm đầu mỗi dải (regroup_and_band_content) — KHÔNG
+    merge ô, không xoá giá trị bất kỳ cột nào."""
     low = [h.strip().lower() for h in header]
     if "topickey" not in low:
         return []
@@ -1073,15 +1088,15 @@ def content_band_ranges(header: list[str], rows: list[list[str]]) -> list[tuple[
 
 
 def content_day_border_ranges(header: list[str], rows: list[list[str]]) -> list[tuple[int, int]]:
-    """2026-07-23 (yêu cầu Lead) — dải NGÀY (cột Timestamp) trên `rows` ĐÃ
-    regroup theo TopicKey (content_band_ranges vẫn là phân nhóm CHÍNH, KHÔNG
-    đổi — đây CHỈ là 1 lớp chỉ dấu ngày PHỤ, vẽ viền TRÁI thay vì tô nền, để
-    không đấu màu với băng TopicKey đã có). Quét DÃY LIÊN TIẾP cùng Timestamp
-    trong THỨ TỰ HÀNG HIỆN TẠI (sau regroup) — 1 chủ đề có hàng từ NHIỀU ngày
-    khác nhau (vd video sinh trễ hơn article/infographic) sẽ tự nhiên có
-    nhiều dải ngày NẰM TRONG cùng 1 khối màu TopicKey, phản ánh đúng thực tế,
-    KHÔNG cố gộp giả. Trả list (start, end) 0-based/end-exclusive tính theo
-    Sheet (offset +1 vì hàng 1 là header)."""
+    """2026-07-23 (yêu cầu Lead), ĐỔI VAI TRÒ ở VIỆC 3.3b (2026-08-04) — dải
+    NGÀY (cột Timestamp) trên `rows` THEO THỨ TỰ HÀNG HIỆN CÓ. TRƯỚC ĐÂY
+    (2026-07-23) đây chỉ là dấu PHỤ (viền trái) vì nền đã dùng cho TopicKey;
+    từ VIỆC 3.3b, đây là dải dùng để TÔ NỀN CHÍNH (đồng bộ màu với CONTEXT,
+    yêu cầu Lead) — TopicKey lùi xuống chỉ còn viền trên (content_band_ranges).
+    1 chủ đề có hàng từ NHIỀU ngày khác nhau (vd video sinh trễ hơn article/
+    infographic) sẽ tự nhiên có nhiều dải NGÀY khác màu xen kẽ, phản ánh đúng
+    thực tế, KHÔNG cố gộp giả. Trả list (start, end) 0-based/end-exclusive
+    tính theo Sheet (offset +1 vì hàng 1 là header)."""
     low = [h.strip().lower() for h in header]
     if "timestamp" not in low:
         return []
@@ -2006,79 +2021,68 @@ class SheetsBoard:
         self._tab("CONTENT").append_rows(rows, value_input_option="RAW")
         return len(rows)
 
-    # Sheet UI cleanup Phase 1 — 2 màu nền xen kẽ theo nhóm TopicKey (thay
-    # mergeCells cũ, vốn XOÁ THẬT giá trị Context/Timestamp ở hàng trong dải —
-    # xem PROJECT_HANDOFF_P5.md, CLAUDE.md §"mergeCells xoá dòng"). Trắng/xanh
-    # rất nhạt để không đấu màu với dropdown Status/Approve của format_board().
+    # VIỆC 3.3b (2026-08-04, Lead, qua AskUserQuestion: "Đổi sang dùng nền
+    # theo Ngày, đồng bộ màu với tab Context. Tạo block ngày giống tab
+    # Context") — ĐẢO kênh thị giác so với quyết định 2026-07-23 cũ ("TopicKey
+    # là băng CHÍNH", nền cho TopicKey + viền trái phụ cho ngày): nền xen kẽ
+    # giờ đánh dấu khối NGÀY (CÙNG bảng màu/tên hằng số với CONTEXT —
+    # SheetsBoard.band_context_by_day() — "đồng bộ màu" đúng nghĩa đen, KHÔNG
+    # phải 2 bảng trùng giá trị tình cờ). TopicKey vẫn được đánh dấu, nhưng chỉ
+    # còn VIỀN TRÊN đậm ở đầu mỗi dải liên tục — không còn tô nền riêng (nền đã
+    # dành cho ngày, không thể dùng cho cả 2 lúc).
     _CONTENT_BAND_COLORS = (
         {"red": 1, "green": 1, "blue": 1},          # nhóm lẻ (1st, 3rd, ...) — trắng mặc định
         {"red": 0.93, "green": 0.96, "blue": 1.0},  # nhóm chẵn (2nd, 4th, ...) — xanh rất nhạt
     )
     _CONTENT_BAND_BORDER = {"style": "SOLID_THICK", "color": {"red": 0.55, "green": 0.55, "blue": 0.55}}
 
-    # 2026-07-23 (yêu cầu Lead) — chỉ dấu NGÀY cho CONTENT: viền TRÁI (KHÔNG
-    # phải nền, tránh đấu màu với _CONTENT_BAND_COLORS ở trên vốn đã dùng để
-    # phân nhóm TopicKey — quyết định GIỮ NGUYÊN TopicKey làm băng CHÍNH, xem
-    # CLAUDE.md Lớp 5) — 2 màu xen kẽ theo khối ngày, tách biệt hẳn kênh thị
-    # giác (cạnh trái, không phải nền/cạnh trên) khỏi viền xám TopicKey.
-    _CONTENT_DAY_BORDER_COLORS = (
-        {"style": "SOLID_THICK", "color": {"red": 0.79, "green": 0.63, "blue": 0.29}},   # gold FVA
-        {"style": "SOLID_THICK", "color": {"red": 0.29, "green": 0.45, "blue": 0.68}},   # xanh lam đối trọng
-    )
-
     def regroup_and_band_content(self) -> int:
-        """Sheet UI cleanup Phase 1 — THAY regroup_and_merge_content() cũ (đã
-        xoá cùng mergeCells). Sắp lại tab CONTENT để các hàng CÙNG TopicKey liền
-        kề nhau (regroup_content_rows — CHỈ đổi vị trí, không đổi dữ liệu), rồi
-        TÔ NỀN XEN KẼ + VIỀN TRÊN ĐẬM cho MỌI nhóm TopicKey liên tục
-        (content_band_ranges — không còn ngưỡng số loại, banding là phân nhóm
-        thị giác theo CHỦ ĐỀ, không phải "đủ 3 loại mới đáng gộp"). KHÔNG mergeCells/
-        unmergeCells ở đâu cả — Context/Timestamp (và MỌI cột khác) giữ nguyên
-        giá trị trên TỪNG hàng, không còn hàng nào bị xoá rỗng vì lý do trình
-        bày. Idempotent: tô lại màu/viền mỗi lần gọi (không cần unmerge trước vì
-        không còn gì để unmerge).
+        """VIỆC 3.3b (2026-08-04) — THAY THẾ HOÀN TOÀN cách tô cũ (Sheet UI
+        cleanup Phase 1, 2026-07-23): TRƯỚC ĐÂY hàm này tự SẮP LẠI hàng cho
+        CÙNG TopicKey liền kề (regroup_content_rows) rồi tô NỀN cho TopicKey +
+        viền TRÁI phụ cho ngày. Từ nay:
+          - KHÔNG còn tự sắp lại hàng nữa — THỨ TỰ DÒNG do
+            render_content_to_sheet() (store/sync_service.py, Task #77) quyết
+            định (ngày tăng dần, first_created_at() trong ngày) — tự ý xếp lại
+            TopicKey ở đây sẽ XOÁ mất thứ tự đó ngay sau khi vừa dựng xong.
+          - NỀN xen kẽ giờ tô theo khối NGÀY (content_day_border_ranges, CÙNG
+            bảng màu _CONTENT_BAND_COLORS với CONTEXT — yêu cầu Lead "đồng bộ
+            màu với tab Context").
+          - TopicKey vẫn có dấu hiệu riêng: VIỀN TRÊN đậm ở đầu mỗi dải liên
+            tục cùng TopicKey (content_band_ranges, quét trên thứ tự HIỆN CÓ —
+            1 TopicKey có loại rơi vào NHIỀU ngày khác nhau, vd video sinh
+            trễ, sẽ có NHIỀU dải viền riêng, đúng thực tế, không cố gộp giả).
+        KHÔNG mergeCells/unmergeCells ở đâu cả — Context/Timestamp (và MỌI cột
+        khác) giữ nguyên giá trị trên TỪNG hàng. Idempotent: tô lại nền/viền
+        mỗi lần gọi.
 
-        2026-07-23: THÊM viền TRÁI xen kẽ theo khối NGÀY (content_day_border_
-        ranges, quét TRÊN thứ tự đã regroup TopicKey — 1 chủ đề trải nhiều
-        ngày sẽ có nhiều dải viền ngày NẰM TRONG cùng 1 khối màu TopicKey,
-        đúng thực tế, không cố gộp giả) — lớp CHỈ DẤU PHỤ, KHÔNG thay băng
-        TopicKey (đã chốt kiến trúc, xem CLAUDE.md Lớp 5).
-
-        Trả số dải TopicKey đã tô (0 -> không đổi gì, kể cả khi tab rỗng/thiếu
-        cột TopicKey — viền ngày vẫn được vẽ độc lập nếu có cột Timestamp,
-        không tính vào số trả về)."""
+        Trả số dải TopicKey đã viền trên (0 nếu tab rỗng/thiếu cột TopicKey —
+        nền ngày vẫn tô độc lập nếu có cột Timestamp, không tính vào số trả
+        về)."""
         ws = self._tab("CONTENT")
         values = ws.get_all_values()
         if len(values) < 2:
             return 0
         header, rows = values[0], values[1:]
 
-        new_rows = regroup_content_rows(header, rows)
-        if new_rows != rows:
-            ws.update("A2", new_rows, value_input_option="RAW")
-
         sid = ws.id
         ncols = len(header)
         reqs: list[dict] = []
 
-        ranges = content_band_ranges(header, new_rows)
-        for idx, (r0, r1) in enumerate(ranges):
+        day_ranges = content_day_border_ranges(header, rows)
+        for idx, (r0, r1) in enumerate(day_ranges):
             color = self._CONTENT_BAND_COLORS[idx % 2]
             reqs.append({"repeatCell": {
                 "range": _grid_range(sid, r0, r1, 0, ncols),
                 "cell": {"userEnteredFormat": {"backgroundColor": color}},
                 "fields": "userEnteredFormat.backgroundColor",
             }})
+
+        ranges = content_band_ranges(header, rows)
+        for r0, r1 in ranges:
             reqs.append({"updateBorders": {
                 "range": _grid_range(sid, r0, r0 + 1, 0, ncols),
                 "top": self._CONTENT_BAND_BORDER,
-            }})
-
-        day_ranges = content_day_border_ranges(header, new_rows)
-        for idx, (r0, r1) in enumerate(day_ranges):
-            reqs.append({"updateBorders": {
-                "range": _grid_range(sid, r0, r1, 0, 1),
-                "left": self._CONTENT_DAY_BORDER_COLORS[idx % 2],
             }})
 
         if not reqs:
