@@ -9693,6 +9693,52 @@ def test_queue_worker_run_once_ingests_sheet_approval_before_claiming(monkeypatc
     assert row["topic_key"] == "tk-vua-duyet" and row["status"] == "done"
 
 
+# =============================================================================
+# scripts/queue_worker_watchdog.py (2026-08-04, Lead: "hệ thống chạy full
+# tính năng mà không cần thông qua agent") — Task Scheduler từ chối đăng ký
+# trigger "At log on"/"At startup" trên máy này (Access is denied, cần quyền
+# nâng cao không có sẵn trong môi trường agent) -- watchdog chạy theo lịch
+# MINUTE (không cần quyền nâng cao, đã dùng cho TWMKT-Crawl-*/TWMKT-Draft)
+# để đạt hiệu quả tương đương "tự khởi động lại khi crash".
+# =============================================================================
+
+def _queue_worker_watchdog_module():
+    import os as _os
+    import sys as _sys
+    REPO_ROOT_ = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), ".."))
+    _sys.path.insert(0, _os.path.join(REPO_ROOT_, "scripts"))
+    import queue_worker_watchdog as wd
+    return wd
+
+
+def test_watchdog_relaunches_when_no_lock_file_yet():
+    wd = _queue_worker_watchdog_module()
+    relaunch, reason = wd.should_relaunch(None)
+    assert relaunch is True
+    assert "lần đầu" in reason
+
+
+def test_watchdog_relaunches_when_lock_content_is_malformed():
+    wd = _queue_worker_watchdog_module()
+    relaunch, reason = wd.should_relaunch("khong-phai-host:pid-hop-le")
+    assert relaunch is True
+    assert "hỏng" in reason
+
+
+def test_watchdog_relaunches_when_pid_in_lock_is_dead():
+    wd = _queue_worker_watchdog_module()
+    relaunch, reason = wd.should_relaunch("may-a:4242", is_pid_alive_fn=lambda pid: False)
+    assert relaunch is True
+    assert "4242" in reason and "chết" in reason
+
+
+def test_watchdog_does_not_relaunch_when_pid_in_lock_is_alive():
+    wd = _queue_worker_watchdog_module()
+    relaunch, reason = wd.should_relaunch("may-a:4242", is_pid_alive_fn=lambda pid: True)
+    assert relaunch is False
+    assert "4242" in reason
+
+
 def test_asset_hyperlink_formula_wraps_url_string():
     """Sheet UI cleanup Phase 6b/6c: AssetPath phải là HYPERLINK() bấm được,
     không phải text đường dẫn thô — hàm THUẦN, không I/O. Phase 6c: nhận

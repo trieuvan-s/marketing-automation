@@ -10,7 +10,8 @@
 
 **MỤC LỤC** — §1 trạng thái · §2 việc đã làm từ MVP v2.0 · §3 SỰ CỐ THẬT (đã
 sửa) · §3B Sheet UI (Ticker/Source/Type/Status) · §3C Brand-kit mới (ảnh +
-video) · §4 hạ tầng đang chạy · §5 git · §6 test · §7 nợ còn lại.
+video) · §3D bỏ scrim/nền/recolor logo · §3E lịch crawl không chạy + thiết
+kế khởi động đầy đủ · §4 hạ tầng đang chạy · §5 git · §6 test · §7 nợ còn lại.
 
 ---
 
@@ -259,6 +260,85 @@ navy-gold) để đủ tương phản — navy trên navy sẽ gần như vô h�
 
 ---
 
+## 3D. LOGO INFOGRAPHIC — bỏ scrim/nền/recolor (Lead: "khung chữ nhật quanh brand-kit")
+
+Sau khi đổi sang brand-kit mới (§3C), Lead kiểm lại thấy MỌI ảnh infographic
+đều có 1 khung chữ nhật bo góc phía sau logo. Nguyên nhân: `overlay_brand_
+full_canvas()` có cơ chế "scrim" — khi phát hiện va chạm chữ/nội dung ở CẢ
+HAI góc trên (logo dạt từ phải sang trái), vẽ 1 khung nền bo góc phía sau
+logo để giữ độ đọc. Ảnh AI full-canvas hầu như LUÔN "bận" (ảnh chụp/biểu đồ
+phủ kín) nên nhánh này kích hoạt ở HẦU HẾT mọi ảnh — đúng "khung cố định"
+Lead phản ánh, không còn là hiệu ứng tránh va chạm có chủ đích.
+
+Yêu cầu Lead: **"Không scrim, không nền, không recolor"** — đã bỏ CẢ HAI cơ
+chế trong `overlay_brand_full_canvas()`:
+- Bỏ hẳn `draw.rounded_rectangle(...)` vẽ nền sau logo (vị trí top_right/
+  top_left theo va chạm VẪN giữ — đó là quyết định layout, không phải hiệu
+  ứng thị giác thêm vào logo).
+- Bỏ hẳn nhánh tô lại màu logo theo theme sáng (`theme in ("bright","light")`
+  từng nhuộm pixel gần trung tính sang màu chủ đạo theme) — logo giờ LUÔN
+  giữ đúng màu gốc trong file asset (navy/gold).
+
+Test hồi quy: `test_full_canvas_overlay_never_draws_scrim_or_recolors_logo`
+(ép va chạm 2 góc qua mock, khoá lại không còn vẽ đè hình chữ nhật nào).
+
+**Đã RE-RENDER LẦN 2** cả 9 infographic phiên 3/8 (cache-first, $0 — manifest
+ảnh AI không đổi giữa 2 lần render) để áp bản logo sạch (không khung) lên
+Sheet thật, ghi đè ĐÚNG file Drive cũ (cùng tên/thư mục).
+
+---
+
+## 3E. LỊCH CRAWL KHÔNG CHẠY — SỰ CỐ THẬT (ĐÃ SỬA) + THIẾT KẾ KHỞI ĐỘNG ĐẦY ĐỦ
+
+**Sự cố**: `Get-ScheduledTaskInfo` cho thấy `TWMKT-Crawl-0730`/`TWMKT-Crawl-
+1030`/`TWMKT-Draft` ĐÃ TỚI LƯỢT CHẠY nhưng `LastTaskResult=1` (lỗi) cả 3 —
+không phải "chưa chạy", mà "chạy xong crash ngay". Nguyên nhân: Task
+Scheduler khởi động tiến trình với cwd MẶC ĐỊNH (không phải thư mục repo —
+xác nhận `WorkingDirectory` rỗng trong Action của task), trong khi `twmkt.
+config.load_settings()`/`_load_dotenv()` đọc `"config/settings.yaml"`/
+`"secrets/.env"` theo ĐƯỜNG DẪN TƯƠNG ĐỐI (không neo `Path(__file__)`) — chạy
+sai cwd làm 2 file này "không tìm thấy", script crash ngay từ đầu.
+
+**Sửa**: thêm `os.chdir(REPO_ROOT)` NGAY ĐẦU (trước mọi import đọc config)
+cho MỌI entry point có thể bị khởi động bởi tiến trình/công cụ bên ngoài:
+`run_scheduler.py`, `queue_worker.py`, `system_power_on.py`, `review_to_
+sheet.py`, `produce_from_sheet.py`, `render_production_assets.py`, `sync_
+store_sheet.py`. Xác nhận bằng cách GIẢ LẬP đúng lỗi (chạy `run_scheduler.py`
+từ `C:\Windows\System32`) — TRƯỚC khi sửa sẽ lỗi, SAU khi sửa chạy đúng và
+**đã crawl thật thành công** (13 dòng CONTEXT mới, xác nhận exit code 0).
+
+**Thiết kế khởi động đầy đủ (Lead: "chạy full tính năng không cần qua
+agent")**:
+
+| Tiến trình | Cơ chế | Ghi chú |
+|---|---|---|
+| Crawl (8 mốc/ngày) | Task Scheduler `TWMKT-Crawl-*` (`/SC DAILY`) | Đã có, nay chạy đúng nhờ sửa cwd |
+| Draft prep (30'/lần) | Task Scheduler `TWMKT-Draft` (`/SC MINUTE`) | Đã có, nay chạy đúng nhờ sửa cwd |
+| `queue_worker.py` (Gate1/Gate2 gần-thời-gian-thực) | Task Scheduler `TWMKT-QueueWorker-Watchdog` (`/SC MINUTE /MO 5`) chạy `scripts/queue_worker_watchdog.py` | Xem lý do KHÔNG dùng trigger "At log on" bên dưới |
+
+⚠️ **KHÔNG dùng được trigger "At log on"/"At startup" trực tiếp cho
+`queue_worker.py`** — `Register-ScheduledTask`/`schtasks /SC ONLOGON` đều bị
+`Access is denied` trong môi trường chạy agent (2 loại trigger này cần
+quyền nâng cao/lưu mật khẩu mà tài khoản hiện tại không có sẵn ở đây). Giải
+pháp thay thế: `scripts/queue_worker_watchdog.py` — script THUẦN VN kiểm
+tra lock file `queue_worker.py` đang dùng (`data_path("logs","queue_worker.
+lock")`, tái dùng NGUYÊN `system_power_on.is_pid_alive()`), nếu PID trong
+lock đã chết (crash) hoặc chưa từng chạy thì tự khởi động `queue_worker.py`
+lại. Đăng ký chạy MỖI 5 PHÚT qua Task Scheduler (trigger MINUTE — KHÔNG cần
+quyền nâng cao, cùng cơ chế đã dùng cho lịch crawl) — đạt hiệu quả tương
+đương "tự khởi động lại khi crash", chỉ trễ tối đa 5 phút thay vì tức thời.
+Test hồi quy hàm quyết định thuần `should_relaunch()`:
+`tests/test_pipeline.py::test_watchdog_*` (4 test, không đụng subprocess/PID
+thật).
+
+**Nếu Lead có quyền Admin trên máy này**: có thể tự đăng ký lại
+`TWMKT-QueueWorker` với trigger "At log on"/"At startup" thật (khởi động
+NGAY khi đăng nhập thay vì chờ watchdog phát hiện, xem lệnh mẫu trong
+`queue_worker_watchdog.py` docstring) — không bắt buộc, watchdog hiện tại
+đã đủ cho vận hành bình thường.
+
+---
+
 ## 4. HẠ TẦNG ĐANG CHẠY (tại thời điểm bàn giao)
 
 ```
@@ -311,7 +391,7 @@ push lên remote** — chờ xác nhận riêng.
 ## 6. TEST
 
 `python -m pytest` (đầy đủ, không lọc path, marketing-automation) —
-**776 passed**, 0 fail, 43 warning (Pillow deprecation, không liên quan
+**782 passed**, 0 fail, 29 warning (Pillow deprecation, không liên quan
 code này).
 
 `npm test` (aigen-pipeline, repo riêng) — **244 passed**, 0 fail.

@@ -980,27 +980,29 @@ def overlay_brand_full_canvas(
             )
             logo_position = "top_left"
             if left_scan["detected"]:
-                logo_scrim_applied = True
+                # SỬA LỖI THẬT (2026-08-04, Lead: "tất cả ảnh Infographic đều
+                # có khung chữ nhật xung quanh brand-kit") — TRƯỚC ĐÂY khi
+                # phát hiện va chạm chữ ở CẢ HAI góc, code vẽ 1 khung nền bo
+                # góc (scrim) phía sau logo để giữ độ đọc được. Trên thực tế
+                # ảnh AI full-canvas hầu như LUÔN "bận" (ảnh chụp/biểu đồ phủ
+                # kín), nên nhánh này kích hoạt ở HẦU HẾT mọi ảnh, biến thành
+                # 1 khung hình chữ nhật cố định — đúng Lead phản ánh, không
+                # phải hiệu ứng tránh va chạm có chủ đích nữa. YÊU CẦU LEAD:
+                # "Không scrim, không nền, không recolor" — bỏ hẳn nhánh vẽ
+                # nền này (logo dán TRỰC TIẾP lên ảnh, không có gì phía sau
+                # ngoài chính ảnh AI). VỊ TRÍ logo (top_right/top_left theo
+                # va chạm) VẪN giữ nguyên — đó là quyết định layout, không
+                # phải hiệu ứng thị giác thêm vào logo.
                 logo_collision_warning = (
                     "Chữ được phát hiện ở cả góc trên phải và trên trái; "
-                    "logo dùng góc trên trái kèm scrim."
-                )
-                draw.rounded_rectangle(
-                    left_scan_bbox,
-                    radius=max(round(logo_h * 0.18), 4),
-                    fill=(*colors["background"], 220),
+                    "logo dùng góc trên trái (không còn vẽ nền/scrim)."
                 )
         logo = logo.resize((logo_w, logo_h), Image.LANCZOS)
-        if theme in ("bright", "light"):
-            pixels = []
-            for red, green, blue, alpha in logo.getdata():
-                chroma = max(red, green, blue) - min(red, green, blue)
-                pixels.append(
-                    (*colors["primary"], alpha)
-                    if alpha and chroma < 38
-                    else (red, green, blue, alpha)
-                )
-            logo.putdata(pixels)
+        # SỬA LỖI THẬT (2026-08-04, Lead: "không recolor") — TRƯỚC ĐÂY theme
+        # sáng ("bright"/"light") tự tô lại pixel gần trung tính (chroma
+        # thấp) của logo sang màu chủ đạo theme, GIỮ NGUYÊN phần vàng đồng
+        # (chroma cao). Bỏ hẳn — logo LUÔN giữ ĐÚNG màu gốc trong file asset
+        # (navy/gold), không phụ thuộc theme ảnh.
         overlay.alpha_composite(logo, (logo_x, logo_y))
         logo_bbox = [logo_x, logo_y, logo_x + logo_w, logo_y + logo_h]
         logo_in_bounds = True

@@ -47,6 +47,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
+# SỬA LỖI THẬT (2026-08-04, xem run_scheduler.py/queue_worker.py cùng lý do)
+# -- ép cwd = REPO_ROOT NGAY ĐẦU để entry point này chạy đúng bất kể ai/gì
+# khởi động tiến trình (Task Scheduler chạy với cwd mặc định KHÁC repo).
+os.chdir(REPO_ROOT)
 
 from twmkt._encoding import ensure_utf8_stdio  # noqa: E402
 

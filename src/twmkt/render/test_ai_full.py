@@ -544,6 +544,39 @@ def test_full_canvas_overlay_uses_real_brand_kit_asset_across_all_ratios():
         assert image.size[0] > 0 and image.size[1] > 0
 
 
+def test_full_canvas_overlay_never_draws_scrim_or_recolors_logo():
+    """SỬA LỖI THẬT (2026-08-04, Lead: "tất cả ảnh Infographic đều có khung
+    chữ nhật xung quanh brand-kit") — TRƯỚC ĐÂY khi phát hiện va chạm chữ ở
+    CẢ HAI góc trên, code vẽ 1 khung nền bo góc (scrim) phía sau logo; ảnh AI
+    full-canvas hầu như LUÔN "bận" nên nhánh này kích hoạt ở HẦU HẾT mọi ảnh
+    -> đúng "khung chữ nhật cố định" Lead phản ánh. Yêu cầu Lead: "Không
+    scrim, không nền, không recolor". Test này ép va chạm phát hiện ở CẢ HAI
+    góc (mock scan_text_collision) rồi khoá lại: log không còn báo scrim,
+    VÀ pixel ngay dưới logo (vùng logo trong suốt alpha=0) vẫn giữ ĐÚNG màu
+    nền gốc -- không bị vẽ đè bởi hình chữ nhật nào."""
+    from unittest.mock import patch
+
+    raw = _real_png_bytes(1280, 1600, color=(245, 248, 252))
+    with patch("twmkt.render.postflight.scan_text_collision",
+              return_value={"detected": True, "component_count": 5}):
+        rendered, log = bs.overlay_brand_full_canvas(
+            raw, ratio="4:5", theme="bright", source="CafeF",
+            disclaimer="Nội dung mang tính tham khảo, không phải khuyến nghị đầu tư.",
+        )
+    assert log["logo_position"] == "top_left", "va chạm cả 2 góc -> vẫn phải chọn top_left"
+    assert log["logo_scrim_applied"] is False, "KHÔNG được còn cờ scrim nào bật"
+
+    image = Image.open(io.BytesIO(rendered)).convert("RGB")
+    x0, y0, x1, y1 = log["logo_bbox"]
+    # Góc dưới-phải bbox logo (ngoài rìa hình chữ nhật thật của logo, vẫn
+    # trong bbox) -- nếu còn khung nền, pixel ở đây sẽ là màu nền phẳng
+    # (colors["background"]); nếu KHÔNG, pixel phải khớp nền GỐC đã tô sẵn
+    # (245, 248, 252) vì đây là ảnh nền phẳng 1 màu.
+    probe_x, probe_y = min(x1 - 2, image.width - 1), min(y1 - 2, image.height - 1)
+    pixel = image.getpixel((probe_x, probe_y))
+    assert pixel == (245, 248, 252), f"vẫn còn hình chữ nhật vẽ đè phía sau logo: {pixel}"
+
+
 def test_full_canvas_overlay_rejects_wrong_real_image_ratio():
     raw = _real_png_bytes(1280, 1280)
     with pytest.raises(ValueError, match="lệch tỷ lệ"):
