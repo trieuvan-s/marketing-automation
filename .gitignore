@@ -47,6 +47,10 @@ reports/*
 !reports/phase2_verify/
 !reports/phase2_verify/**
 
+# Bản đồ khảo sát codebase cho Lead mới — PHẢI ở trong git (không phải report
+# tạm dùng-rồi-bỏ), xem reports/CODEBASE_SURVEY_2026-08-03.md
+!reports/CODEBASE_SURVEY_2026-08-03.md
+
 # Kiểm tra hồi quy PHA 2 (chuẩn hoá Composer video) — bằng chứng cho Lead
 # duyệt, PHẢI ở trong git (không phải report tạm dùng-rồi-bỏ)
 !reports/regression_video_prompt/
