@@ -7,6 +7,23 @@
 
 > **Đọc mục 0 và mục 9 trước tiên.** Mục 0 cho bạn hiểu hệ thống làm gì. Mục 9 là những bài học đắt giá — bỏ qua nó bạn sẽ lặp lại đúng những sai lầm đã tốn nhiều ngày.
 
+> **CẬP NHẬT 2026-08-05 (agent-A) — ĐỌC TRƯỚC KHI TIN §6/§7 DƯỚI ĐÂY.** Từ
+> 2026-08-03 tới nay, phần lớn §6 ("ĐANG LÀM DỞ") đã XONG — Việc 1-5 đã merge
+> (commit `15187ad` và loạt commit MVP 2.1, xem `tasks/HANDOFF_2026-08-04_MVP2.1.md`),
+> Việc 6 (khảo sát 3 câu) đã có câu trả lời file:dòng đầy đủ tại
+> [`reports/CODEBASE_SURVEY_2026-08-03.md`](../reports/CODEBASE_SURVEY_2026-08-03.md)
+> — bao gồm cả câu 1 mục §7.5 ("Schema có FOREIGN KEY chưa, PRAGMA foreign_keys
+> có bật không") = **KHÔNG có FK nào, PRAGMA không bao giờ bật**, xem mục 4.5
+> report đó. Đọc report đó TRƯỚC khi tự điều tra lại từ đầu. Mục §3B (mới,
+> ngay dưới đây) trả lời phần "Ranh giới hai repo" ở mục 3 bằng CƠ CHẾ GỌI
+> THẬT (subprocess/config/job dir), không chỉ hình dạng dữ liệu qua biên.
+> **`feature/webhook-store` đã bị XOÁ khỏi origin** (2026-08-05, xác nhận với
+> chủ dự án trước khi xoá) — mục 12 dưới đây nói "GIỮ làm tham khảo, KHÔNG
+> merge" đã LỖI THỜI, branch không còn tồn tại để tham khảo nữa (nội dung của
+> nó đã có bản mới hơn trong `develop`, xem lý do trong `reports/CODEBASE_SURVEY_2026-08-03.md`
+> không đề cập trực tiếp — quyết định xoá dựa trên diff thực tế lúc dọn nhánh,
+> không phải trong report đó).
+
 ---
 
 ## 0. Hệ thống này làm gì
@@ -109,6 +126,86 @@ Việc an toàn cho Codex: hình học Pillow, gọi API sinh ảnh, đọc code
 | 12 | Theme **Dark** cho tin hằng ngày, **Light** cho track chuyên sâu | Cả 2 file theme tự khai `default_use` |
 | 13 | Nhãn hiển thị tiếng Việt ở tầng Sheet/Telegram; **giá trị trong store giữ tiếng Anh** | Bảng ánh xạ trong config |
 | 14 | Sửa logic **SỐ/GUARDRAIL** phải sửa **ĐỒNG BỘ 2 REPO** (`media_factory/numbers.py` + `production-spec/guardrail/verify-spec.ts`) | Đã phải vá đồng bộ 2 lần |
+
+---
+
+## 3B. Kết nối marketing-automation → aigen-pipeline (cơ chế gọi luồng sản xuất video)
+
+Mục 3 hàng #6 nói "cây cầu vendor-neutral ở aigen" — đó là HÌNH DẠNG dữ liệu
+qua biên. Mục này ghi CƠ CHẾ THẬT: ai gọi ai, gọi bằng lệnh gì, dữ liệu nằm ở
+đâu, timeout/lỗi xử lý thế nào. Xác minh bằng đọc code trực tiếp
+(2026-08-05), không suy đoán.
+
+**Kích hoạt:** Gate 2 approve 1 dòng CONTENT `type=video` → vòng
+`scripts/render_production_assets.py::run_videos()` quét, gọi
+`render_video_one()` cho từng dòng
+([render_production_assets.py:275-321](../scripts/render_production_assets.py#L275)).
+
+**4 bước gọi thật:**
+
+1. **Ghi input ra đĩa dùng chung.** Đọc `content_output` (type="video") từ
+   store, ghi nguyên văn ra
+   `<aigen_data_root>/<topic_key>/content-output.json`.
+   `aigen_data_root` = config `media_factory.aigen_data_root`
+   ([settings.yaml:832](../config/settings.yaml#L832)), mặc định
+   `"../marketing-database/aigen-pipeline"` — **đây là THƯ MỤC DỮ LIỆU DÙNG
+   CHUNG giữa 2 repo, KHÔNG phải code, KHÔNG phải git.** Phải khớp `dataRoot`
+   khai trong `aigen-pipeline/config/paths.config.json` — 2 repo cùng 1 kho,
+   mỗi repo 1 thư mục con tên chính nó, không ghi đè nhau.
+
+2. **Gọi subprocess sang repo code.**
+   `src/twmkt/media_factory/aigen_seam.py::run_aigen_pipeline()`
+   ([aigen_seam.py:68-163](../src/twmkt/media_factory/aigen_seam.py#L68)) chạy:
+   ```
+   npm run produce:content -- <content-output.json path>
+   ```
+   với `cwd = aigen_repo_path` = config `media_factory.aigen_repo_path`
+   ([settings.yaml:827](../config/settings.yaml#L827)), mặc định
+   `"../aigen-pipeline"` (sibling, git thật) — **đây MỚI là repo code**, khác
+   thư mục dữ liệu ở bước 1. Đổi máy/VPS: override qua ENV `AIGEN_REPO_PATH`,
+   KHÔNG sửa code (`src/twmkt/config.py::aigen_repo_path()`).
+
+3. **Idempotent theo asset, không có cờ --force toàn cục.** Nếu `video.mp4`
+   đã tồn tại CÙNG thư mục với `content-output.json` → bỏ qua hoàn toàn, không
+   gọi subprocess. Muốn render lại: tự xoá `video.mp4` đó rồi chạy lại.
+   Timeout mặc định 1800s (`media_factory.video_timeout_s`,
+   [settings.yaml:835](../config/settings.yaml#L835)) — lần đầu cộng thêm tới
+   180s để OmniVoice TTS nạp model lên GPU.
+
+4. **Bên trong aigen-pipeline.** Cổng vào chính thức:
+   `scripts/produce-from-content-output.ts` (aigen-pipeline, tự khai "CỔNG
+   VÀO CHÍNH THỨC cho marketing-automation") →
+   `buildTemplateScriptFromContentOutput()`
+   (`src/production-spec/index.ts`) chạy scene-builder → disclaimer →
+   guardrail-2 → voice → chrome slots → adapter → Zod validate, dựng
+   `TemplateScript`, ghi `script.json` CÙNG thư mục input → `runTemplatePipeline()`
+   render `video.mp4` thật (HyperFrames + FFmpeg + OmniVoice/ElevenLabs TTS,
+   xem §"Trạng thái aigen-pipeline" trong `aigen-pipeline/HANDOFF.md`).
+
+**Kết quả quay lại marketing-automation:** `render_video_one()` đọc
+`video.mp4` vừa render, upload Drive, ghi `asset_url` vào `content_status`
+(store) — Sheet đọc lại qua `sync_service` như mọi asset khác, KHÔNG có
+đường ghi tắt riêng cho video.
+
+**Input contract (schema qua biên):** `ContentOutputVideo`, `schema_version:
+1`. Nguồn sự thật DUY NHẤT là
+[`docs/CONTENT_OUTPUT_SCHEMA.md`](CONTENT_OUTPUT_SCHEMA.md) (repo này). Bản
+đọc TypeScript ở `aigen-pipeline/src/production-spec/content-output.ts` tự
+khai trong comment đầu file: "mirrors `docs/CONTENT_OUTPUT_SCHEMA.md`
+byte-for-byte... NOT a redefinition" — sửa contract PHẢI sửa file `.md` này
+trước, rồi đối chiếu tay bản TS, KHÔNG sửa 1 bên rồi quên bên kia (đúng bài
+học mục 9.1 "ranh giới không ai sở hữu").
+
+**Lỗi:** exit code subprocess khác 0 (1 hoặc 2 — `aigen_seam.py` coi CẢ HAI
+FATAL như nhau, tài liệu AIGEN không phân biệt đủ rõ) → không upload,
+AssetPath trả `""`, Notes ghi lý do (caller `run_videos()` xử lý tiếp, không
+dừng cả lô).
+
+**Ranh giới máy:** `run_aigen_pipeline(..., dry_run=True)` chỉ LOG lệnh sẽ
+chạy, không thực thi — dùng trên máy KHÔNG có Node/ffmpeg/OmniVoice/GPU. Máy
+render thật (PC-B/VPS) mới gọi `dry_run=False`. Test (`tests/test_pipeline.py`)
+mock `subprocess.run` hoàn toàn — không test nào ở marketing-automation gọi
+`npm` thật.
 
 ---
 
