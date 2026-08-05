@@ -157,17 +157,20 @@ infographic:
     # tên) vì cache 2 mode không tương thích nhau (ảnh nền vs ảnh đầy đủ).
     cache_dir: "assets_ai_full"
 
-    # 2026-07-23 (Phần A, khung cứng đáy — quyết định Lead, THAY hướng scrim đáy
-    # cũ) — kích thước khung CUỐI sau brand_stamp (KHÁC size gọi API ở
-    # ai_full.RATIO_SIZES — API cần chia hết 16, khung cuối là mục tiêu xuất
-    # bản THẬT). brand_stamp.matting() resize ảnh AI vừa khít phần trong
-    # (final_h - bottom_band_h), band đáy vẽ ở phần còn lại — cấu trúc, không
-    # đè lên ảnh AI.
+    # Kích thước xuất bản cuối. Từ 2026-07-31, GPT sinh full-canvas ở
+    # generation_size đúng tỷ lệ; overlay chỉ downscale rồi đặt brand trực tiếp.
     final_size:
       "4:5": [1080, 1350]
       "9:16": [1080, 1920]
       "1:1": [1080, 1080]
-    # BOTTOM_BAND_H = max(round(final_h * 0.075), bottom_band_min_px).
+    # Kích thước gọi gpt-image-2 cho chế độ full-canvas. Cùng đúng tỷ lệ xuất
+    # bản và lớn hơn final_size để hậu kỳ chỉ thu nhỏ, không crop/ép vào khung.
+    generation_size:
+      "4:5": [1280, 1600]
+      "9:16": [1152, 2048]
+      "1:1": [1280, 1280]
+    # Legacy stamp_brand tests/backward compatibility; production ai_full mới
+    # không còn tạo bottom band.
     bottom_band_min_px: 72
     # Fallback màu band đáy khi màu trung vị 20 hàng cuối ảnh AI SÁNG (luminance
     # > 140) — navy FVA cố định, khớp _THEME_COLORS["dark"]["background"]
@@ -546,6 +549,12 @@ writer:
   # (code tự lùi về _DEFAULT_RULES_FULL_PATH = prompts/content-rules-daily-v3.4.md
   # khi mode=full) — set tường minh dưới đây theo quyết định Lead 2026-07-3x.
   content_rules_path: "prompts/content-rules-daily-v3.4.md"
+  # VIỆC 1 (2026-08-03, Lead) — riêng content_type="long_article": nạp NGUYÊN
+  # VĂN content_rules_path (nền) TRƯỚC, rồi nạp NGUYÊN VĂN file này (bổ sung)
+  # SAU — "nạp KÈM, không thay thế; mâu thuẫn thì daily thắng" (xem header
+  # content-rules-deep-v3.0.md). Article (content_type="article") KHÔNG đụng
+  # tới key này. Xem agents/production._load_composer_rules().
+  content_rules_supplement_path: "prompts/content-rules-deep-v3.0.md"
 
 # --- Thông báo vận hành (PHASE TELE, src/twmkt/utils/telegram_notifier.py) --
 # 1 chiều, KHÔNG chặn luồng chính — báo qua Telegram khi bắt đầu xử lý/đổi nội
@@ -561,6 +570,72 @@ notifications:
     chat_id: ${TELEGRAM_CHAT_ID}
     parse_mode: HTML
     timeout_s: 5
+
+# --- Nhãn tiếng Việt hiển thị (Trung 02/08) --------------------------------
+# CHỈ đổi CHỮ NGƯỜI NHÌN THẤY trên Sheet (Status/Execute/Notes) và Telegram
+# (event/ctx-key) — TUYỆT ĐỐI KHÔNG đụng giá trị lưu trong store hay dùng để
+# so sánh trong code (SKIPPED/NEEDS_HUMAN/SOURCE_BROKEN/DUPLICATE/BOILERPLATE/
+# NO_USABLE_CONTENT/FORMAT_MISMATCH/RENDER_RANKING_GUARD vẫn tiếng Anh xuyên
+# suốt store/code/so sánh — xem sheets_board._display_status()/_display_
+# notes(), telegram_notifier.format_message()). Đổi chữ hiển thị sau này CHỈ
+# sửa mục này, KHÔNG đụng code. Thiếu mục nào/thiếu cả khối này -> code lùi
+# về bảng mặc định hard-code (không nổ, xem docstring các hàm trên).
+labels:
+  vi:
+    sheet_status:              # Sheet: Status (CONTENT) + Execute (CONTEXT)
+      SKIPPED: "BỎ QUA"
+      NEEDS_HUMAN: "Cần người review lại nội dung"
+    content_type:              # VIỆC 3 (2026-08-03) — Sheet: Type (CONTENT),
+                               # PHẢI khớp TỪNG KÝ TỰ dropdown Output Type
+                               # (CONTEXT) — xem sheets_board._display_type().
+                               # Khoá STORE (article/long_article/infographic/
+                               # video) giữ NGUYÊN, chỉ đổi CHỮ hiển thị.
+      article: "Article"
+      long_article: "Long-Article"
+      infographic: "Infographic"
+      video: "Video"
+    notes_codes:                # Sheet: mã lý do TRONG câu Notes (prefix "MÃ:")
+                               # — CƠ CHẾ CŨ (B3), CHỈ thay 1 TỪ/TOKEN, giữ
+                               # nguyên phần câu còn lại. VIỆC 5 (2026-08-03)
+                               # thay THẾ CẢ CÂU cho các mã này bằng
+                               # `notes_messages` bên dưới (xem sheets_board.
+                               # _display_notes_business()) — bảng này GIỮ LẠI
+                               # cho _display_notes() cũ (vẫn có test khoá
+                               # hành vi token-swap riêng, KHÔNG xoá).
+      SOURCE_BROKEN: "Nguồn lỗi"
+      DUPLICATE: "Trùng lặp"
+      BOILERPLATE: "Nội dung mẫu/điều hướng"
+      NO_USABLE_CONTENT: "Không có nội dung dùng được"
+      FORMAT_MISMATCH: "Không hợp định dạng"
+      RENDER_RANKING_GUARD: "Cảnh báo cắt theo mức ưu tiên"
+    notes_messages:              # VIỆC 5 (2026-08-03, Lead) — Sheet: Notes,
+                               # THAY THẾ CẢ CÂU (không phải 1 token) — người
+                               # duyệt Gate là biên tập viên, không phải kỹ
+                               # sư. Mã lý do GỐC (tiếng Anh) giữ nguyên trong
+                               # STORE — bảng này CHỈ đổi câu hiển thị. Xem
+                               # sheets_board._display_notes_business(); cấm
+                               # xuất hiện content_units[]/facts/brief/
+                               # evidence/background/schema/payload/JSON/tên
+                               # hàm/tên file/mã lý do thô trong CÂU THAY THẾ.
+      NO_USABLE_CONTENT_FULL: "Bài gốc không có nội dung thực chất (trang điều hướng hoặc trang trống)"
+      INFOGRAPHIC_NOT_WORTHY: "Nội dung không đủ dữ liệu để dựng thành Infographic có ý nghĩa"
+      CONTENT_UNITS_EMPTY: "Không trích được dữ kiện nào từ bài gốc"
+      EMPTY_SECTIONS: "Không dựng được bài viết từ nguồn này"
+      INSUFFICIENT_SCENES: "Nguồn không đủ chất liệu để dựng video"
+      RENDER_RANKING_GUARD_FULL: "Ảnh tự thêm số thứ tự xếp hạng không có trong dữ liệu"
+      SOURCE_BROKEN_FULL: "Không đọc được nguồn"
+      DUPLICATE_FULL: "Trùng với bài đã xử lý"
+      BOILERPLATE_FULL: "Trang không có nội dung thực chất"
+      GENERIC_FALLBACK: "Không xử lý được, cần kiểm tra lại"
+    telegram_events:             # Telegram: tên event (dòng in đậm đầu tin)
+      start: "Bắt đầu xử lý nội dung"
+      new_topic: "Chủ đề mới"
+      skipped: "Bỏ qua"
+      error: "Lỗi xử lý"
+      draft_changed: "Cập nhật nội dung"
+    telegram_keys:                # Telegram: tên field (label trước dấu ":")
+      topic: "Chủ đề"
+      reason: "Lý do"
 
 # --- Sản xuất nội dung ----------------------------------------------
 producers:
@@ -683,9 +758,15 @@ publishers:
 #   (run_on_start=true) rồi lặp lại theo interval_minutes.
 schedule:
   enabled: true                   # true = bật vòng lặp nội bộ
-  mode: "interval"                # interval | daily
+  mode: "daily"                   # interval | daily
   interval_minutes: 240           # dùng khi mode=interval (mặc định 4h — khớp SOURCES.Interval)
-  at_times: ["08:30", "16:00"]    # dùng khi mode=daily (giờ địa phương theo timezone)
+  # VIỆC (2026-08-04, Lead: "Thời gian bắt đầu chạy crawl: 7h30' sáng, 3h/lần")
+  # -- đổi sang mode=daily với 8 mốc cố định cách nhau 3h, bắt đầu 07:30. Lý do
+  # KHÔNG dùng mode=interval: interval tính từ lúc TIẾN TRÌNH khởi động (system_
+  # power_on.py hoặc Task Scheduler --once), không neo vào 1 giờ cụ thể mỗi
+  # ngày -- daily+at_times mới đúng nghĩa "bắt đầu 7h30, lặp 3h" bất kể tiến
+  # trình khởi động lúc nào/khởi động lại bao nhiêu lần.
+  at_times: ["07:30", "10:30", "13:30", "16:30", "19:30", "22:30", "01:30", "04:30"]
   timezone: "Asia/Ho_Chi_Minh"
   jitter_s: 30                    # nhiễu +[0..jitter_s]s tránh dồn tải đúng mốc
   run_on_start: true              # chạy ngay 1 lần khi khởi động loop

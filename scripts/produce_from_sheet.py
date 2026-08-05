@@ -74,6 +74,9 @@ from urllib.parse import urlparse
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(REPO_ROOT))
+# SỬA LỖI THẬT (2026-08-04, xem run_scheduler.py cùng lý do) -- ép cwd =
+# REPO_ROOT NGAY ĐẦU để chạy đúng bất kể ai/gì khởi động tiến trình.
+os.chdir(REPO_ROOT)
 
 from twmkt._encoding import ensure_utf8_stdio  # noqa: E402
 
@@ -135,18 +138,41 @@ _CHANNEL_TO_TYPE = {"article": "article", "infographic": "infographic", "video":
 # ĐẦU VÀO giới hạn Content Factory, ĐỘC LẬP với quyết định router (2 lớp gate
 # riêng: router quyết "tuyến này CÓ HỢP tin không" theo nội dung; Output Type
 # quyết "người CÓ MUỐN sinh tuyến này không" theo lựa chọn Sheet — CẢ HAI phải
-# đồng ý mới sinh, xem run() chỗ áp vào `channels`). "Long-Article" CHƯA có
-# producer -- không map, chọn nó không sinh gì (không phải lỗi, không raise).
-_OUTPUT_TYPE_TO_CONTENT_TYPE = {"Article": "article", "Infographic": "infographic", "Video": "video"}
+# đồng ý mới sinh, xem run() chỗ áp vào `channels`).
+#
+# VIỆC 1 (2026-08-03, Lead) — Long-Article NỐI vào đây, dùng CHUNG kênh router
+# "article" (Router KHÔNG có khái niệm "long_article" riêng — nó chỉ đánh giá
+# 3 hình dạng nội dung article/infographic/video, xem agents/structure_router.
+# _CHANNELS; Long-Article là CÙNG hình dạng "article", chỉ khác bộ rules +
+# độ dài kỳ vọng, xem agents/writer.build_writer_system). Map này vì vậy là map
+# GATE-KÊNH (Output Type -> kênh router nào được phép), KHÔNG PHẢI map nhãn ->
+# content_type ghi ra store — content_type THẬT ghi ra ("article" hay
+# "long_article") được quyết riêng ở nhánh ghi article trong run(), xem
+# `_wants_long_article()`.
+_OUTPUT_TYPE_TO_CONTENT_TYPE = {"Article": "article", "Long-Article": "article",
+                                "Infographic": "infographic", "Video": "video"}
 
 
 def _allowed_output_types(output_type: list[str]) -> set[str] | None:
     """None = KHÔNG áp giới hạn thêm (output_type rỗng hoặc chứa "AUTO") --
     giữ NGUYÊN hành vi router-only từ trước Bước 4. Set cụ thể = CHỈ các
-    content_type này được sinh, bất kể router có đồng ý hay không."""
+    KÊNH ROUTER này được sinh, bất kể router có đồng ý hay không (xem docstring
+    _OUTPUT_TYPE_TO_CONTENT_TYPE — trả về TÊN KÊNH "article"/"infographic"/
+    "video", KHÔNG phải content_type ghi ra store)."""
     if not output_type or "AUTO" in output_type:
         return None
     return {_OUTPUT_TYPE_TO_CONTENT_TYPE[t] for t in output_type if t in _OUTPUT_TYPE_TO_CONTENT_TYPE}
+
+
+def _wants_long_article(output_type: list[str]) -> bool:
+    """VIỆC 1 — True nếu người chọn "Long-Article" tường minh cho chủ đề này.
+    Quyết định content_type ghi ra ("article" vs "long_article") + rules nạp
+    (build_writer_system) — KHÔNG ảnh hưởng cổng router (đã gate ở
+    _allowed_output_types, cùng kênh "article" cho cả 2 nhãn). Chọn ĐỒNG THỜI
+    cả "Article" lẫn "Long-Article" (đa chọn trên Sheet) -> Long-Article THẮNG
+    (bài dài đã bao hàm nội dung bài thường; tránh 2 nhánh tranh nhau ghi cùng
+    1 kênh router mà sinh 2 bản khác nhau)."""
+    return "Long-Article" in (output_type or [])
 
 
 # BƯỚC 4.3 (Router, quyết định Lead 31/07) — CHUẨN HOÁ mã SKIP ghi vào Notes:
@@ -218,8 +244,22 @@ def _is_fully_produced_channels(topic_key: str, seen: set[tuple[str, str]], chan
     """True nếu MỌI tuyến channels[c]=True của chủ đề (tra theo `topic_key` —
     Lớp 5 Phase 2, KHÔNG theo Context) đã có trong CONTENT (`seen`) — tuyến
     channels[c]=False KHÔNG chặn DONE (chủ động không sinh, KHÔNG phải thiếu).
-    Dùng cho run() (Phase 4.9+, có RouterDecision thật)."""
-    return all((topic_key, _CHANNEL_TO_TYPE[c]) in seen for c, enabled in channels.items() if enabled)
+    Dùng cho run() (Phase 4.9+, có RouterDecision thật).
+
+    VIỆC 1 (2026-08-03) — kênh "article" coi là xong nếu `seen` có content_type
+    "article" HOẶC "long_article" (Long-Article dùng CHUNG kênh router
+    "article", xem _wants_long_article() — channels dict KHÔNG BAO GIỜ có khoá
+    "long_article", chỉ 3 kênh router thật)."""
+    for c, enabled in channels.items():
+        if not enabled:
+            continue
+        type_key = _CHANNEL_TO_TYPE[c]
+        if (topic_key, type_key) in seen:
+            continue
+        if c == "article" and (topic_key, "long_article") in seen:
+            continue
+        return False
+    return True
 
 
 def _write_content(topic_key: str, type_: str, *, status: str, output: str, notes: str, content_units_json: str) -> None:
@@ -438,7 +478,14 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
         # --- ARTICLE (Phase 4.9): Brief -> route-once (đóng băng) -> Writer-
         # with-retry. Bỏ qua HOÀN TOÀN nếu đã có trong CONTENT (idempotent,
         # KHÔNG tốn thêm lượt Brief/Router/Writer cho bài đã DONE).
-        write_article = (topic_key, "article") not in seen
+        # VIỆC 1 (2026-08-03) — content_type ghi ra phụ thuộc Output Type
+        # ("Long-Article" -> "long_article", còn lại -> "article", xem
+        # _wants_long_article()); dedup theo ĐÚNG content_type sẽ dùng, không
+        # phải hằng "article" -- nếu không, đổi Output Type Article<->Long-
+        # Article sẽ không bao giờ re-trigger (seen chỉ có key cũ) HOẶC ngược
+        # lại chạy lại vô ích (seen có "article", request lại "long_article").
+        article_content_type = "long_article" if _wants_long_article(item.get("output_type") or []) else "article"
+        write_article = (topic_key, article_content_type) not in seen
         # Phase 4.12: run_brief() trả BriefResult (content_units + no_numeric_content)
         # — phân biệt content_units=[] RỖNG-HỢP-LỆ (Brief chạy trọn vẹn, xác nhận tin
         # thuần định tính) vs RỖNG-DO-HỎNG (LLM lỗi/timeout — cờ luôn False).
@@ -595,38 +642,39 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
         elif not channels.get("article", True):
             reason = _channel_skip_reason("article", decision, output_type_excluded,
                                           no_usable_content="article" in no_usable_content_channels)
-            _write_content(topic_key, "article", status="SKIPPED", output="", notes=reason, content_units_json=content_units_json)
+            _write_content(topic_key, article_content_type, status="SKIPPED", output="", notes=reason, content_units_json=content_units_json)
             written += 1
-            seen.add((topic_key, "article"))
+            seen.add((topic_key, article_content_type))
             skipped += 1
-            notifier.notify("skipped", topic=item["context"], type="article", reason=reason)
+            notifier.notify("skipped", topic=item["context"], type=article_content_type, reason=reason)
         else:
             r = run_writer_with_retry(
                 writer_llm, brief, decision, settings=settings,
                 model=factory.step_model(settings, "writer"),
-                notify=_writer_notify_adapter(notifier))
+                notify=_writer_notify_adapter(notifier),
+                content_type=article_content_type)
             article_outcome = r.outcome
             if r.outcome == WriterOutcome.DONE:
-                fn = out_dir / f"{_slug(item['context'])}-article.md"
+                fn = out_dir / f"{_slug(item['context'])}-{article_content_type}.md"
                 fn.write_text(r.draft.body, encoding="utf-8")
-                _write_content(topic_key, "article", status="DONE", output=r.draft.body, notes="", content_units_json=content_units_json)
+                _write_content(topic_key, article_content_type, status="DONE", output=r.draft.body, notes="", content_units_json=content_units_json)
                 written += 1
-                seen.add((topic_key, "article"))
+                seen.add((topic_key, article_content_type))
                 produced += 1
-                notifier.notify("draft_changed", topic=item["context"], type="article", status="DONE")
+                notifier.notify("draft_changed", topic=item["context"], type=article_content_type, status="DONE")
             elif r.outcome == WriterOutcome.NEEDS_HUMAN:
                 # LLM ĐÃ trả lời nhưng guardrail reject -> VẪN ghi CONTENT (Status=
                 # ERROR) để người xem lý do, nhưng KHÔNG seen.add (chưa coi là xong).
                 note = "; ".join(r.draft.compliance_issues)
-                fn = out_dir / f"{_slug(item['context'])}-article.md"
+                fn = out_dir / f"{_slug(item['context'])}-{article_content_type}.md"
                 fn.write_text(r.draft.body, encoding="utf-8")
-                _write_content(topic_key, "article", status="ERROR", output=r.draft.body, notes=note, content_units_json=content_units_json)
+                _write_content(topic_key, article_content_type, status="ERROR", output=r.draft.body, notes=note, content_units_json=content_units_json)
                 written += 1
                 flagged += 1
-                notifier.notify("error", topic=item["context"], type="article", issues=note)
+                notifier.notify("error", topic=item["context"], type=article_content_type, issues=note)
             else:   # FAILED — hết retry (lỗi hạ tầng gọi LLM), KHÔNG có draft -> KHÔNG ghi CONTENT rác
                 flagged += 1
-                notifier.notify("error", topic=item["context"], type="article", issues=r.reason)
+                notifier.notify("error", topic=item["context"], type=article_content_type, issues=r.reason)
 
         # --- VIDEO/INFOGRAPHIC: VIDEO tiêu thụ CÙNG RouterDecision đã đóng
         # băng (voice-lock động + §4 chuyển-thể, Phase 4.10, xem VideoScriptAgent

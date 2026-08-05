@@ -34,6 +34,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
+# SỬA LỖI THẬT (2026-08-04, cùng nguyên nhân run_scheduler.py) -- Task
+# Scheduler/khởi động tự động chạy tiến trình với cwd MẶC ĐỊNH (thường
+# System32), KHÔNG PHẢI thư mục repo. `twmkt.config.load_settings()` đọc
+# "config/settings.yaml"/"secrets/.env" theo ĐƯỜNG DẪN TƯƠNG ĐỐI -- ép cwd =
+# REPO_ROOT NGAY ĐẦU để worker chạy đúng bất kể ai/gì khởi động tiến trình.
+os.chdir(REPO_ROOT)
 
 from twmkt._encoding import ensure_utf8_stdio  # noqa: E402
 

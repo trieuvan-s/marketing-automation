@@ -190,7 +190,13 @@ def _load_content_writer_rules(*, sections: tuple[str, ...], settings=None) -> s
 # chạy). Nhánh MỚI "full" (nạp nguyên văn v3+, xem `_load_rules_full`) đứng
 # TRƯỚC, tách bạch hoàn toàn — không tái dùng biến/hàm của nhánh cũ để tránh
 # lẫn 2 hình dạng dữ liệu.
-_LEGACY_SECTIONS_BY_TYPE = {"article": ("2", "3"), "video": ("2", "4"), "infographic": ("2", "5")}
+_LEGACY_SECTIONS_BY_TYPE = {"article": ("2", "3"), "video": ("2", "4"), "infographic": ("2", "5"),
+                           # VIỆC 1 -- lưới an toàn nếu rules_load_mode lùi về
+                           # legacy_sections: long_article dùng CHUNG mục với
+                           # article (KHÔNG có mục riêng ở rules cũ, hàm _load_
+                           # composer_rules() nạp thêm supplement CHỈ ở nhánh
+                           # "full" — nhánh này KHÔNG PHẢI đường sản xuất).
+                           "long_article": ("2", "3")}
 
 # v2.1 core dùng CHUNG mọi loại: §1 mục tiêu, §2 thứ tự ưu tiên, §3 ranh giới
 # bắt buộc, §4 cấu trúc vừa đủ, §5 không gian sáng tạo, §6 chất lượng lập luận/
@@ -199,7 +205,8 @@ _LEGACY_SECTIONS_BY_TYPE = {"article": ("2", "3"), "video": ("2", "4"), "infogra
 # cuối, giống §6-9 content_rules_v1.0.md CŨ cũng không nhúng — input cho
 # guardrail/self-review, không phải "dạy văn").
 _V21_CORE_SECTIONS = ("1", "2", "3", "4", "5", "6")
-_V21_PRODUCT_SUBSECTION = {"article": "7.1", "video": "7.2", "infographic": "7.3"}
+_V21_PRODUCT_SUBSECTION = {"article": "7.1", "video": "7.2", "infographic": "7.3",
+                          "long_article": "7.1"}   # VIỆC 1 -- cùng lưới an toàn, xem _LEGACY_SECTIONS_BY_TYPE
 _V21_SUBSECTION_RE_CACHE: dict[str, re.Pattern] = {}
 
 
@@ -217,6 +224,13 @@ def _v21_subsection_re(num: str) -> re.Pattern:
 # mục -- default dưới đây CHỈ là fallback khi config không set, giống mọi
 # hằng số _DEFAULT_* khác trong repo (config LUÔN thắng).
 _DEFAULT_RULES_FULL_PATH = "prompts/content-rules-daily-v3.4.md"
+
+# VIỆC 1 (2026-08-03, Lead) — content_type="long_article" nạp THÊM file này
+# SAU file nền (_DEFAULT_RULES_FULL_PATH/content_rules_path) -- "bổ sung,
+# không thay thế" (xem header content-rules-deep-v3.0.md: "Nạp độc lập... nạp
+# thêm"). Fallback khi config không set `writer.content_rules_supplement_path`,
+# cùng quy ước A2 với _DEFAULT_RULES_FULL_PATH ở trên.
+_DEFAULT_RULES_SUPPLEMENT_PATH = "prompts/content-rules-deep-v3.0.md"
 
 
 def _load_rules_full(path: Path) -> str:
@@ -287,6 +301,19 @@ def _load_composer_rules(content_type: str, *, settings=None) -> str:
             print(f"[CẢNH BÁO] không thấy {path} (rules_load_mode=full) -> bỏ qua rules (rỗng).")
             return ""
         text = _load_rules_full(path)
+        if content_type == "long_article":
+            # VIỆC 1 -- nạp nền TRƯỚC (đã xong ở trên), bổ sung SAU, NỐI NGUYÊN
+            # VĂN cả 2 (không cắt mục nào) — "nạp KÈM, không thay thế" (header
+            # content-rules-deep-v3.0.md). Thiếu file bổ sung -> LÙI MƯỢT, vẫn
+            # trả nền (KHÔNG rỗng cả 2 vì thiếu 1 file phụ).
+            supp_path = Path(settings.get("writer.content_rules_supplement_path",
+                                          _DEFAULT_RULES_SUPPLEMENT_PATH))
+            if supp_path.exists():
+                supp_text = _load_rules_full(supp_path)
+                if supp_text:
+                    text = text + "\n\n---\n\n" + supp_text if text else supp_text
+            else:
+                print(f"[CẢNH BÁO] không thấy {supp_path} (long_article bổ sung) -> chỉ dùng nền.")
         if text:
             _append_rules_run_state(content_type=content_type, path=path,
                                     sha256=_sha256_text(text), mode=mode, settings=settings)
@@ -576,7 +603,14 @@ class AnalysisWriterAgent(Agent):
         if rules:
             extra += f"\n\n---\n\nCONTENT_WRITER_RULES (bắt buộc, nguồn chuẩn):\n{rules}"
         data = try_json_object(self._ask(build_analysis_prompt(brief), extra_system=extra))
-        title, sapo, sections, disclaimer, sources = analysis_fields_from_data(data, brief)
+        try:
+            title, sapo, sections, disclaimer, sources = analysis_fields_from_data(data, brief)
+        except EmptySectionsError as e:
+            # Đường LEGACY (không qua run_writer_with_retry) -- KHÔNG tự dựng
+            # bài thay Composer (xem EmptySectionsError), trả draft rỗng kèm lý
+            # do trong compliance_issues để caller thấy NEEDS_HUMAN (is_clean=False).
+            return ContentDraft(fmt=ContentFormat.ARTICLE, title=brief.title, body="",
+                                brief_topic=brief.topic, compliance_issues=[str(e)])
         body = render_analysis(title, sapo, sections, disclaimer, sources, brief)
         return ContentDraft(fmt=ContentFormat.ARTICLE, title=title, body=body,
                             brief_topic=brief.topic)
@@ -597,6 +631,23 @@ def build_analysis_prompt(brief: ProductionBrief) -> str:
     )
 
 
+class EmptySectionsError(ValueError):
+    """Lead 02/08 (Nhóm B, cùng loại bug với subtitle/related nhưng NẶNG NHẤT:
+    bịa CẢ BÀI thay vì 1 trường) — Composer (Writer) trả JSON HỢP LỆ nhưng
+    sections RỖNG (tường minh "sections": [] HOẶC thiếu hẳn key), KHÁC HẲN
+    data=None/lỗi hạ tầng (case đó vẫn LÙI MƯỢT, xem test_production_agent_
+    graceful_empty_llm — KHÔNG đụng).
+
+    Trước đây: coi sections rỗng = "Composer fail cần cứu", tự dựng lại 100%
+    bài từ brief.evidence/brief.background — chính cơ chế "bịa cả bài từ
+    trang rỗng" đã ghi trong báo cáo content_units. Với content_units mới,
+    tới được đây nghĩa là Brief đã xác nhận có chất liệu neo nguồn + Router đã
+    bật tuyến article (has_anchored_units) — sections rỗng lúc này là tín hiệu
+    Composer THỰC SỰ không viết được gì, CÓ Ý NGHĨA, không phải input rỗng cần
+    cứu -> PHẢI NEEDS_HUMAN, KHÔNG tự viết đè (agents/writer.py:
+    run_writer_with_retry bắt riêng exception này, KHÁC LLMCallError)."""
+
+
 def analysis_fields_from_data(data: dict | None, brief: ProductionBrief):
     if data:
         title = str(data.get("title") or brief.hook or brief.title).strip()
@@ -609,8 +660,14 @@ def analysis_fields_from_data(data: dict | None, brief: ProductionBrief):
         sources = [str(u).strip() for u in (data.get("sources") or []) if str(u).strip()]
         if sections:
             return title, sapo, sections, disclaimer, sources
-    # LÙI MƯỢT: dựng schema tất định từ dữ kiện đã duyệt (không LLM/parse lỗi).
-    # LUÔN giữ tiêu đề gốc trong Bối cảnh (dù có hook/evidence riêng) -> truy vết được.
+        raise EmptySectionsError(
+            "Composer trả sections rỗng (JSON hợp lệ, không có thân bài) — "
+            "content_units đã verified + Router đã bật tuyến article, cần "
+            "người xem lại, không phải lỗi hạ tầng.")
+    # LÙI MƯỢT: CHỈ còn cho data=None/rỗng HOÀN TOÀN (Composer/LLM lỗi hạ tầng
+    # thật, KHÔNG parse được JSON gì cả). "data hợp lệ nhưng sections rỗng"
+    # KHÔNG còn rơi xuống đây (raise EmptySectionsError ở trên thay vì fall
+    # through) — LUÔN giữ tiêu đề gốc trong Bối cảnh (dù có hook/evidence riêng) -> truy vết được.
     # _soft_truncate (Phase 4.11, item 6): cắt về giới hạn nhưng KHÔNG cắt GIỮA
     # 1 từ (lùi về khoảng trắng gần nhất) — trước đây cắt cứng [:N] có thể đứt
     # ngang chữ.
@@ -852,29 +909,49 @@ def video_fields_from_data(data: dict | None, brief: ProductionBrief):
             for i, sc in enumerate(raw_scenes)
         ]
         disclaimer = str(data.get("disclaimer") or _default_disclaimer()).strip()
-        if scenes:
-            scenes[0]["role"] = "hook"
-            scenes[-1] = _ensure_outro_scene(scenes[-1], brief)
-            # VIỆC 0.3 — CONTRACT CHECK tất định trên OUTPUT COMPOSER (chỉ đường
-            # LLM này, KHÔNG áp fallback bên dưới): số bằng chữ -> THROW ngay.
-            _assert_scenes_narration_use_digits(scenes)
-            # BƯỚC 3 (rules v2.1) — sàn scene RENDERER, xem InsufficientScenesError.
-            # Đặt SAU digit-check có chủ đích: lỗi ĐỊNH DẠNG (voice_text hỏng) là
-            # vấn đề TOÀN VẸN dữ liệu, ưu tiên lộ ra trước lỗi SỐ LƯỢNG (khả thi
-            # video) — cũng giữ nguyên hành vi test_video_narration_contract_
-            # rejects_spelled_out_numbers (2 scene, cố ý test riêng digit-check).
-            if len(scenes) < _VIDEO_SCENE_FLOOR:
-                raise InsufficientScenesError(
-                    f"Nguồn chỉ đủ dựng {len(scenes)} cảnh (cần tối thiểu "
-                    f"{_VIDEO_SCENE_FLOOR} để video có hook+thân+outro) — KHÔNG bịa "
-                    f"cảnh đệm cho đủ số. Đề xuất chuyển loại nội dung sang "
-                    f"infographic/article cho chủ đề này (nguồn nghèo SCENE video, "
-                    f"KHÔNG có nghĩa nghèo SỐ LIỆU — 2 loại kia dùng chung content_units[]).")
-            return title, scenes, disclaimer
-    # LÙI MƯỢT: kịch bản tất định 4 cảnh (>= 1 "hook" + 1 "outro") từ dữ kiện
-    # đã duyệt (KHÔNG cần Opus) — GIỮ nguyên nội dung/thứ tự ý tưởng đường cũ
-    # (hook -> tiêu đề -> bối cảnh (nếu có) -> mã liên quan -> CTA), chỉ đổi
-    # VỎ ĐỰNG sang scene có kiểu.
+        if not scenes:
+            # Lead 02/08 (Nhóm B, cùng sửa với sections=[] article): Composer
+            # trả JSON HỢP LỆ nhưng scenes RỖNG (tường minh "scenes": [] HOẶC
+            # thiếu hẳn key) -- KHÁC data=None/lỗi hạ tầng (case đó vẫn LÙI
+            # MƯỢT bên dưới, xem test_production_agent_graceful_empty_llm).
+            # Tới được đây, content_units đã verified + Router đã bật tuyến
+            # video -- scenes rỗng là Composer THỰC SỰ không viết được gì, tín
+            # hiệu CÓ Ý NGHĨA, KHÔNG còn coi là "cần cứu" để tự dựng 4 cảnh mặc
+            # định (chính cơ chế "bịa cả video từ JSON rỗng" đã ghi trong báo
+            # cáo content_units) -- ném qua LƯỚI InsufficientScenesError CÓ SẴN
+            # (produce_from_sheet.run() đã bắt riêng -> NEEDS_HUMAN + Notes).
+            raise InsufficientScenesError(
+                "Composer trả scenes rỗng (0 cảnh, cần tối thiểu "
+                f"{_VIDEO_SCENE_FLOOR} để video có hook+thân+outro) — KHÔNG tự "
+                "dựng 4 cảnh mặc định thay Composer. content_units đã verified + "
+                "Router đã bật tuyến video, cần người xem lại, không phải lỗi "
+                "hạ tầng.")
+        scenes[0]["role"] = "hook"
+        scenes[-1] = _ensure_outro_scene(scenes[-1], brief)
+        # VIỆC 0.3 — CONTRACT CHECK tất định trên OUTPUT COMPOSER (chỉ đường
+        # LLM này, KHÔNG áp fallback bên dưới): số bằng chữ -> THROW ngay.
+        _assert_scenes_narration_use_digits(scenes)
+        # BƯỚC 3 (rules v2.1) — sàn scene RENDERER, xem InsufficientScenesError.
+        # Đặt SAU digit-check có chủ đích: lỗi ĐỊNH DẠNG (voice_text hỏng) là
+        # vấn đề TOÀN VẸN dữ liệu, ưu tiên lộ ra trước lỗi SỐ LƯỢNG (khả thi
+        # video) — cũng giữ nguyên hành vi test_video_narration_contract_
+        # rejects_spelled_out_numbers (2 scene, cố ý test riêng digit-check).
+        if len(scenes) < _VIDEO_SCENE_FLOOR:
+            raise InsufficientScenesError(
+                f"Nguồn chỉ đủ dựng {len(scenes)} cảnh (cần tối thiểu "
+                f"{_VIDEO_SCENE_FLOOR} để video có hook+thân+outro) — KHÔNG bịa "
+                f"cảnh đệm cho đủ số. Đề xuất chuyển loại nội dung sang "
+                f"infographic/article cho chủ đề này (nguồn nghèo SCENE video, "
+                f"KHÔNG có nghĩa nghèo SỐ LIỆU — 2 loại kia dùng chung content_units[]).")
+        return title, scenes, disclaimer
+    # LÙI MƯỢT: CHỈ còn cho data=None/rỗng HOÀN TOÀN (Composer/LLM lỗi hạ tầng
+    # thật, KHÔNG parse được JSON gì cả — xem test_production_agent_graceful_
+    # empty_llm). "data hợp lệ nhưng scenes rỗng" KHÔNG còn rơi xuống đây từ
+    # Lead 02/08 (đã raise InsufficientScenesError ở nhánh `if data:` trên).
+    # Kịch bản tất định 4 cảnh (>= 1 "hook" + 1 "outro") từ dữ kiện đã duyệt
+    # (KHÔNG cần Opus) — GIỮ nguyên nội dung/thứ tự ý tưởng đường cũ (hook ->
+    # tiêu đề -> bối cảnh (nếu có) -> mã liên quan -> CTA), chỉ đổi VỎ ĐỰNG
+    # sang scene có kiểu.
     title = brief.hook or brief.title
     scenes = [
         {"role": "hook", "visual_kind": "statement",
@@ -975,6 +1052,10 @@ _INFOGRAPHIC_COMPOSER_SYSTEM = (
     "bị lấp bởi tên hội thảo/hiệp hội/viện nghiên cứu thay vì tên cảng/dự án "
     "thật). content_units[] không có entity/entity_list salience=subject nào -> để "
     "related rỗng [], KHÔNG lùi về mã CK/tên context khi không chắc chắn.\n"
+    "- RỖNG TƯỜNG MINH (Lead 02/08): nếu THẬT SỰ không có subtitle/related phù "
+    "hợp, hãy trả rỗng tường minh (subtitle: \"\", related: []) — hệ thống GIỮ "
+    "NGUYÊN rỗng, KHÔNG tự điền lại. TUYỆT ĐỐI KHÔNG bịa 1 câu/tên nào chỉ để "
+    "'cho đủ trường'.\n"
     "- priority: {\"primary\": [...nhãn/tên quan trọng nhất...], \"secondary\": "
     "[...], \"minor\": [...]} — \"primary\" CHỈ được chứa nhãn (label) đã dùng "
     "ở hero/market VÀ/HOẶC tên thực thể salience=\"subject\" đã đưa vào "
@@ -1185,16 +1266,30 @@ def infographic_spec_from_data(data: dict | None, brief: ProductionBrief) -> dic
         market = _parse_stat_list(data.get("market"))
         if hero or market:
             title = str(data.get("title") or brief.hook or brief.title).strip()
-            subtitle = str(data.get("subtitle") or "").strip()
-            if not subtitle or subtitle == title:
-                # RÀNG BUỘC CỨNG (không tin mù LLM): title != subtitle luôn —
-                # composer lỡ lặp/để trống thì CODE tự chọn subtitle khác,
-                # cùng triết lý "không tin field rời LLM" như driver_count.
+            subtitle_raw = data.get("subtitle")
+            if subtitle_raw is None:
+                # Key VẮNG MẶT/None -> Composer "quên điền", CODE tự chọn subtitle
+                # khác title (không tin mù LLM, cùng triết lý driver_count).
                 subtitle = brief.title if brief.title != title else ""
+            else:
+                subtitle = str(subtitle_raw).strip()
+                if subtitle == title:
+                    # RÀNG BUỘC CỨNG: title != subtitle luôn — composer lỡ LẶP
+                    # (không phải để rỗng) thì CODE tự sửa.
+                    subtitle = brief.title if brief.title != title else ""
+                # subtitle == "" (Composer TRẢ RỖNG có chủ đích, khác title) ->
+                # GIỮ NGUYÊN, KHÔNG tự điền brief.title (Lead 02/08 — "code đang
+                # BỊA dữ liệu vào ảnh" khi coi "" giống "quên điền").
             highlights = [str(h).strip() for h in (data.get("highlights") or []) if str(h).strip()]
-            related = [str(t).strip() for t in
-                      (data.get("related") or _entity_names_from_content_units(brief.content_units) or brief.tickers)
-                      if str(t).strip()]
+            related_raw = data.get("related")
+            if related_raw is None:
+                related = [str(t).strip() for t in
+                          (_entity_names_from_content_units(brief.content_units) or brief.tickers)
+                          if str(t).strip()]
+            else:
+                # Key có mặt (kể cả [] có chủ đích) -> TÔN TRỌNG nguyên văn,
+                # KHÔNG lùi về nguồn khác (Lead 02/08, cùng lý do subtitle).
+                related = [str(t).strip() for t in related_raw if str(t).strip()]
             return {
                 "title": title, "subtitle": subtitle, "hero": hero, "market": market,
                 "highlights": highlights, "related": related,

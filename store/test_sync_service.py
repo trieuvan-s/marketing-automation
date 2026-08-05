@@ -79,6 +79,16 @@ def _header_index(header: list[str], name: str) -> int:
     return [h.strip().lower() for h in header].index(name.strip().lower())
 
 
+# `_seed_full_state()` dùng 2 ngày tương đối "hôm qua"/"hôm nay" (KHÔNG
+# hard-code "28/07/2026"/"29/07/2026") -- ngày cứng trôi ra ngoài cửa sổ
+# `display_days` mặc định (7 ngày) một khi "hôm nay" của môi trường chạy test
+# tiến xa hơn ngày viết test, khiến các test render dựa vào seed này ẩn mất
+# dòng cần kiểm (đã xảy ra thật -- xem test_restore_keeps_every_user_owned_field).
+from datetime import date as _date, timedelta as _timedelta   # noqa: E402
+_SEED_YESTERDAY = (_date.today() - _timedelta(days=1)).strftime("%d/%m/%Y")
+_SEED_TODAY = _date.today().strftime("%d/%m/%Y")
+
+
 # =============================================================================
 # render_context_to_sheet
 # =============================================================================
@@ -100,6 +110,24 @@ def test_render_context_to_sheet_builds_rows_from_store(board, db_path):
     assert row[_header_index(header, "Source")] == "https://cafef.vn/x.chn"
     assert row[_header_index(header, "TopicKey")] == "tk-1"
     assert row[_header_index(header, GATE1_COL)] == "PENDING"
+    # VIỆC Execute (2026-08-03, Lead) — ĐẢO LẠI quyết định 2026-07-28 (khi đó
+    # ép "Waiting" cho Execute rỗng). Gate1=PENDING (chưa duyệt) + store
+    # execute="" -> Sheet PHẢI hiện đúng "" (không tự đoán "Waiting").
+    assert row[_header_index(header, "Execute")] == ""
+
+
+def test_render_context_to_sheet_shows_waiting_once_approved_not_before(board, db_path):
+    """VIỆC Execute (2026-08-03, Lead) — Gate1=APPROVE + store execute=
+    "Waiting" -> Sheet hiện "Waiting" (khác ca PENDING/rỗng ở test trên).
+    Phân biệt RÕ 2 trạng thái theo store, không hardcode 1 chiều."""
+    ps.write_raw("tk-2", {"context": "Bài 2 đã duyệt"}, db_path=db_path)
+    ps.write_gate_status("tk-2", gate1="APPROVE", execute="Waiting", db_path=db_path)
+
+    ss.render_context_to_sheet(board, db_path=db_path)
+    grid = board._tab("CONTEXT").get_all_values()
+    header = grid[0]
+    row = next(r for r in grid[1:] if r[_header_index(header, "TopicKey")] == "tk-2")
+    assert row[_header_index(header, "Execute")] == "Waiting"
 
 
 def test_render_context_to_sheet_reflects_gate1_and_notes_after_ingest(board, db_path):
@@ -190,7 +218,7 @@ def test_render_content_to_sheet_builds_rows_from_store(board, db_path):
     assert grid[0] == CONTENT_HEADER
     header, row = grid[0], grid[1]
     assert row[_header_index(header, "Context")] == "Bài 1"
-    assert row[_header_index(header, "Type")] == "article"
+    assert row[_header_index(header, "Type")] == "Article"   # VIỆC 3: Type ghi NHÃN hiển thị
     assert row[_header_index(header, "Status")] == "DONE"
     assert row[_header_index(header, GATE2_COL)] == "PENDING"
     assert row[_header_index(header, GATE3_COL)] == "PENDING"
@@ -203,7 +231,7 @@ def test_render_content_to_sheet_reflects_gate2_gate3_social_posting_after_inges
 
     board._tab("CONTENT").set_rows([
         CONTENT_HEADER,
-        ["24/07/2026", "Bài 1", "article", "DONE", "x", "", "APPROVE", "tk-1", "[]", "",
+        ["24/07/2026", "Bài 1", "article", "DONE", "x", "", "APPROVE", "tk-1", "[]", "", "",
          "https://facebook.com/post/1", "APPROVE", "Đã đăng"],
     ])
 
@@ -234,9 +262,11 @@ def test_render_content_to_sheet_never_writes_gate3_away_from_pending_default(bo
 def test_render_content_to_sheet_truncates_output_but_store_keeps_full(board, db_path):
     """VIỆC 1.3 (Lead 2026-07-27): store PHẢI giữ NGUYÊN VĂN (không phải nơi
     gây bug Bước 5.3 nữa — xem test_run_writes_full_body_to_store_over_1500_
-    chars_not_truncated ở tests/test_pipeline.py), nhưng ô Sheet VẪN cắt 1500
-    ký tự như trước — Sheet chỉ để người liếc, KHÔNG nới giới hạn hiển thị."""
-    long_output = ("x" * 2000) + "MARKER_CUOI"
+    chars_not_truncated ở tests/test_pipeline.py), nhưng ô Sheet VẪN cắt ở
+    ngưỡng _OUTPUT_PREVIEW (nâng lên 5000 — Việc 2, 2026-08-04) — Sheet chỉ để
+    người liếc/sửa tay bài NGẮN hơn ngưỡng, KHÔNG nới giới hạn hiển thị cho
+    bài DÀI hơn."""
+    long_output = ("x" * 6000) + "MARKER_CUOI"
     ps.write_raw("tk-1", {"context": "Bài dài"}, db_path=db_path)
     ps.write_content_output("tk-1", "infographic",
                             {"status": "DONE", "output": long_output, "notes": "", "facts": "[]"},
@@ -245,7 +275,7 @@ def test_render_content_to_sheet_truncates_output_but_store_keeps_full(board, db
     # store giữ ĐẦY ĐỦ, không bị hàm render đụng vào (render chỉ ĐỌC).
     stored = ps.read_content_output("tk-1", "infographic", db_path=db_path)
     assert stored["output"] == long_output
-    assert len(stored["output"]) == 2011
+    assert len(stored["output"]) == 6011
 
     ss.render_content_to_sheet(board, db_path=db_path)
     grid = board._tab("CONTENT").get_all_values()
@@ -253,7 +283,7 @@ def test_render_content_to_sheet_truncates_output_but_store_keeps_full(board, db
     sheet_output = row[_header_index(header, "Output")]
     assert len(sheet_output) < len(long_output)   # Sheet VẪN cắt -- không nới giới hạn
     assert "MARKER_CUOI" not in sheet_output       # bản cắt Sheet KHÔNG có đoạn cuối
-    assert sheet_output.startswith("x" * 1500)
+    assert sheet_output.startswith("x" * 5000)
 
 
 def test_render_content_to_sheet_uses_asset_url_over_local_path(board, db_path):
@@ -269,6 +299,79 @@ def test_render_content_to_sheet_uses_asset_url_over_local_path(board, db_path):
     # HYPERLINK để người duyệt Gate 3 bấm được, thay vì text thô như trước.
     assert row[_header_index(header, "AssetPath")] == \
         '=HYPERLINK("https://drive.google.com/x", "Mở file")'
+
+
+def test_render_content_to_sheet_timestamp_prefers_published_at(board, db_path):
+    """VIỆC 3.1 (2026-08-04, Lead) — Timestamp CONTENT phải ưu tiên
+    published_at (ngày ĐĂNG BÀI GỐC, cùng ý nghĩa Timestamp bên CONTEXT), lùi
+    về `timestamp` (ngày xử lý) khi bản ghi CŨ chưa có published_at."""
+    ps.write_raw("tk-1", {"context": "Bài 1"}, db_path=db_path)
+    ps.write_content_output("tk-1", "article", {"status": "DONE", "output": "x", "notes": "",
+                                                "facts": "[]", "timestamp": _SEED_TODAY,
+                                                "published_at": _SEED_YESTERDAY}, db_path=db_path)
+    ps.write_raw("tk-2", {"context": "Bài 2"}, db_path=db_path)
+    ps.write_content_output("tk-2", "article", {"status": "DONE", "output": "x", "notes": "",
+                                                "facts": "[]", "timestamp": _SEED_TODAY},
+                            db_path=db_path)   # bản ghi CŨ, không có published_at
+
+    ss.render_content_to_sheet(board, db_path=db_path)
+    grid = board._tab("CONTENT").get_all_values()
+    header = grid[0]
+    i_ts, i_tk = _header_index(header, "Timestamp"), _header_index(header, "TopicKey")
+    by_tk = {r[i_tk]: r[i_ts] for r in grid[1:]}
+    assert by_tk["tk-1"] == _SEED_YESTERDAY   # có published_at -> dùng nó
+    assert by_tk["tk-2"] == _SEED_TODAY       # thiếu published_at -> lùi về timestamp
+
+
+def test_content_same_day_rows_keep_crawl_order_not_alphabetical(board, db_path):
+    """VIỆC 3.2 (2026-08-04, Lead — cùng bug "dữ liệu trong cùng ngày bị xếp
+    lẫn lộn" đã sửa cho CONTEXT ở Task #75) — topic_key CỐ Ý đặt ngược alphabet
+    ("zzz" sinh content_output TRƯỚC "aaa") để phân biệt: nếu còn sort theo
+    thứ tự list_topics() (ORDER BY topic_key) thì "aaa" lên trước — SAI. Đúng
+    phải theo first_created_at() của content_output -> "zzz" trước."""
+    from datetime import date
+    day = date.today().strftime("%d/%m/%Y")
+    ps.write_raw("zzz", {"context": "zzz"}, db_path=db_path)
+    ps.write_content_output("zzz", "article", {"status": "DONE", "output": "x", "notes": "",
+                                               "facts": "[]", "timestamp": day}, db_path=db_path)
+    ps.write_raw("aaa", {"context": "aaa"}, db_path=db_path)
+    ps.write_content_output("aaa", "article", {"status": "DONE", "output": "x", "notes": "",
+                                               "facts": "[]", "timestamp": day}, db_path=db_path)
+
+    ss.render_content_to_sheet(board, db_path=db_path)
+    grid = board._tab("CONTENT").get_all_values()
+    i_ctx = _header_index(grid[0], "Context")
+    assert [r[i_ctx] for r in grid[1:]] == ["zzz", "aaa"], \
+        "phải theo thứ tự content_output được TẠO (zzz trước), không theo alphabet topic_key"
+
+
+def test_content_nguoi_thuc_hien_carried_forward_across_renders(board, db_path):
+    """VIỆC 3.4 (2026-08-04, Lead — điều phối nhân sự) — cột "Người thực
+    hiện" KHÔNG có store backing (Lead tự gõ tay qua Sheet UI). render_content_
+    to_sheet() dựng lại TOÀN BỘ tab mỗi lượt (kể cả khi KHÔNG có gì đổi ở
+    store) -- PHẢI đọc giá trị hiện có trên Sheet TRƯỚC khi ghi đè, nếu không
+    sẽ xoá mất tên người Lead vừa gõ ở lượt render kế tiếp (vd do Gate 2 vừa
+    đổi -- xem test_render_never_clears_whole_tab, cùng lo ngại mất dữ liệu
+    trình bày người gõ tay)."""
+    ps.write_raw("tk-1", {"context": "Bài 1"}, db_path=db_path)
+    ps.write_content_output("tk-1", "article", {"status": "DONE", "output": "x", "notes": "",
+                                                "facts": "[]"}, db_path=db_path)
+    ss.render_content_to_sheet(board, db_path=db_path)
+
+    ws = board._tab("CONTENT")
+    grid = ws.get_all_values()
+    i_nguoi = _header_index(grid[0], "Người thực hiện")
+    row = list(grid[1])
+    row[i_nguoi] = "Chị Lan"
+    ws.update("A2", [row], value_input_option="RAW")
+
+    # 1 thay đổi KHÔNG LIÊN QUAN ở store (Gate 2) -> render lại toàn bộ tab.
+    ps.write_content_status("tk-1", "article", gate2="APPROVE", db_path=db_path)
+    ss.render_content_to_sheet(board, db_path=db_path)
+
+    grid_after = ws.get_all_values()
+    assert grid_after[1][_header_index(grid_after[0], "Người thực hiện")] == "Chị Lan", \
+        "render lại KHÔNG được xoá tên người Lead đã gõ tay (không có store backing)"
 
 
 # =============================================================================
@@ -328,6 +431,9 @@ def test_ingest_context_from_sheet_bridges_new_topic_not_in_store(board, db_path
     assert raw["hot_pct"] == 62.5
     gate = ps.read_gate_status("tk-moi", db_path=db_path)
     assert gate["gate1"] == "PENDING"
+    # VIỆC Execute (2026-08-03, Lead) — topic MỚI, gate1=PENDING (chưa duyệt)
+    # -> Execute="" (KHÔNG "Waiting" — đó là ĐẢO LẠI quyết định 2026-07-28).
+    assert gate["execute"] == ""
 
 
 def test_ingest_context_from_sheet_skips_rows_without_topic_key(board, db_path):
@@ -412,7 +518,7 @@ def test_ingest_content_from_sheet_writes_gate2_gate3_social_posting_changes(boa
 
     board._tab("CONTENT").set_rows([
         CONTENT_HEADER,
-        ["24/07/2026", "Bài 1", "article", "DONE", "x", "", "APPROVE", "tk-1", "[]", "",
+        ["24/07/2026", "Bài 1", "article", "DONE", "x", "", "APPROVE", "tk-1", "[]", "", "",
          "https://fb.com/1", "APPROVE", "Đã đăng"],
     ])
 
@@ -423,6 +529,118 @@ def test_ingest_content_from_sheet_writes_gate2_gate3_social_posting_changes(boa
     assert status["social_link"] == "https://fb.com/1"
     assert status["gate3"] == "APPROVE"
     assert status["posting_status"] == "Đã đăng"
+
+
+def test_ingest_content_from_sheet_matches_type_as_display_label(board, db_path):
+    """SỬA LỖI THẬT NGHIÊM TRỌNG (2026-08-03, Lead báo qua ca Gate 2 duyệt
+    xong không sinh AssetPath) — VIỆC 3 đổi content_row() ghi NHÃN hiển thị
+    ("Video"/"Infographic"...) vào cột Type, nhưng ingest_content_from_sheet()
+    vẫn đọc THẲNG ô đó làm content_type để tra store -> "Video" != "video" ->
+    read_content_output() trả None -> CẢ DÒNG bị bỏ qua ÂM THẦM. Hậu quả thật:
+    Gate 2 người vừa duyệt (APPROVE) KHÔNG BAO GIỜ được ghi vào store, rồi
+    render_content_to_sheet() lượt sau lại vẽ đè Sheet về "PENDING" (từ store
+    cũ) -- xoá mất thao tác người vừa bấm. Test này khoá ĐÚNG use-case
+    "Type ghi nhãn hiển thị" (không phải khoá thô) vẫn phải ingest được."""
+    ps.write_raw("tk-1", {"context": "Bài video"}, db_path=db_path)
+    ps.write_content_output("tk-1", "video", {"status": "DONE", "output": "x",
+                                              "notes": "", "facts": "[]"}, db_path=db_path)
+    ps.write_content_status("tk-1", "video", gate2="PENDING", db_path=db_path)
+
+    board._tab("CONTENT").set_rows([
+        CONTENT_HEADER,
+        # "Video" -- NHÃN hiển thị (VIỆC 3), KHÔNG phải "video" thô.
+        ["24/07/2026", "Bài video", "Video", "DONE", "x", "", "APPROVE", "tk-1", "[]", "",
+         "", "", "PENDING", ""],
+    ])
+
+    n = ss.ingest_content_from_sheet(board, db_path=db_path)
+    assert n == 1, "Type ghi nhãn hiển thị PHẢI vẫn khớp được content_output, không bị bỏ qua"
+    status = ps.read_content_status("tk-1", "video", db_path=db_path)
+    assert status["gate2"] == "APPROVE"
+
+
+def test_ingest_content_from_sheet_writes_back_edited_output(board, db_path):
+    """VIỆC 2 (2026-08-04, Lead) — Output là cột HYBRID DUY NHẤT: người có thể
+    sửa tay bài viết trên Sheet TRƯỚC khi duyệt Gate 2, sửa phải ghi NGƯỢC vào
+    content_output (version MỚI, giữ nguyên mọi field khác — status/notes/
+    facts — CHỈ đổi "output")."""
+    ps.write_raw("tk-1", {"context": "Bài 1"}, db_path=db_path)
+    ps.write_content_output("tk-1", "article", {"status": "DONE", "output": "bản gốc",
+                                                "notes": "ghi chú cũ", "facts": "[]"}, db_path=db_path)
+    ps.write_content_status("tk-1", "article", gate2="PENDING", db_path=db_path)
+
+    board._tab("CONTENT").set_rows([
+        CONTENT_HEADER,
+        ["24/07/2026", "Bài 1", "article", "DONE", "bản đã sửa tay", "", "PENDING", "tk-1", "[]", "",
+         "", "", "PENDING", ""],
+    ])
+    n = ss.ingest_content_from_sheet(board, db_path=db_path)
+    assert n == 1
+    out = ps.read_content_output("tk-1", "article", db_path=db_path)
+    assert out["output"] == "bản đã sửa tay"
+    assert out["status"] == "DONE" and out["notes"] == "ghi chú cũ", \
+        "sửa Output KHÔNG được đụng field khác của content_output"
+
+
+def test_ingest_content_from_sheet_no_writeback_when_output_unchanged(board, db_path):
+    """Round-trip render->ingest KHÔNG người đụng vào KHÔNG được tự sinh
+    version rác -- `_cell()` .strip() không được coi là 'đã sửa'."""
+    ps.write_raw("tk-1", {"context": "Bài 1"}, db_path=db_path)
+    ps.write_content_output("tk-1", "article", {"status": "DONE", "output": "bản gốc",
+                                                "notes": "", "facts": "[]"}, db_path=db_path)
+    ps.write_content_status("tk-1", "article", gate2="PENDING", db_path=db_path)
+
+    ss.render_content_to_sheet(board, db_path=db_path)
+    n = ss.ingest_content_from_sheet(board, db_path=db_path)
+    assert n == 0
+    history = ds.read_history("tk-1", "content_output", "article", db_path=db_path)
+    assert len(history) == 1, "KHÔNG được ghi version content_output mới khi Output không đổi"
+
+
+def test_ingest_content_from_sheet_skips_output_writeback_when_store_output_truncated(board, db_path):
+    """Bài DÀI hơn _OUTPUT_PREVIEW: Sheet CHỈ hiện bản CẮT + hậu tố giải
+    thích — so trực tiếp với bản store NGUYÊN VĂN sẽ luôn "khác nhau" giả.
+    ingest phải CHỦ ĐỘNG bỏ qua write-back trong ca này (không ghi đè bài dài
+    thành bản cụt)."""
+    long_output = "x" * 6000
+    ps.write_raw("tk-1", {"context": "Bài dài"}, db_path=db_path)
+    ps.write_content_output("tk-1", "article", {"status": "DONE", "output": long_output,
+                                                "notes": "", "facts": "[]"}, db_path=db_path)
+    ps.write_content_status("tk-1", "article", gate2="PENDING", db_path=db_path)
+
+    ss.render_content_to_sheet(board, db_path=db_path)
+    n = ss.ingest_content_from_sheet(board, db_path=db_path)
+    assert n == 0
+    out = ps.read_content_output("tk-1", "article", db_path=db_path)
+    assert out["output"] == long_output, "bản NGUYÊN VĂN trong store không được đụng tới"
+
+
+def test_ingest_content_from_sheet_ignores_stale_truncated_cell_as_edit(board, db_path):
+    """SỰ CỐ THẬT (2026-08-04, phát hiện ngay lượt sync_all() sản xuất đầu
+    tiên sau khi nâng _OUTPUT_PREVIEW 1500->5000) — Sheet còn giữ NGUYÊN bản
+    CẮT + hậu tố từ TRƯỚC khi deploy (ngưỡng cũ 1500, hoặc bất kỳ ngưỡng nào
+    trước đó); ingest chạy TRƯỚC render (sync_all()) nên đọc phải ảnh cũ này.
+    Nếu chỉ so độ dài (store hiện <= ngưỡng MỚI), ingest coi bản cắt CŨ là
+    "người vừa sửa tay" và GHI ĐÈ content_output thật bằng bản cụt — ĐÃ XẢY RA
+    THẬT, làm hỏng 17 bản ghi production, phải phục hồi tay từ version trước.
+    Khoá lại: cell mang hậu tố _TRUNCATION_SUFFIX KHÔNG BAO GIỜ được coi là
+    edit, bất kể so khớp độ dài ra sao."""
+    real_output = "y" * 2000   # NGẮN hơn ngưỡng mới (5000) -- sẽ lọt qua nếu chỉ xét độ dài
+    stale_sheet_cell = ("y" * 1500) + ss._TRUNCATION_SUFFIX   # ảnh CẮT sót từ lượt render TRƯỚC
+    ps.write_raw("tk-1", {"context": "Bài 1"}, db_path=db_path)
+    ps.write_content_output("tk-1", "article", {"status": "DONE", "output": real_output,
+                                                "notes": "", "facts": "[]"}, db_path=db_path)
+    ps.write_content_status("tk-1", "article", gate2="PENDING", db_path=db_path)
+
+    board._tab("CONTENT").set_rows([
+        CONTENT_HEADER,
+        ["24/07/2026", "Bài 1", "article", "DONE", stale_sheet_cell, "", "PENDING", "tk-1", "[]", "",
+         "", "", "PENDING", ""],
+    ])
+    n = ss.ingest_content_from_sheet(board, db_path=db_path)
+    assert n == 0, "cell mang hậu tố cắt KHÔNG được coi là người sửa tay"
+    out = ps.read_content_output("tk-1", "article", db_path=db_path)
+    assert out["output"] == real_output, "content_output thật KHÔNG được ghi đè bằng ảnh cắt cũ"
 
 
 def test_ingest_content_from_sheet_skips_when_content_output_missing(board, db_path):
@@ -500,6 +718,58 @@ def test_render_context_to_sheet_includes_output_type(board, db_path):
     grid = board._tab("CONTEXT").get_all_values()
     header, row = grid[0], grid[1]
     assert row[_header_index(header, OUTPUT_TYPE_COL)] == "Infographic, Video"
+
+
+def test_write_rows_skips_unchanged_rows_touches_only_changed_ones(board, db_path):
+    """Lead 02/08 ("Output Type bị khoá") — `_write_rows()` giờ SO KHỚP từng
+    dòng với Sheet hiện tại, CHỈ gọi update() cho dòng THẬT SỰ đổi. Dòng không
+    đổi giữa 2 lần render KHÔNG được đụng tới ô nào (tránh ghi đè ô "dropdown
+    chip multi-select" Output Type Lead tự bật tay qua UI — mỗi lần ghi giá
+    trị thô qua API vào ô chip, kể cả giá trị giống hệt, có thể làm rớt trạng
+    thái UI chip đó, xem docstring _write_rows())."""
+    ps.write_raw("tk-1", {"context": "Bài 1", "hook": "h", "source": "u1",
+                          "tickers": [], "group": "", "topic": ""}, db_path=db_path)
+    ps.write_gate_status("tk-1", gate1="APPROVE", output_type=["Article"], db_path=db_path)
+    ps.write_raw("tk-2", {"context": "Bài 2", "hook": "h", "source": "u2",
+                          "tickers": [], "group": "", "topic": ""}, db_path=db_path)
+    ps.write_gate_status("tk-2", gate1="APPROVE", output_type=["Video"], db_path=db_path)
+
+    ss.render_context_to_sheet(board, db_path=db_path)
+    ws = board._tab("CONTEXT")
+    baseline = ws.get_all_values()
+
+    calls: list[str] = []
+    orig_update = ws.update
+
+    def _spy_update(range_str, values, value_input_option="RAW"):
+        calls.append(range_str)
+        return orig_update(range_str, values, value_input_option=value_input_option)
+
+    ws.update = _spy_update
+
+    # Chỉ đổi tk-2 (Execute) -- tk-1 giữ nguyên hệt.
+    ps.write_gate_status("tk-2", execute="DONE", db_path=db_path)
+    ss.render_context_to_sheet(board, db_path=db_path)
+
+    header = baseline[0]
+    i_key = _header_index(header, "TopicKey")
+    row_of = {r[i_key]: i for i, r in enumerate(baseline[1:], start=2)}   # +2 = số dòng Sheet (1-based, có header)
+
+    # KHÔNG lệnh update() nào chạm dòng tk-1 (không đổi).
+    tk1_row_num = row_of["tk-1"]
+    for rng in calls:
+        start = int(rng[1:])
+        assert start != tk1_row_num, f"dòng tk-1 (không đổi) bị đụng: {rng}"
+
+    # Dòng tk-2 (CÓ đổi) phải được ghi lại.
+    tk2_row_num = row_of["tk-2"]
+    assert any(int(rng[1:]) == tk2_row_num for rng in calls), \
+        f"dòng tk-2 (có đổi) PHẢI được ghi, calls={calls}"
+
+    grid = ws.get_all_values()
+    i_ex = _header_index(header, "Execute")
+    new_row_of = {r[i_key]: r for r in grid[1:]}
+    assert new_row_of["tk-2"][i_ex] == "DONE"
 
 
 def test_render_context_to_sheet_output_type_shows_auto_when_never_set(board, db_path):
@@ -602,16 +872,18 @@ def test_ingest_context_from_sheet_bridges_new_topic_already_approved_bootstraps
 
 
 def test_ingest_context_from_sheet_does_not_bootstrap_when_gate1_still_pending(board, db_path):
-    """Chưa duyệt -> Execute vẫn là "Waiting" (từ 2026-07-28 đây là MẶC ĐỊNH
-    của mọi dòng, không còn để rỗng) nhưng TUYỆT ĐỐI không có job nào — Waiting
-    nghĩa là "hệ thống đã thấy dòng này", KHÔNG phải "sắp chạy dòng này"."""
+    """VIỆC Execute (2026-08-03, Lead) — ĐẢO LẠI quyết định 2026-07-28 (khi đó
+    ép "Waiting" cho MỌI dòng). Chưa duyệt -> Execute = "" (mới crawl, chưa có
+    gì để chờ) — "Waiting" giờ nghĩa CHÍNH XÁC là "đã duyệt, đang xếp hàng",
+    KHÔNG còn dùng cho "hệ thống đã thấy dòng này" nữa. TUYỆT ĐỐI không có
+    job nào."""
     board._tab("CONTEXT").set_rows([
         CONTEXT_HEADER,
         ["24/07/2026", "0.0", "0", "", "", "Bài chưa duyệt", "h", "u1", "PENDING", "", "", "", "", "tk-1"],
     ])
     ss.ingest_context_from_sheet(board, db_path=db_path)
     gate = ps.read_gate_status("tk-1", db_path=db_path)
-    assert gate["execute"] == "Waiting"
+    assert gate["execute"] == ""
     assert qs.list_queue(db_path=db_path) == []
 
 
@@ -709,7 +981,7 @@ def _content_rows_with_gate2(gate2: str, gate3: str = "PENDING"):
     return [
         CONTENT_HEADER,
         ["24/07/2026", "Bài 1", "infographic", "DONE", "{}", "", gate2, "tk-1", "[]", "",
-         "", gate3, ""],
+         "", "", gate3, ""],
     ]
 
 
@@ -834,7 +1106,11 @@ def _ctx_row(gate1="APPROVE", output_type="", key="tk-1", execute=""):
 
 def test_cancel_pending_when_gate1_leaves_approve(board, db_path):
     """Người RÚT duyệt -> job đang xếp hàng trở nên vô nghĩa (nó sẽ sinh nội
-    dung cho yêu cầu vừa bị bỏ). Phải huỷ, không để chạy."""
+    dung cho yêu cầu vừa bị bỏ). Phải huỷ, không để chạy.
+
+    VIỆC Execute (2026-08-03, Lead) — Execute về "" (không phải "Waiting")
+    sau khi rút duyệt: "Waiting" giờ nghĩa CHÍNH XÁC "đã duyệt, đang xếp
+    hàng" — rút duyệt thì không còn gì xếp hàng, "" (chưa duyệt) đúng hơn."""
     ps.write_raw("tk-1", {"context": "Bài 1"}, db_path=db_path)
     ps.write_gate_status("tk-1", gate1="APPROVE", execute="Waiting", db_path=db_path)
     qs.enqueue("tk-1", job_type="produce", db_path=db_path)
@@ -844,7 +1120,7 @@ def test_cancel_pending_when_gate1_leaves_approve(board, db_path):
 
     jobs = qs.list_queue(db_path=db_path)
     assert [j["status"] for j in jobs] == ["cancelled"]
-    assert ps.read_gate_status("tk-1", db_path=db_path)["execute"] == "Waiting"
+    assert ps.read_gate_status("tk-1", db_path=db_path)["execute"] == ""
 
 
 def test_change_output_type_cancels_old_request_and_creates_new(board, db_path):
@@ -942,20 +1218,28 @@ def test_reconcile_does_not_resurrect_finished_or_queued_work(board, db_path):
 def test_render_preserves_original_timestamp_not_today(board, db_path):
     """BUG THẬT (Lead báo 2026-07-29): render KHÔNG truyền `ts` -> context_row
     lấy now() -> MỖI LƯỢT RENDER ghi đè Timestamp thành hôm nay. Mọi dòng crawl
-    28/07 hoá 29/07, mất hẳn khả năng phân biệt tin theo ngày."""
-    ps.write_raw("tk-1", {"context": "Bài cũ", "timestamp": "28/07/2026"}, db_path=db_path)
+    hoá thành hôm nay, mất hẳn khả năng phân biệt tin theo ngày.
+
+    Ngày dùng ở đây LUÔN tương đối với `date.today()` (KHÔNG hard-code
+    "28/07/2026") -- ngày cứng trôi ra ngoài cửa sổ `display_days` mặc định (7
+    ngày) khi "hôm nay" của môi trường chạy test tiến xa hơn ngày viết test,
+    khiến dòng bị `_visible_rows()` ẩn đi và assert dưới sai kiểu IndexError,
+    không phải sai logic Timestamp đang test."""
+    from datetime import date, timedelta
+    old_day = (date.today() - timedelta(days=1)).strftime("%d/%m/%Y")
+    ps.write_raw("tk-1", {"context": "Bài cũ", "timestamp": old_day}, db_path=db_path)
     ps.write_gate_status("tk-1", gate1="PENDING", db_path=db_path)
     ps.write_content_output("tk-1", "article", {"status": "DONE", "output": "x",
                                                 "notes": "", "facts": "[]",
-                                                "timestamp": "28/07/2026"}, db_path=db_path)
+                                                "timestamp": old_day}, db_path=db_path)
 
     ss.render_context_to_sheet(board, db_path=db_path)
     ss.render_content_to_sheet(board, db_path=db_path)
 
     ctx = board._tab("CONTEXT").get_all_values()
-    assert ctx[1][_header_index(ctx[0], "Timestamp")] == "28/07/2026"
+    assert ctx[1][_header_index(ctx[0], "Timestamp")] == old_day
     con = board._tab("CONTENT").get_all_values()
-    assert con[1][_header_index(con[0], "Timestamp")] == "28/07/2026"
+    assert con[1][_header_index(con[0], "Timestamp")] == old_day
 
 
 def test_ingest_stores_sheet_timestamp_for_new_topic(board, db_path):
@@ -979,24 +1263,24 @@ def _seed_full_state(db_path):
     """Dựng 1 trạng thái ĐẦY ĐỦ mọi loại dữ liệu người + máy."""
     ps.write_raw("tk-a", {"context": "Bài A", "hook": "hook A", "source": "https://cafef.vn/a.chn",
                           "tickers": ["FPT", "ACB"], "group": "CoPhieu", "topic": "CoPhieu",
-                          "score": 7, "hot_pct": 62.0, "timestamp": "28/07/2026"}, db_path=db_path)
+                          "score": 7, "hot_pct": 62.0, "timestamp": _SEED_YESTERDAY}, db_path=db_path)
     ps.write_gate_status("tk-a", gate1="APPROVE", execute="DONE", notes="ghi chú người",
                          output_type=["Article", "Infographic"], db_path=db_path)
     ps.write_content_output("tk-a", "article", {"status": "DONE", "output": "x" * 3000,
                                                 "notes": "", "facts": "[]",
-                                                "timestamp": "29/07/2026",
-                                                "published_at": "28/07/2026"}, db_path=db_path)
+                                                "timestamp": _SEED_TODAY,
+                                                "published_at": _SEED_YESTERDAY}, db_path=db_path)
     ps.write_content_status("tk-a", "article", gate2="APPROVE", gate3="APPROVE",
                             social_link="https://fb.com/p/1", posting_status="Đã đăng",
                             asset_url="https://drive.google.com/file/d/X/view", db_path=db_path)
     ps.write_content_output("tk-a", "infographic", {"status": "SKIPPED", "output": "",
                                                     "notes": "router từ chối", "facts": "[]",
-                                                    "timestamp": "29/07/2026"}, db_path=db_path)
+                                                    "timestamp": _SEED_TODAY}, db_path=db_path)
     ps.write_content_status("tk-a", "infographic", gate2="PENDING", db_path=db_path)
 
     ps.write_raw("tk-b", {"context": "Bài B", "hook": "hook B", "source": "https://vietstock.vn/b",
                           "tickers": [], "group": "ChinhSach", "topic": "ChinhSach",
-                          "score": 3, "hot_pct": 20.0, "timestamp": "29/07/2026"}, db_path=db_path)
+                          "score": 3, "hot_pct": 20.0, "timestamp": _SEED_TODAY}, db_path=db_path)
     ps.write_gate_status("tk-b", gate1="PENDING", execute="Waiting", db_path=db_path)
 
 
@@ -1035,17 +1319,18 @@ def test_restore_keeps_every_user_owned_field(board, db_path):
     assert row_a[_header_index(ctx[0], GATE1_COL)] == "APPROVE"
     assert row_a[_header_index(ctx[0], "Notes")] == "ghi chú người"
     assert row_a[_header_index(ctx[0], OUTPUT_TYPE_COL)] == "Article, Infographic"
-    assert row_a[_header_index(ctx[0], "Timestamp")] == "28/07/2026"
+    assert row_a[_header_index(ctx[0], "Timestamp")] == _SEED_YESTERDAY
 
     con = board._tab("CONTENT").get_all_values()
-    art = next(r for r in con[1:] if r[_header_index(con[0], "Type")] == "article")
+    art = next(r for r in con[1:] if r[_header_index(con[0], "Type")] == "Article")   # VIỆC 3: nhãn hiển thị
     assert art[_header_index(con[0], GATE2_COL)] == "APPROVE"
     assert art[_header_index(con[0], GATE3_COL)] == "APPROVE"
     assert art[_header_index(con[0], "Social Link")] == "https://fb.com/p/1"
     assert art[_header_index(con[0], "Posting Status")] == "Đã đăng"
     assert "drive.google.com" in art[_header_index(con[0], "AssetPath")]
-    # Ngày XỬ LÝ hiển thị ở cột Timestamp (KHÁC ngày đăng — 2 mốc tách bạch).
-    assert art[_header_index(con[0], "Timestamp")] == "29/07/2026"
+    # VIỆC 3.1 (2026-08-04): Timestamp CONTENT giờ ưu tiên published_at (ngày
+    # ĐĂNG BÀI GỐC, cùng ý nghĩa cột CONTEXT) — KHÁC "ngày xử lý" cũ.
+    assert art[_header_index(con[0], "Timestamp")] == _SEED_YESTERDAY
 
 
 def test_store_keeps_both_publish_and_produce_dates(db_path):
@@ -1054,8 +1339,8 @@ def test_store_keeps_both_publish_and_produce_dates(db_path):
     sản xuất vào ngày sau. Chỉ lưu 1 mốc là mất khả năng phân biệt."""
     _seed_full_state(db_path)
     rec = ps.read_content_output("tk-a", "article", db_path=db_path)
-    assert rec["timestamp"] == "29/07/2026"       # ngày xử lý
-    assert rec["published_at"] == "28/07/2026"    # ngày đăng bài gốc
+    assert rec["timestamp"] == _SEED_TODAY        # ngày xử lý
+    assert rec["published_at"] == _SEED_YESTERDAY  # ngày đăng bài gốc
     assert rec["timestamp"] != rec["published_at"]
 
 
@@ -1194,6 +1479,27 @@ def test_context_rows_sorted_into_day_blocks_newest_at_bottom(board, db_path):
     grid = board._tab("CONTEXT").get_all_values()
     i_ts = _header_index(grid[0], "Timestamp")
     assert [r[i_ts] for r in grid[1:]] == [older, older, newer, newer]
+
+
+def test_context_same_day_rows_keep_crawl_order_not_hot_pct_or_alphabetical(board, db_path):
+    """SỬA LỖI THẬT (2026-08-03, Lead: "dữ liệu trong cùng ngày bị xếp lẫn
+    lộn") -- BỎ tie-break theo Hot% (không phản ánh thứ tự crawl); topic_key
+    ở đây CỐ Ý đặt ngược alphabet ("zzz" < "aaa" theo THỨ TỰ GHI) để phân biệt
+    rõ 2 khả năng sai: nếu còn sort theo topic_key (list_topics() ORDER BY
+    topic_key) thì "aaa" sẽ lên trước "zzz" dù "zzz" crawl trước -- sai. Đúng
+    phải là first_created_at() (bản ghi ĐẦU TIÊN) -> "zzz" trước "aaa"."""
+    from datetime import date
+    day = date.today().strftime("%d/%m/%Y")
+    ps.write_raw("zzz", {"context": "zzz", "timestamp": day, "hot_pct": 1.0}, db_path=db_path)
+    ps.write_gate_status("zzz", gate1="PENDING", db_path=db_path)
+    ps.write_raw("aaa", {"context": "aaa", "timestamp": day, "hot_pct": 99.0}, db_path=db_path)
+    ps.write_gate_status("aaa", gate1="PENDING", db_path=db_path)
+
+    ss.render_context_to_sheet(board, db_path=db_path)
+    grid = board._tab("CONTEXT").get_all_values()
+    i_ctx = _header_index(grid[0], "Context")
+    assert [r[i_ctx] for r in grid[1:]] == ["zzz", "aaa"], \
+        "phải theo thứ tự CRAWL (zzz trước), không theo Hot% (aaa cao hơn) hay alphabet"
 
 
 def test_context_hides_rows_older_than_display_days(board, db_path):

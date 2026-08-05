@@ -19,6 +19,29 @@ brand:
   # wire text/màu; nhúng ảnh logo thật vào SVG là việc kế tiếp khi có file).
   logo_path: null
 
+  # VIỆC brand-kit mới (2026-08-04, Lead: logo/brand-kit cũ nhoè màu) — bản
+  # thay thế THẬT, dùng cho brand_stamp.py::overlay_brand_full_canvas() (tuyến
+  # ai_full, ĐANG sản xuất) và src/twmkt/render/brand_stamp.py's _default_
+  # logo_path(). "path" tương đối GỐC REPO. width_ratio = bề rộng logo / bề
+  # rộng ảnh cuối (thay height_ratio cũ — brand_kit có thêm dòng chữ tagline
+  # nên neo theo BỀ RỘNG cho ổn định hình dạng, chiều cao suy theo tỷ lệ khung
+  # ảnh gốc). "active_asset" chọn asset nào đang DÙNG THẬT — đổi giá trị này
+  # để chuyển giữa "brand_kit" (đủ chữ, MẶC ĐỊNH theo yêu cầu Lead — ưu tiên
+  # brand-kit thay logo cũ) và "standard_icon" (chỉ biểu tượng, gọn hơn) mà
+  # KHÔNG cần sửa code. Chỉ cần lưu bản MÀU "navy-gold" — theme sáng/tối tự tô
+  # lại phần màu trung tính (navy) theo màu chủ đạo của theme lúc render (xem
+  # overlay_brand_full_canvas(), nhánh `theme in ("bright","light")`), phần
+  # vàng đồng (chroma cao) giữ nguyên mọi theme — KHÔNG cần bản "white-gold"
+  # riêng cho theme tối (vẫn giữ file đó trong assets/ làm bản tham chiếu).
+  active_asset: "brand_kit"
+  assets:
+    brand_kit:
+      path: "assets/fva-brand-kit-navy-gold-transparent.png"
+      width_ratio: 0.178
+    standard_icon:
+      path: "assets/fva-icon-navy-gold-transparent.png"
+      width_ratio: 0.148
+
   # Màu ước theo logo đã nhận (nền navy đậm, chữ trắng bạc, nhấn vàng đồng) —
   # CHƯA lấy mã hex CHÍNH XÁC từ file gốc (chỉ có ảnh xem qua chat, chưa có
   # asset lưu đĩa để soi màu pixel-chính-xác). Cập nhật lại khi có file logo
@@ -29,6 +52,46 @@ brand:
     primary: "#C9973E"      # vàng đồng (nhấn số liệu/emphasis) — ước theo logo
     text: "#F5F5F0"         # chữ chính (trắng ngà)
     text_muted: "#9FB3C8"   # chữ phụ/nhạt hơn
+
+  # Infographic AI chỉ đọc MỤC DESIGN TOKENS MÀU từ hai file theme dưới đây.
+  # Bố cục D1-D6/L1-L7 trong file theme KHÔNG được dùng: rules nội dung cho
+  # phép một hoặc nhiều chủ thể, nên renderer chọn layout trung lập theo dữ
+  # liệu. Đổi màu = sửa file theme; đổi theme mặc định/mapping = sửa tại đây.
+  infographic_theme:
+    default: "bright"
+    files:
+      dark: "prompts/themes/Infographic_Theme_Dark.md"
+      light: "prompts/themes/Infographic_Theme_Light.md"
+      bright: "prompts/themes/Infographic_Theme_Light.md"
+    content_map:
+      daily: "bright"
+      news: "bright"
+      analysis: "bright"
+      policy: "bright"
+      qualitative: "bright"
+
+  # Tinh chỉnh brand stamp, dùng chung cho Dark/Light. Logo vẫn nằm trọn
+  # trong TOP_PAD; footer vẫn ở band đáy riêng, không overlay lên nội dung.
+  infographic_stamp:
+    logo:
+      left_ratio: 0.04
+      vertical_bias: 0.60
+    footer:
+      text_scale: 0.75
+
+  # Tuyến ai_full mới: ảnh GPT giữ nguyên full-canvas; lớp deterministic
+  # overlay logo + metadata trực tiếp, không matting/khung đáy.
+  infographic_overlay:
+    logo:
+      right_ratio: 0.035
+      top_ratio: 0.025
+      height_ratio: 0.055
+    metadata:
+      side_ratio: 0.035
+      bottom_ratio: 0.012
+      image_body_font_ratio: 0.028
+      font_scale: 0.80
+      backdrop_opacity: 185
 
   font_family: "Arial, 'Segoe UI', sans-serif"
 

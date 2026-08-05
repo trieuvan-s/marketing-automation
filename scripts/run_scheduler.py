@@ -21,12 +21,25 @@ chạy 1 lịch/lần gọi — hợp để đăng ký riêng lẻ vào OS Task 
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
+# SỬA LỖI THẬT (2026-08-04, Lead: "lịch crawl không hoạt động, chưa thấy dữ
+# liệu mới") -- Task Scheduler chạy tiến trình với cwd MẶC ĐỊNH (thường
+# System32), KHÔNG PHẢI thư mục repo. `twmkt.config.load_settings()`/
+# `_load_dotenv()` đọc "config/settings.yaml"/"secrets/.env" theo ĐƯỜNG DẪN
+# TƯƠNG ĐỐI (không neo Path(__file__)) -- chạy dưới cwd sai làm 2 file này
+# "không tìm thấy", script crash ngay từ đầu (exit code 1, xác nhận qua
+# `Get-ScheduledTaskInfo`: cả 3 task đã tới lượt chạy hôm nay đều
+# LastTaskResult=1). Ép cwd = REPO_ROOT NGAY ĐẦU (trước bất kỳ import nào
+# đọc config) để entry point này chạy đúng bất kể ai/gì khởi động tiến
+# trình (Task Scheduler, cron, tay) -- các entry point khác vốn không cần
+# vì người vận hành luôn tự `cd` vào repo trước khi chạy tay.
+os.chdir(REPO_ROOT)
 
 from twmkt._encoding import ensure_utf8_stdio  # noqa: E402
 

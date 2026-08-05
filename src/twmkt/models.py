@@ -38,6 +38,11 @@ class ContentFormat(str, Enum):
     # `VIDEO_SCRIPT` (định danh Python), chỉ .value đổi.
     VIDEO_SCRIPT = "video"
     NEWSLETTER = "newsletter"
+    # VIỆC 1 (2026-08-03, Lead) — Long-Article dùng CHUNG đường sinh với ARTICLE
+    # (agents/writer.py::run_writer), chỉ khác bộ rules nạp (nền + bổ sung, xem
+    # agents/production._load_composer_rules) và độ dài kỳ vọng do rules đó chi
+    # phối — KHÔNG dựng producer riêng, KHÔNG câu trúc dữ liệu riêng.
+    LONG_ARTICLE = "long_article"
 
 
 class Stage(str, Enum):

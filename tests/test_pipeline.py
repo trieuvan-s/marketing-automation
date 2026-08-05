@@ -984,9 +984,12 @@ def test_sheets_context_row_column_order():
     assert d["Source"] == "http://u\n(+2 báo)\nhttp://u2\nhttp://u3"
     assert "Publisher" not in d and "Field" not in d and "Sources" not in d and "Use" not in d
     assert d["Duyệt Context"] == "PENDING"   # Sheet UI cleanup Phase 3: trước đây "Status"
-    # 2026-07-28: mặc định "Waiting", KHÔNG còn rỗng — ô trống trông như "hệ
-    # thống chưa thấy dòng này" (xem sheets_board.EXECUTE_VALUES).
-    assert d["Execute"] == "Waiting"
+    # VIỆC Execute (2026-08-03, Lead) — ĐẢO LẠI quyết định 2026-07-28 (khi đó
+    # ép "Waiting" cho MỌI dòng để tránh trông như "hệ thống chưa thấy dòng
+    # này"). Nay "" = mới crawl/CHƯA qua Gate 1 (khác "Waiting" = ĐÃ duyệt,
+    # đang xếp hàng) — context_row() không nhận status=APPROVE ở test này nên
+    # Execute mặc định phải rỗng.
+    assert d["Execute"] == ""
     assert d["tickers"] == "FPT, HPG"
     assert d["Notes"] == ""
     assert d["TopicKey"] == "abc123"
@@ -1018,13 +1021,21 @@ def test_build_format_requests_covers_features_and_is_deterministic():
     from twmkt.sheets_board import (
         build_format_requests, TabMeta, TABS,
         SOURCES_HEADER, CONTEXT_HEADER, CONTENT_HEADER, OUTPUT_TYPE_VALUES,
+        GATE1_COL, GATE2_COL, GATE3_COL,
     )
     tabs = []
     for i, (name, header) in enumerate(TABS.items()):
-        # CONTEXT có sẵn 1 banding + 3 conditional -> phải sinh request XÓA.
+        # CONTEXT có sẵn 1 banding + 3 conditional (ĐỀU nằm ở cột CODE quản —
+        # Duyệt Context/Execute/Score) -> phải sinh request XÓA cho cả 3 (SỬA
+        # LỖI THẬT 2026-08-04: giờ chỉ xoá rule ở cột managed, xem test riêng
+        # test_build_format_requests_keeps_unmanaged_conditional_format_rules
+        # cho ca rule Lead tự thêm ở cột KHÁC không bị đụng).
         if name == "CONTEXT":
+            low_hdr = [h.strip().lower() for h in header]
+            existing_cols = [low_hdr.index(GATE1_COL.lower()), low_hdr.index("execute"),
+                             low_hdr.index("score")]
             tabs.append(TabMeta(name, header, i, n_rows=5, banding_ids=[7],
-                                cond_format_count=3))
+                                cond_format_cols=existing_cols))
         else:
             tabs.append(TabMeta(name, header, i, n_rows=3))
     reqs = build_format_requests(tabs)
@@ -1034,8 +1045,9 @@ def test_build_format_requests_covers_features_and_is_deterministic():
               "updateBorders", "addBanding", "setDataValidation",
               "addConditionalFormatRule"):
         assert k in kinds, f"thiếu request {k}"
-    # idempotent: banding cũ + rule cũ của CONTEXT bị xóa trước khi thêm lại
-    # (CONTENT.cond_format_count=0 trong test này -> không sinh xóa cho CONTENT).
+    # idempotent: banding cũ + rule cũ của CONTEXT (đều ở cột managed) bị xóa
+    # trước khi thêm lại (CONTENT.cond_format_cols=[] trong test này -> không
+    # sinh xóa cho CONTENT).
     assert kinds.count("deleteBanding") == 1
     assert kinds.count("deleteConditionalFormatRule") == 3
     # CONTEXT: Duyệt Context(PENDING/APPROVE/REJECT/DELETE=4 — DELETE thêm
@@ -1044,11 +1056,19 @@ def test_build_format_requests_covers_features_and_is_deterministic():
     # 2026-07-28 — xem sheets_board.EXECUTE_VALUES) + score + hot% => 3+6+1+1 = 11
     # CONTENT: Duyệt Content(APPROVE/PENDING/REJECT=3, trước đây "Approve(gate 2)") +
     # Duyệt Public (Phase 1.3, trước đây "Gate3", APPROVE/PENDING/REJECT=3) => 12+3+3 = 18
+    # (Conditional-formatting màu vẫn giữ NGUYÊN cho cả 3 cổng dù data
+    # validation đã gỡ bên dưới — tô màu theo TEXT không đụng dropdown/chip.)
     assert kinds.count("addConditionalFormatRule") == 18
     # checkbox: SOURCES.Enable + PROMPTS.Enable (Use đã xoá, KHÔNG còn checkbox CONTEXT)
-    # dropdown: CONTEXT.Duyệt Context + CONTENT.Duyệt Content
-    # + CONTENT.Duyệt Public (Phase 1.3) + CONTENT.Posting Status => 4
-    # CONTENT.Status + CONTENT.Type GỠ dropdown 2026-07-28 (máy-ghi, read-only).
+    # dropdown CÒN LẠI: CHỈ CONTENT.Posting Status (khâu publish chưa xây, chưa
+    # ai bật tay Dropdown Chip cho cột này).
+    # CONTEXT.Duyệt Context + CONTENT.Duyệt Content + CONTENT.Duyệt Public
+    # KHÔNG còn ghi validation (Trung 02/08, cùng lý do Output Type) — cả 3 cột
+    # này Trung đã tự bật tay Dropdown (Chip, 1 giá trị) qua UI Sheets, code ghi
+    # đè mỗi lượt --setup sẽ reset mất cấu hình chip đó.
+    # CONTENT.Status + CONTENT.Type KHÔNG còn ghi validation (SỬA LỖI THẬT
+    # 2026-08-04 — xem chi tiết bên dưới): Lead tự bật tay Dropdown Chip có
+    # màu cho 2 cột này, code ghi đè (kể cả "xoá rule") reset mất cấu hình đó.
     # CONTEXT.Output Type KHÔNG còn ghi validation (2026-07-28): ô đó là
     # MULTI-SELECT Lead bật tay qua UI, code ghi đè là XOÁ cấu hình đó và API
     # không dựng lại được.
@@ -1057,20 +1077,34 @@ def test_build_format_requests_covers_features_and_is_deterministic():
     # có mặt trong `sd` nhưng KHÔNG đếm vào ONE_OF_LIST.
     sd = [r["setDataValidation"] for r in reqs if "setDataValidation" in r]
     conds = [v["rule"]["condition"]["type"] for v in sd if "rule" in v]
-    assert conds.count("BOOLEAN") == 2 and conds.count("ONE_OF_LIST") == 4
+    assert conds.count("BOOLEAN") == 2 and conds.count("ONE_OF_LIST") == 1
 
-    # 3 request XOÁ validation (không "rule") cho 3 cột read-only:
-    # CONTEXT.Execute + CONTENT.Status + CONTENT.Type.
+    # 1 request XOÁ validation (không "rule") cho CONTEXT.Execute — CONTENT.
+    # Status/Type KHÔNG còn nhánh xoá nữa (SỬA LỖI THẬT 2026-08-04, Lead báo
+    # "Type + Status vẫn bị ghi đè thiết lập màu": Lead đã tự bật tay Dropdown
+    # Chip có màu cho 2 cột này qua Sheet UI — gửi setDataValidation dù KHÔNG
+    # kèm rule vẫn xoá mất chip đó, cùng lý do đã áp dụng cho Duyệt Context/
+    # Output Type/3 cổng duyệt bên dưới).
     low_ctx_hdr = [c.strip().lower() for c in CONTEXT_HEADER]
     low_con_hdr = [c.strip().lower() for c in CONTENT_HEADER]
     clears = [v for v in sd if "rule" not in v]
-    assert len(clears) == 3
+    assert len(clears) == 1
     # So theo CHỈ SỐ CỘT, không hard-code sheetId (id do TabMeta trong test này
     # cấp phát, đổi là test gãy oan).
     cleared_cols = sorted(v["range"]["startColumnIndex"] for v in clears)
-    assert cleared_cols == sorted([low_ctx_hdr.index("execute"),
-                                   low_con_hdr.index("status"),
-                                   low_con_hdr.index("type")])
+    assert cleared_cols == [low_ctx_hdr.index("execute")]
+
+    # CONTENT.Status/Type: TUYỆT ĐỐI KHÔNG được có setDataValidation nào nữa
+    # (cùng lý do Output Type/3 cổng duyệt — Lead tự cấu hình chip màu tay).
+    # Lọc CẢ sheetId (không chỉ cột) — cột cùng chỉ số có thể trùng tình cờ
+    # với 1 tab KHÁC (vd SOURCES.Enable) nếu chỉ so cột suông.
+    content_sid = list(TABS.keys()).index("CONTENT")
+    status_type_cols = [low_con_hdr.index("status"), low_con_hdr.index("type")]
+    status_type_reqs = [r for r in reqs
+                        if "setDataValidation" in r
+                        and r["setDataValidation"]["range"]["sheetId"] == content_sid
+                        and r["setDataValidation"]["range"]["startColumnIndex"] in status_type_cols]
+    assert status_type_reqs == [], "KHÔNG được ghi validation lên cột Status/Type"
 
     # Output Type: TUYỆT ĐỐI KHÔNG được có setDataValidation nào (2026-07-28).
     # Ô này là MULTI-SELECT Lead bật tay qua UI Sheets — API v4 không tạo được
@@ -1083,12 +1117,52 @@ def test_build_format_requests_covers_features_and_is_deterministic():
                         and r["setDataValidation"]["range"]["startColumnIndex"] == output_type_col]
     assert output_type_reqs == [], "KHÔNG được ghi validation lên cột Output Type"
 
+    # 3 cổng duyệt (Duyệt Context/Duyệt Content/Duyệt Public): TUYỆT ĐỐI KHÔNG
+    # được có setDataValidation nào nữa (Trung 02/08, CÙNG lý do Output Type ở
+    # trên — Trung đã tự bật tay Dropdown Chip 1-giá-trị cho cả 3 cột qua UI
+    # Sheets, ghi validation đè lên mỗi lượt --setup sẽ reset mất cấu hình đó).
+    low_con = [c.lower() for c in CONTENT_HEADER]
+    gate_cols = [low_ctx.index(GATE1_COL.lower()),
+                low_con.index(GATE2_COL.lower()), low_con.index(GATE3_COL.lower())]
+    gate_reqs = [r for r in reqs if "setDataValidation" in r
+                and r["setDataValidation"]["range"]["startColumnIndex"] in gate_cols]
+    assert gate_reqs == [], f"KHÔNG được ghi validation lên 3 cổng duyệt: {gate_reqs}"
+
     # determinism = idempotent theo cấu trúc
     assert build_format_requests(tabs) == reqs
     assert SOURCES_HEADER[0].lower() == "enable"
     low = [c.lower() for c in CONTEXT_HEADER]
     assert {"score", "hot%", "group", "context", "hook", "source", "duyệt context", "execute"} <= set(low)
     assert "use" not in low and low[0] == "timestamp"
+
+
+def test_build_format_requests_keeps_unmanaged_conditional_format_rules():
+    """SỬA LỖI THẬT (2026-08-04, Lead báo "Type + Status vẫn bị ghi đè thiết
+    lập màu trên sheet UI") — TRƯỚC ĐÂY build_format_requests() xoá SẠCH MỌI
+    conditional-format rule đang có trên CONTEXT/CONTENT (chỉ đếm SỐ LƯỢNG qua
+    `cond_format_count`), kể cả rule Lead tự thêm tay cho cột KHÁC (vd tô màu
+    Type/Status) — code không quản cột đó nên không dựng lại được, mất vĩnh
+    viễn mỗi lượt ensure_tabs() phát hiện header đổi. Khoá lại: rule nằm ở cột
+    KHÔNG thuộc danh sách CODE quản (Gate1/execute/score/hot% CONTEXT;
+    Gate2/Gate3 CONTENT) phải được GIỮ NGUYÊN — không sinh deleteConditional
+    FormatRule cho index của nó."""
+    from twmkt.sheets_board import build_format_requests, TabMeta, CONTENT_HEADER
+
+    low_con_hdr = [c.strip().lower() for c in CONTENT_HEADER]
+    type_col = low_con_hdr.index("type")
+    status_col = low_con_hdr.index("status")
+    gate2_col = low_con_hdr.index("duyệt content")
+
+    # 3 rule hiện có trên CONTENT: index 0 = Type (Lead tự thêm), index 1 =
+    # Status (Lead tự thêm), index 2 = Duyệt Content (CODE quản).
+    t = TabMeta(name="CONTENT", header=list(CONTENT_HEADER), sheet_id=1, n_rows=3,
+               cond_format_cols=[type_col, status_col, gate2_col])
+    reqs = build_format_requests([t])
+    deletes = [r["deleteConditionalFormatRule"]["index"] for r in reqs
+              if "deleteConditionalFormatRule" in r]
+    # CHỈ index 2 (Duyệt Content, CODE quản) bị xoá — index 0/1 (Type/Status,
+    # Lead tự thêm) PHẢI giữ nguyên, không nằm trong danh sách xoá.
+    assert deletes == [2], f"chỉ được xoá rule ở cột CODE quản, nhận: {deletes}"
 
 
 def test_format_board_smoke_no_network():
@@ -1104,13 +1178,27 @@ def test_format_board_smoke_no_network():
         def fetch_sheet_metadata(self, params=None): return self._meta
         def batch_update(self, body): self.last_body = body; return {}
 
+    from twmkt.sheets_board import GATE1_COL
+
     sheets = []
     for i, name in enumerate(TABS):
         s = {"properties": {"sheetId": i, "title": name,
                             "gridProperties": {"rowCount": 1000}}}
         if name == "CONTEXT":     # có sẵn banding + rule -> nhánh idempotent
             s["bandedRanges"] = [{"bandedRangeId": 42}]
-            s["conditionalFormats"] = [{}, {}]
+            # SỬA LỖI THẬT (2026-08-04) — rule PHẢI có "ranges" thật (cột
+            # Duyệt Context, CODE quản) để build_format_requests() (giờ chỉ
+            # xoá rule ở cột managed, xem TabMeta.cond_format_cols) còn nhận
+            # ra đây là rule cần xoá; rule rỗng "{}" cũ không tra được cột nên
+            # bị bỏ qua an toàn, làm mất nhánh deleteConditionalFormatRule
+            # khỏi smoke test này.
+            gate1_col = [h.strip().lower() for h in TABS["CONTEXT"]].index(GATE1_COL.lower())
+            s["conditionalFormats"] = [
+                {"ranges": [{"sheetId": i, "startColumnIndex": gate1_col,
+                            "endColumnIndex": gate1_col + 1}]},
+                {"ranges": [{"sheetId": i, "startColumnIndex": gate1_col,
+                            "endColumnIndex": gate1_col + 1}]},
+            ]
         sheets.append(s)
 
     board = SheetsBoard(spreadsheet_id="SID", creds_path="creds")
@@ -1125,6 +1213,39 @@ def test_format_board_smoke_no_network():
     assert {"updateSheetProperties", "repeatCell", "updateBorders", "addBanding",
             "setDataValidation", "addConditionalFormatRule", "deleteBanding",
             "deleteConditionalFormatRule"} <= kinds
+
+
+def test_build_format_requests_never_adds_native_banding_on_context_or_content():
+    """SỰ CỐ THẬT (2026-08-04, Lead báo "block dữ liệu theo ngày lại mất") —
+    CONTEXT/CONTENT tô NỀN THEO NGÀY/TOPICKEY riêng bằng `repeatCell`
+    (_band_day() -> band_context_by_day()/regroup_and_band_content(), gọi
+    mỗi lượt render_*_to_sheet()) -- nhưng "banding" NGUYÊN SINH Google
+    Sheets (addBanding) LUÔN HIỂN THỊ ĐÈ lên màu nền cell thường trong phạm
+    vi của nó. Mỗi lần format_board() chạy (ensure_tabs() dò header đổi,
+    hoặc gọi tay) từng thêm 1 banding trắng/xanh nhạt CHUNG cho MỌI tab kể
+    cả CONTEXT/CONTENT, che mất toàn bộ khối màu ngày vừa tô dù giá trị
+    backgroundColor từng cell vẫn đúng bên dưới. Khoá lại: CONTEXT/CONTENT
+    KHÔNG BAO GIỜ được addBanding (banding CŨ vẫn được dọn qua deleteBanding
+    nếu còn sót từ trước khi sửa); các tab KHÁC (không có nền tự tô) vẫn giữ
+    banding xen kẽ như cũ để dễ đọc."""
+    from twmkt.sheets_board import build_format_requests, TabMeta, TABS
+
+    tabs = [TabMeta(name, header, i, n_rows=5, banding_ids=[7] if name in ("CONTEXT", "CONTENT") else [])
+           for i, (name, header) in enumerate(TABS.items())]
+    reqs = build_format_requests(tabs)
+
+    context_sid = list(TABS.keys()).index("CONTEXT")
+    content_sid = list(TABS.keys()).index("CONTENT")
+    add_banding_sids = {r["addBanding"]["bandedRange"]["range"]["sheetId"]
+                        for r in reqs if "addBanding" in r}
+    assert context_sid not in add_banding_sids, "CONTEXT KHÔNG được addBanding -- đè mất màu ngày"
+    assert content_sid not in add_banding_sids, "CONTENT KHÔNG được addBanding -- đè mất màu TopicKey/ngày"
+    # banding CŨ (sót từ trước khi sửa) vẫn phải được dọn cho cả 2 tab.
+    delete_banding_ids = [r["deleteBanding"]["bandedRangeId"] for r in reqs if "deleteBanding" in r]
+    assert delete_banding_ids.count(7) == 2, "vẫn phải xoá banding cũ sót lại của CONTEXT lẫn CONTENT"
+    # tab KHÁC (vd SOURCES) vẫn giữ banding như cũ.
+    sources_sid = list(TABS.keys()).index("SOURCES")
+    assert sources_sid in add_banding_sids, "tab không tự tô màu vẫn phải giữ banding xen kẽ"
 
 
 def test_write_context_dedup_by_url():
@@ -2356,7 +2477,7 @@ def test_content_topic_keys_reads_topickey_column_not_context():
         content_row(context="Cùng tiêu đề", type_="article", status="DONE", output="y", topic_key="KEY-B"),
     ]
     keys, missing = content_topic_keys(CONTENT_HEADER, rows)
-    assert keys == {("KEY-A", "article"), ("KEY-B", "article")}
+    assert keys == {("KEY-A", "Article"), ("KEY-B", "Article")}   # VIỆC 3: Type ghi NHÃN hiển thị
     assert missing == []
 
 
@@ -2376,7 +2497,7 @@ def test_content_topic_keys_survives_merge_blank_context_zero_orphan():
         content_row(context="", type_="infographic", status="DONE", output="c", topic_key=KEY, ts=""),
     ]
     keys, missing = content_topic_keys(CONTENT_HEADER, rows)
-    assert keys == {(KEY, "article"), (KEY, "video"), (KEY, "infographic")}
+    assert keys == {(KEY, "Article"), (KEY, "Video"), (KEY, "Infographic")}   # VIỆC 3: Type ghi NHÃN hiển thị
     assert missing == []
 
 
@@ -2569,18 +2690,25 @@ def test_content_day_border_ranges_splits_topic_group_across_days():
     assert ranges == [(1, 3), (3, 5)]
 
 
-def test_regroup_and_band_content_reorders_and_sends_band_requests():
-    """Sheet UI cleanup Phase 1 — regroup_and_band_content THAY regroup_and_
-    merge_content cũ: sắp lại CONTENT (TopicKey liền kề) + gửi repeatCell (tô
-    nền, alternating theo thứ tự dải) + updateBorders (viền trên đậm) cho MỌI
-    nhóm TopicKey — KHÔNG còn ngưỡng số loại (tk-a 3 loại VÀ tk-b 1 loại đều có
-    dải), và TUYỆT ĐỐI KHÔNG có request mergeCells/unmergeCells nào."""
+def test_regroup_and_band_content_paints_day_background_and_topickey_top_border():
+    """VIỆC 3.3b (2026-08-04, Lead qua AskUserQuestion: "Đổi sang dùng nền
+    theo Ngày, đồng bộ màu với tab Context") — ĐẢO kênh thị giác so với hành
+    vi cũ (2026-07-23, đã xoá): KHÔNG còn tự sắp lại hàng (regroup_content_
+    rows) — thứ tự dòng do render_content_to_sheet() quyết định rồi, hàm này
+    CHỈ tô. NỀN xen kẽ giờ theo khối NGÀY; TopicKey chỉ còn VIỀN TRÊN đậm ở
+    đầu mỗi dải LIÊN TỤC — tk-a bị "b_info" (tk-b) chen giữa 2 lần xuất hiện
+    (khác ngày) nên tính là 2 dải TopicKey riêng, KHÔNG gộp giả. TUYỆT ĐỐI
+    KHÔNG có request mergeCells/unmergeCells nào."""
     from twmkt.sheets_board import SheetsBoard, CONTENT_HEADER, content_row
 
-    a_info = content_row(context="A", type_="infographic", status="DONE", output="x", topic_key="tk-a")
-    b_info = content_row(context="B", type_="infographic", status="DONE", output="x", topic_key="tk-b")
-    a_art = content_row(context="A", type_="article", status="DONE", output="x", topic_key="tk-a")
-    a_vid = content_row(context="A", type_="video", status="DONE", output="x", topic_key="tk-a")
+    # Thứ tự ĐÃ đúng theo ngày (giống output render_content_to_sheet()) --
+    # 22/07: a_info (tk-a), b_info (tk-b) CHEN GIỮA -- 23/07: a_vid (tk-a).
+    a_info = content_row(context="A", type_="infographic", status="DONE", output="x",
+                         topic_key="tk-a", ts="22/07/2026")
+    b_info = content_row(context="B", type_="infographic", status="DONE", output="x",
+                         topic_key="tk-b", ts="22/07/2026")
+    a_vid = content_row(context="A", type_="video", status="DONE", output="x",
+                        topic_key="tk-a", ts="23/07/2026")
 
     class _FakeContentWS:
         id = 7
@@ -2596,35 +2724,31 @@ def test_regroup_and_band_content_reorders_and_sends_band_requests():
         def __init__(self): self.last_body = None
         def batch_update(self, body): self.last_body = body; return {}
 
-    ws = _FakeContentWS([list(CONTENT_HEADER), list(a_info), list(b_info),
-                         list(a_art), list(a_vid)])
+    ws = _FakeContentWS([list(CONTENT_HEADER), list(a_info), list(b_info), list(a_vid)])
     board = SheetsBoard(spreadsheet_id="X", creds_path="Y")
     board._ws["CONTENT"] = ws
     board._sh = _FakeSheet()
 
     n = board.regroup_and_band_content()
-    assert n == 2                                    # tk-a (3 loại) VÀ tk-b (1 loại) đều có dải
-    assert ws._v[1:] == [a_info, a_art, a_vid, b_info]   # tk-a liền kề (thứ tự trong-nhóm giữ), tk-b sau
+    assert n == 3   # tk-a (2 dải, cắt bởi b_info xen giữa) + tk-b (1 dải)
+    assert ws._v[1:] == [a_info, b_info, a_vid]   # KHÔNG sắp lại -- giữ NGUYÊN thứ tự đã render
+    assert ws.updated == []   # KHÔNG gọi update() ghi lại dữ liệu -- hàm này CHỈ tô
 
     reqs = board._sh.last_body["requests"]
     assert not any("mergeCells" in r or "unmergeCells" in r for r in reqs)   # KHÔNG merge ô nào
     fills = [r["repeatCell"] for r in reqs if "repeatCell" in r]
     top_borders = [r["updateBorders"] for r in reqs if "updateBorders" in r and "top" in r["updateBorders"]]
     left_borders = [r["updateBorders"] for r in reqs if "updateBorders" in r and "left" in r["updateBorders"]]
-    assert len(fills) == 2 and len(top_borders) == 2  # 1 nền + 1 viền trên / dải TopicKey, toàn bộ chiều rộng hàng
+    assert len(fills) == 2      # 2 khối NGÀY (22/07, 23/07)
+    assert len(top_borders) == 3   # 3 dải TopicKey (tk-a, tk-b, tk-a lại)
+    assert left_borders == []   # viền trái ngày (cũ) KHÔNG còn dùng nữa -- nền đã thay thế
     assert fills[0]["range"]["startColumnIndex"] == 0 and fills[0]["range"]["endColumnIndex"] == len(CONTENT_HEADER)
-    assert fills[0]["range"]["startRowIndex"] == 1 and fills[0]["range"]["endRowIndex"] == 4   # tk-a: dòng 1-3
-    assert fills[1]["range"]["startRowIndex"] == 4 and fills[1]["range"]["endRowIndex"] == 5   # tk-b: dòng 4
+    assert fills[0]["range"]["startRowIndex"] == 1 and fills[0]["range"]["endRowIndex"] == 3   # 22/07: dòng 1-2
+    assert fills[1]["range"]["startRowIndex"] == 3 and fills[1]["range"]["endRowIndex"] == 4   # 23/07: dòng 3
     assert fills[0]["cell"]["userEnteredFormat"]["backgroundColor"] != \
-           fills[1]["cell"]["userEnteredFormat"]["backgroundColor"]   # 2 dải liền kề PHẢI khác màu (xen kẽ)
+           fills[1]["cell"]["userEnteredFormat"]["backgroundColor"]   # 2 khối ngày liền kề PHẢI khác màu (xen kẽ)
     for b in top_borders:
         assert b["top"]["style"] == "SOLID_THICK"
-    # 2026-07-23: content_row() không truyền `ts` -> mọi hàng CÙNG Timestamp
-    # ("bây giờ") -> đúng 1 dải NGÀY duy nhất phủ hết 4 hàng -> 1 viền TRÁI
-    # (kênh thị giác TÁCH BIỆT viền trên TopicKey, không đấu nhau).
-    assert len(left_borders) == 1
-    assert left_borders[0]["left"]["style"] == "SOLID_THICK"
-    assert left_borders[0]["left"]["color"] not in (b["top"]["color"] for b in top_borders)
 
 
 def test_regroup_and_band_content_noop_when_empty():
@@ -3698,7 +3822,7 @@ def _read_back_produce_result(rows: list[dict], *, db_path):
         history = ds.read_history(tk, "gate_status", "", db_path=db_path)
         if len(history) > 1:
             execute_updates[r["row"]] = history[-1][1].get("execute", "")
-        for type_ in ("article", "infographic", "video"):
+        for type_ in ("article", "long_article", "infographic", "video"):
             out = ps.read_content_output(tk, type_, db_path=db_path)
             if out is None:
                 continue
@@ -3808,7 +3932,7 @@ def test_run_article_done_writes_content_marks_execute_done_and_notifies():
         _CleanWriterLLM(), _approved_row("Bài test 4.9 DONE", row=2))
 
     assert board.execute_updates.get(2) == "DONE"
-    article_rows = [r for r in board.appended_content if r[2] == "article"]  # Context|Type|Status|...
+    article_rows = [r for r in board.appended_content if r[2] == "Article"]  # Context|Type|Status|...
     assert len(article_rows) == 1 and article_rows[0][3] == "DONE"           # Status
     events = [e for e, _ in notifier.events]
     article_events = [e for e, ctx in notifier.events if ctx.get("type") == "article"]
@@ -3842,7 +3966,7 @@ def test_run_writes_full_body_to_store_over_1500_chars_not_truncated():
     result, board, notifier = _run_produce_scenario(
         _LongWriterLLM(), _approved_row("Bài test dài >1500 ký tự", row=2))
 
-    article_rows = [r for r in board.appended_content if r[2] == "article"]
+    article_rows = [r for r in board.appended_content if r[2] == "Article"]
     assert len(article_rows) == 1
     output_field = article_rows[0][4]   # content_row(): index 4 = Output
     assert len(output_field) > 1500
@@ -3900,10 +4024,10 @@ def test_run_infographic_composer_swaps_to_route_llm_and_flags_needs_human_when_
     result, board, notifier = _run_produce_scenario(
         _CleanWriterLLM(), _approved_row("Bài test 4.11 composer", row=2))
 
-    infographic_rows = [r for r in board.appended_content if r[2] == "infographic"]
+    infographic_rows = [r for r in board.appended_content if r[2] == "Infographic"]
     assert len(infographic_rows) == 1
     assert infographic_rows[0][3] == "ERROR"          # Status
-    assert "content_units[] rỗng" in infographic_rows[0][5]    # Notes
+    assert "Không trích được dữ kiện nào từ bài gốc" in infographic_rows[0][5]    # VIỆC 5: CONTENT_UNITS_EMPTY
     assert "Số liệu" not in infographic_rows[0][4]     # Output — KHÔNG bịa nhãn
 
 
@@ -3939,12 +4063,12 @@ def test_run_infographic_skipped_when_no_numeric_content_true_article_still_prod
         _CleanWriterLLM(), _approved_row("Bài test 4.12 SKIPPED", row=2),
         route_llm=_QualitativeBriefRouteLLM())
 
-    infographic_rows = [r for r in board.appended_content if r[2] == "infographic"]
+    infographic_rows = [r for r in board.appended_content if r[2] == "Infographic"]
     assert len(infographic_rows) == 1
-    assert infographic_rows[0][3] == "SKIPPED"          # Status
-    assert "FORMAT_MISMATCH" in infographic_rows[0][5]  # Notes mã chuẩn hoá (Bước 4.3)
+    assert infographic_rows[0][3] == "BỎ QUA"           # Status (nhãn VI, xem sheets_board._display_status)
+    assert "Nội dung không đủ dữ liệu để dựng thành Infographic" in infographic_rows[0][5]  # VIỆC 5: câu nghiệp vụ INFOGRAPHIC_NOT_WORTHY
 
-    article_rows = [r for r in board.appended_content if r[2] == "article"]
+    article_rows = [r for r in board.appended_content if r[2] == "Article"]
     assert len(article_rows) == 1 and article_rows[0][3] == "DONE"
 
     assert board.execute_updates.get(2) == "DONE"       # KHÔNG bị kéo xuống NEEDS_HUMAN
@@ -4004,19 +4128,19 @@ def test_run_infographic_skipped_by_code_count_ignoring_router_rationale():
         _CleanWriterLLM(), _approved_row("Bài test 4.13 channel-false", row=2),
         route_llm=_ChannelFalseRouteLLM())
 
-    infographic_rows = [r for r in board.appended_content if r[2] == "infographic"]
+    infographic_rows = [r for r in board.appended_content if r[2] == "Infographic"]
     assert len(infographic_rows) == 1
-    assert infographic_rows[0][3] == "SKIPPED"
-    assert "FORMAT_MISMATCH" in infographic_rows[0][5]
+    assert infographic_rows[0][3] == "BỎ QUA"
+    assert "Nội dung không đủ dữ liệu để dựng thành Infographic" in infographic_rows[0][5]  # VIỆC 5: INFOGRAPHIC_NOT_WORTHY
     assert "Tin bảng-số không đủ dữ liệu trình bày hình" not in infographic_rows[0][5], (
         "Notes PHẢI là lý do đếm-số của CODE, KHÔNG phải câu chữ Router — "
         "Router mất quyền quyết riêng tuyến infographic ở chế độ AUTO (Bước A)"
     )
 
-    article_rows = [r for r in board.appended_content if r[2] == "article"]
+    article_rows = [r for r in board.appended_content if r[2] == "Article"]
     assert len(article_rows) == 1 and article_rows[0][3] == "DONE"
 
-    article_rows = [r for r in board.appended_content if r[2] == "article"]
+    article_rows = [r for r in board.appended_content if r[2] == "Article"]
     assert len(article_rows) == 1 and article_rows[0][3] == "DONE"
 
     assert board.execute_updates.get(2) == "DONE"
@@ -4058,9 +4182,9 @@ def test_run_article_skipped_when_router_decides_channel_false_upfront():
         _PoisonWriterLLM(), _approved_row("Bài test 4.13 article-false", row=2),
         route_llm=_ArticleFalseRouteLLM())
 
-    article_rows = [r for r in board.appended_content if r[2] == "article"]
-    assert len(article_rows) == 1 and article_rows[0][3] == "SKIPPED"
-    assert "NO_USABLE_CONTENT" in article_rows[0][5]
+    article_rows = [r for r in board.appended_content if r[2] == "Article"]
+    assert len(article_rows) == 1 and article_rows[0][3] == "BỎ QUA"
+    assert "Bài gốc không có nội dung thực chất" in article_rows[0][5]  # VIỆC 5: NO_USABLE_CONTENT_FULL
 
 
 def test_run_article_forced_true_when_router_vetoes_but_content_units_anchored():
@@ -4107,7 +4231,7 @@ def test_run_article_forced_true_when_router_vetoes_but_content_units_anchored()
         _CleanWriterLLM(), _approved_row(evidence, row=2),
         route_llm=_AnchoredButRouterVetoesRouteLLM())
 
-    article_rows = [r for r in board.appended_content if r[2] == "article"]
+    article_rows = [r for r in board.appended_content if r[2] == "Article"]
     assert len(article_rows) == 1 and article_rows[0][3] == "DONE", (
         f"content_units có anchored data thật -- Router KHÔNG được quyền phủ quyết article, "
         f"thực tế: {article_rows[0][3] if article_rows else 'KHÔNG có dòng'}"
@@ -4172,14 +4296,14 @@ def test_run_infographic_format_mismatch_when_no_numeric_units_article_video_unt
         _CleanWriterLLM(), _approved_row(evidence, row=2),
         route_llm=_QualitativeOnlyRouteLLM(), content_llm=_QualitativeVideoContentLLM())
 
-    infographic_rows = [r for r in board.appended_content if r[2] == "infographic"]
-    assert len(infographic_rows) == 1 and infographic_rows[0][3] == "SKIPPED"
-    assert "FORMAT_MISMATCH" in infographic_rows[0][5]
+    infographic_rows = [r for r in board.appended_content if r[2] == "Infographic"]
+    assert len(infographic_rows) == 1 and infographic_rows[0][3] == "BỎ QUA"
+    assert "Nội dung không đủ dữ liệu để dựng thành Infographic" in infographic_rows[0][5]  # VIỆC 5: INFOGRAPHIC_NOT_WORTHY
 
-    article_rows = [r for r in board.appended_content if r[2] == "article"]
+    article_rows = [r for r in board.appended_content if r[2] == "Article"]
     assert len(article_rows) == 1 and article_rows[0][3] == "DONE"
-    video_rows = [r for r in board.appended_content if r[2] == "video"]
-    assert len(video_rows) == 1 and video_rows[0][3] != "SKIPPED"
+    video_rows = [r for r in board.appended_content if r[2] == "Video"]
+    assert len(video_rows) == 1 and video_rows[0][3] != "BỎ QUA"
 
 
 def test_run_output_type_explicit_choice_overrides_router_veto():
@@ -4236,10 +4360,10 @@ def test_run_output_type_explicit_choice_overrides_router_veto():
         content_llm=_ComposerLLM())
 
     rows_by_type = {r[2]: r for r in board.appended_content}
-    assert set(rows_by_type) == {"infographic"}, (
+    assert set(rows_by_type) == {"Infographic"}, (
         f"CHỈ được ghi dòng infographic (Output Type chọn riêng), thực tế: {sorted(rows_by_type)}"
     )
-    assert rows_by_type["infographic"][3] == "DONE", (
+    assert rows_by_type["Infographic"][3] == "DONE", (
         f"Output Type chọn tường minh infographic -- Router KHÔNG được quyền phủ quyết dù tự ý nói false, "
         f"thực tế: {rows_by_type['infographic'][3]} | {rows_by_type['infographic'][5][:150]}"
     )
@@ -4273,10 +4397,10 @@ def test_run_boilerplate_source_now_skipped_not_fabricated_article_phase_c():
         route_llm=_BoilerplateRouteLLM())
 
     statuses = {r[2]: r[3] for r in board.appended_content}
-    assert statuses.get("article") == "SKIPPED", f"kỳ vọng SKIPPED, thực tế: {statuses}"
+    assert statuses.get("Article") == "BỎ QUA", f"kỳ vọng BỎ QUA (SKIPPED), thực tế: {statuses}"
     for r in board.appended_content:
-        if r[2] == "article":
-            assert "NO_USABLE_CONTENT" in r[5]
+        if r[2] == "Article":
+            assert "Bài gốc không có nội dung thực chất" in r[5]  # VIỆC 5: NO_USABLE_CONTENT_FULL
 
 
 def test_run_output_type_restricts_to_selected_type_only():
@@ -4294,9 +4418,9 @@ def test_run_output_type_restricts_to_selected_type_only():
         _approved_row("Bài test Output Type infographic-only", row=2, output_type=["Infographic"]))
 
     rows_by_type = {r[2]: r for r in board.appended_content}
-    assert set(rows_by_type) == {"infographic"}, \
+    assert set(rows_by_type) == {"Infographic"}, \
         f"chỉ được ghi dòng infographic, thực tế: {sorted(rows_by_type)}"
-    assert rows_by_type["infographic"][3] != "SKIPPED"   # thật sự được thử sinh
+    assert rows_by_type["Infographic"][3] != "SKIPPED"   # thật sự được thử sinh
     # Không thông báo "skipped" cho tuyến người vốn không yêu cầu -- không có
     # gì bị bỏ qua theo nghĩa người cần biết.
     skipped_events = [ctx for e, ctx in notifier.events if e == "skipped"]
@@ -4335,27 +4459,46 @@ def test_run_output_type_empty_behaves_like_no_restriction():
             assert "Output Type không chọn" not in row[5]
 
 
-def test_run_output_type_long_article_has_no_producer_all_skipped():
-    """"Long-Article" là giá trị hợp lệ nhưng CHƯA có producer -- chọn riêng
-    nó -> KHÔNG sinh loại nào trong 3 loại thật, và (từ 2026-07-28) KHÔNG ghi
-    dòng nào cả: tab CONTENT trống trơn cho chủ đề này. KHÔNG raise/crash.
-
-    ĐÁNH ĐỔI CÓ CHỦ ĐÍCH, ghi lại để không ai tưởng là bug: chọn Long-Article
-    giờ trông y hệt "chưa xử lý" trên Sheet (không dòng, không lời giải
-    thích). Chấp nhận được vì Long-Article đang chờ rule của agent-C; khi có
-    producer thật thì ca này biến mất. Nếu muốn hiện lời giải thích cho riêng
-    ca "chọn loại chưa hỗ trợ" thì đó là việc RIÊNG, không phải quay lại ghi
-    SKIPPED cho MỌI tuyến không chọn."""
-    class _PoisonWriterLLM:
-        def complete(self, *a, **kw):
-            raise AssertionError("KHÔNG được gọi writer khi Output Type chỉ chọn Long-Article")
+def test_run_output_type_long_article_reuses_article_writer_writes_long_article_type():
+    """VIỆC 1 (2026-08-03, Lead) — Long-Article giờ ĐÃ NỐI: chọn riêng nó dùng
+    CHUNG đường Writer với Article (KHÔNG producer riêng), nhưng content_type
+    ghi ra store là "long_article" (không phải "article"). THAY THẾ test cũ
+    test_run_output_type_long_article_has_no_producer_all_skipped (đã ghi lại
+    hành vi "chưa nối" — nay lỗi thời)."""
+    class _CleanWriterLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            return _clean_writer_json()
 
     result, board, notifier = _run_produce_scenario(
-        _PoisonWriterLLM(),
+        _CleanWriterLLM(),
         _approved_row("Bài test Output Type Long-Article", row=2, output_type=["Long-Article"]))
 
-    assert board.appended_content == []
+    rows = [r for r in board.appended_content if r[7]]   # TopicKey không rỗng
+    assert len(rows) == 1
+    assert rows[0][2] == "Long-Article"          # Type ghi ra ĐÚNG content_type mới
+    assert rows[0][3] == "DONE"
     assert board.execute_updates.get(2) not in ("FAILED", "NEEDS_HUMAN")
+
+
+def test_long_article_prompt_contains_both_rule_files_article_only_daily():
+    """VIỆC 1.5/1.6 — content_type="long_article" nạp NGUYÊN VĂN CẢ 2 file
+    (nền daily-v3.4 + bổ sung deep-v3.0), không mất mục nào; content_type=
+    "article" hồi quy CHỈ nạp daily-v3.4, KHÔNG lẫn deep."""
+    from pathlib import Path
+    from twmkt.agents.writer import build_writer_system
+    from twmkt.config import load_settings
+
+    settings = load_settings()
+    system_long = build_writer_system(content_type="long_article", settings=settings)
+    system_article = build_writer_system(content_type="article", settings=settings)
+
+    daily_text = Path("prompts/content-rules-daily-v3.4.md").read_text(encoding="utf-8").rstrip()
+    deep_text = Path("prompts/content-rules-deep-v3.0.md").read_text(encoding="utf-8").rstrip()
+
+    assert daily_text in system_long
+    assert deep_text in system_long
+    assert daily_text in system_article
+    assert deep_text not in system_article
 
 
 # ==== PHASE B (2026-07-3x) — hồi quy §7 reports/LEAD_DECISION_INPUT_STRICTNESS.md ====
@@ -4441,11 +4584,11 @@ def test_regression_row1_row7_qualitative_article_done_infographic_skipped_video
         _CleanWriterLLM(), _approved_row("Chính sách mới, không có số liệu cụ thể", row=2),
         route_llm=_QualitativeBriefVideoRouteLLM(), content_llm=_QualitativeVideoContentLLM())
 
-    video_rows = [r for r in board.appended_content if r[2] == "video"]
+    video_rows = [r for r in board.appended_content if r[2] == "Video"]
     assert len(video_rows) == 1, "Video phải có ĐÚNG 1 dòng, không bị âm thầm loại vì facts=[]"
     assert video_rows[0][3] != "SKIPPED"
 
-    article_rows = [r for r in board.appended_content if r[2] == "article"]
+    article_rows = [r for r in board.appended_content if r[2] == "Article"]
     assert len(article_rows) == 1 and article_rows[0][3] == "DONE"
 
 
@@ -4513,22 +4656,19 @@ def test_regression_row5_short_two_sentence_source_article_done_not_needs_human(
     result, board, notifier = _run_produce_scenario(
         _CleanWriterLLM(), _approved_row(short_source, row=2))
 
-    article_rows = [r for r in board.appended_content if r[2] == "article"]
+    article_rows = [r for r in board.appended_content if r[2] == "Article"]
     assert len(article_rows) == 1 and article_rows[0][3] == "DONE", (
         f"nguồn ngắn 2 câu phải DONE, thực tế: {article_rows[0][3] if article_rows else 'KHÔNG có dòng'}"
     )
 
 
-def test_regression_row9_composer_empty_subtitle_is_auto_filled_known_bug():
+def test_regression_row9_composer_empty_subtitle_kept_empty_not_auto_filled():
     """§7 dòng 9 ("Composer trả subtitle: ''" -> Infographic PHẢI giữ nguyên
-    theo schema, KHÔNG tự điền) -- XÁC NHẬN LÀ BUG THẬT đang tồn tại (khớp
-    §8.2 báo cáo gốc: "parser có thể tự điền từ brief.title"). Đọc
-    `infographic_spec_from_data()` (agents/production.py): khi Composer trả
-    subtitle="" (rỗng), code LUÔN thay bằng `brief.title` (coi rỗng = "Composer
-    quên điền", KHÔNG phân biệt được với "Composer CHỦ ĐỘNG để rỗng"). Test
-    này set brief.title KHÁC brief.hook để phân biệt rõ 2 nguồn -- hiện tại
-    SẼ FAIL (subtitle bị điền brief.title thay vì giữ ""), đúng như dự kiến
-    của Phase B (case CHƯA sửa, để dành Phase D/schema fix)."""
+    theo schema, KHÔNG tự điền) -- ĐÃ SỬA (Lead 02/08, "code đang BỊA dữ liệu
+    vào ảnh"). `infographic_spec_from_data()` (agents/production.py) giờ chỉ
+    thay subtitle bằng `brief.title` khi key VẮNG MẶT/None (Composer thật sự
+    không điền); subtitle="" (Composer TRẢ RỖNG tường minh) được GIỮ NGUYÊN.
+    Test set brief.title KHÁC brief.hook để phân biệt rõ 2 nguồn."""
     from twmkt.agents.production import infographic_spec_from_data, ProductionBrief
 
     brief = ProductionBrief(title="Tiêu đề Brief gốc KHÁC hẳn", hook="Hook khác nữa",
@@ -4543,21 +4683,18 @@ def test_regression_row9_composer_empty_subtitle_is_auto_filled_known_bug():
     }
     spec = infographic_spec_from_data(data, brief)
     assert spec["subtitle"] == "", (
-        f"BUG XÁC NHẬN (§7 dòng 9): Composer trả subtitle rỗng có chủ đích nhưng code tự "
-        f"điền lại thành {spec['subtitle']!r} (brief.title) -- chưa phân biệt được "
-        f"'rỗng có chủ đích' với 'Composer quên điền'."
+        f"Composer trả subtitle rỗng có chủ đích nhưng code lại điền thành "
+        f"{spec['subtitle']!r} (brief.title) -- phải GIỮ RỖNG."
     )
 
 
-def test_regression_row10_composer_empty_related_is_auto_filled_known_bug():
+def test_regression_row10_composer_empty_related_kept_empty_not_auto_filled():
     """§7 dòng 10 ("Composer trả related: []" -> Infographic PHẢI giữ rỗng,
-    KHÔNG tự chèn ticker) -- XÁC NHẬN LÀ BUG THẬT đang tồn tại, TRÁI với báo
-    cáo gốc §8.5 (báo cáo nói "lượt 3 đã đổi sang tôn trọng mảng rỗng" -- đọc
-    code hiện tại cho thấy CHƯA đúng). `infographic_spec_from_data()`:
-    `data.get("related") or _entity_names_from_content_units(...) or brief.tickers` --
-    `[]` là falsy trong Python nên `or` CHUYỂN SANG nhánh kế dù Composer đã
-    trả rỗng TƯỜNG MINH, không phân biệt được "rỗng có chủ đích" với "thiếu
-    field". Test set brief.tickers khác rỗng để lộ rõ bug -- hiện tại SẼ FAIL."""
+    KHÔNG tự chèn ticker) -- ĐÃ SỬA (Lead 02/08). `infographic_spec_from_data()`
+    giờ chỉ lùi về `_entity_names_from_content_units()`/`brief.tickers` khi key
+    "related" VẮNG MẶT/None; related=[] (Composer trả rỗng tường minh) được
+    GIỮ NGUYÊN, KHÔNG còn coi [] falsy giống thiếu field. Test set
+    brief.tickers khác rỗng để lộ rõ hành vi đúng."""
     from twmkt.agents.production import infographic_spec_from_data, ProductionBrief
 
     brief = ProductionBrief(title="t", hook="h", tickers=["FPT", "HPG"],
@@ -4572,9 +4709,32 @@ def test_regression_row10_composer_empty_related_is_auto_filled_known_bug():
     }
     spec = infographic_spec_from_data(data, brief)
     assert spec["related"] == [], (
-        f"BUG XÁC NHẬN (§7 dòng 10): Composer trả related=[] tường minh nhưng code tự chèn "
-        f"lại {spec['related']!r} (từ facts/tickers) -- coi [] falsy giống thiếu field."
+        f"Composer trả related=[] tường minh nhưng code lại chèn lại "
+        f"{spec['related']!r} (từ facts/tickers) -- phải GIỮ RỖNG."
     )
+
+
+def test_regression_row9_row10_composer_missing_keys_still_get_fallback():
+    """Đối chứng cho 2 test trên (Lead 02/08, 1.4): khi Composer KHÔNG trả key
+    "subtitle"/"related" (thiếu hẳn, KHÔNG phải rỗng tường minh) thì code VẪN
+    phải lùi về mặc định như cũ (brief.title / entity_names-hoặc-tickers) --
+    phân biệt đúng "rỗng có chủ đích" (giữ) với "thiếu field" (lùi mượt)."""
+    from twmkt.agents.production import infographic_spec_from_data, ProductionBrief
+
+    brief = ProductionBrief(title="Tiêu đề Brief gốc KHÁC hẳn", hook="Hook khác nữa",
+                            tickers=["FPT", "HPG"],
+                            url="https://cafef.vn/x.chn", evidence="Doanh thu tăng 40%.",
+                            content_units=_infographic_test_content_units())
+    data = {
+        "title": "FPT lãi kỷ lục",
+        "hero": [{"label": "Tăng trưởng doanh thu", "value": "+40%"}],
+        "market": [], "highlights": [],
+        "priority": {"primary": [], "secondary": [], "minor": []},
+        "render_hint": {"ratio": "1:1"},
+    }   # KHÔNG có "subtitle"/"related" trong JSON -- khác hẳn "" và [] tường minh.
+    spec = infographic_spec_from_data(data, brief)
+    assert spec["subtitle"] == brief.title
+    assert spec["related"] == ["FPT", "HPG"]
 
 
 def test_regression_row11_boilerplate_source_currently_produces_fabricated_article_known_gap():
@@ -4621,7 +4781,7 @@ def test_regression_row11_boilerplate_source_currently_produces_fabricated_artic
         route_llm=_BoilerplateRouteLLM())
 
     statuses = {r[2]: r[3] for r in board.appended_content}
-    article_status = statuses.get("article")
+    article_status = statuses.get("Article")
     assert article_status != "DONE", (
         f"BUG XÁC NHẬN (ca mới A6): nguồn boilerplate/không có nội dung thật vẫn ra Article "
         f"DONE (bịa bài từ trang rỗng) thay vì SKIPPED -- toàn bộ trạng thái: {statuses}, "
@@ -4644,7 +4804,7 @@ def test_run_article_failed_marks_execute_failed_no_content_no_draft_changed():
         _AlwaysRaiseLLM(), _approved_row("Bài test 4.9 FAILED", row=3))
 
     assert board.execute_updates.get(3) == "FAILED"
-    assert not any(r[2] == "article" for r in board.appended_content)
+    assert not any(r[2] == "Article" for r in board.appended_content)
     events = [e for e, _ in notifier.events]
     article_events = [e for e, ctx in notifier.events if ctx.get("type") == "article"]
     assert "start" in events and "retry" in events and "failed" in events
@@ -4670,7 +4830,7 @@ def test_run_article_needs_human_marks_execute_needs_human_writes_error_content(
         _HallucinatingLLM(), _approved_row("Bài test 4.9 NEEDS_HUMAN", row=4))
 
     assert board.execute_updates.get(4) == "NEEDS_HUMAN"
-    article_rows = [r for r in board.appended_content if r[2] == "article"]
+    article_rows = [r for r in board.appended_content if r[2] == "Article"]
     assert len(article_rows) == 1 and article_rows[0][3] == "ERROR"
     events = [e for e, _ in notifier.events]
     article_events = [e for e, ctx in notifier.events if ctx.get("type") == "article"]
@@ -4697,13 +4857,74 @@ def test_run_article_idempotent_skips_writer_when_already_in_content():
 
     # run() KHÔNG raise (PoisonLLM chứng minh writer KHÔNG bị gọi) + article vẫn
     # giữ NGUYÊN output đã pre-seed ("x") -- KHÔNG bị ghi đè/sinh lại.
-    article_rows = [r for r in board.appended_content if r[2] == "article"]
+    article_rows = [r for r in board.appended_content if r[2] == "Article"]
     assert len(article_rows) == 1 and article_rows[0][4] == "x"
     # video/infographic vẫn được xử lý bình thường (pre_seed_content chỉ có
     # article) -> lượt này sinh đủ CẢ 3 loại (article đã có từ trước + video/
     # infographic mới) -> Execute=DONE ĐÚNG theo logic cũ (_is_fully_produced),
     # KHÔNG phải vì writer chạy lại.
     assert board.execute_updates.get(2) == "DONE"
+
+
+def test_run_retries_channel_after_error_not_stuck_forever_nafoods_bug():
+    """SỬA LỖI THẬT (2026-08-03, Lead báo qua ca "Nafoods Group") —
+    existing_content_keys() TRƯỚC ĐÂY coi content_output ERROR/NEEDS_HUMAN là
+    "đã xong" VĨNH VIỄN -> Gate1 re-approve (hoặc đổi Output Type) không bao
+    giờ thật sự thử lại kênh đã lỗi: Execute lên DONE nhưng CONTENT vẫn hiện
+    dữ liệu ERROR CŨ (Composer bị gọi lại rồi kết quả BỊ VỨT ở nhánh `if
+    (topic_key, type_) in seen`). ERROR/NEEDS_HUMAN giờ KHÔNG chặn retry —
+    lượt chạy SAU (mô phỏng re-approve) PHẢI ghi version MỚI (status=DONE)."""
+    import json as _json
+    from store import document_store as ds
+
+    class _ComposerLLM:
+        def __init__(self):
+            from twmkt.agents.router import Usage
+            self.usage = Usage()
+
+        def complete(self, system, prompt, *, model=None, **kw):
+            return _json.dumps({
+                "title": "Nafoods lợi nhuận tăng", "subtitle": "Kết quả kinh doanh khả quan",
+                "hero": [{"label": "Lợi nhuận", "value": "+96%"}],
+                "market": [], "highlights": ["Kết quả tốt nhất nhiều quý."], "related": [],
+                "priority": {"primary": [], "secondary": [], "minor": []},
+                "source": "ignored", "render_hint": {"ratio": "1:1"},
+            }, ensure_ascii=False)
+
+    class _RouterVetoesInfographicRouteLLM:
+        """CÙNG công thức đã xác nhận chạy đúng ở test_run_output_type_
+        explicit_choice_overrides_router_veto: raw="gợi ý" verify được nhờ
+        _approved_row(source="") -> fetch_full_evidence() lùi về fallback=
+        item["hook"]="hook gợi ý". Output Type=Infographic tường minh -> BƯỚC
+        4.5 ép channels["infographic"]=True bất kể Router/infographic_worthy
+        nói gì -- CHỈ cần content_units KHÔNG rỗng (brief_status=OK)."""
+
+        def complete(self, system, prompt, *, model=None, fail_loud=False, **kw):
+            if "no_numeric_content" in system:
+                return _json.dumps({
+                    "content_units": [{"shape": "scalar", "value": "ý", "label": "Lợi nhuận tăng",
+                                      "unit": None, "kind": "percent", "raw": "gợi ý", "approx": False}],
+                    "no_numeric_content": False,
+                }, ensure_ascii=False)
+            return ""   # router rỗng -> fallback, không quan trọng ở test này
+
+    _KEY = "nafoods-group-test-key"
+
+    _r1, board1, _n1 = _run_produce_scenario(
+        _ComposerLLM(),
+        _approved_row("Nafoods Group: Lợi nhuận nửa đầu năm tăng 96%", row=2,
+                     topic_key=_KEY, output_type=["Infographic"]),
+        route_llm=_RouterVetoesInfographicRouteLLM(), content_llm=_ComposerLLM(),
+        pre_seed_content=[(_KEY, "infographic", {
+            "status": "ERROR", "output": "",
+            "notes": "Số liệu không thấy trong evidence/background: 96%",
+        })])
+
+    history = ds.read_history(_KEY, "content_output", "infographic", db_path=board1.db_path)
+    assert len(history) == 2, (
+        f"kỳ vọng ĐÚNG 2 version (ERROR pre-seed + DONE mới) sau khi thử lại, thực tế {len(history)}"
+    )
+    assert history[-1][1]["status"] == "DONE", "Lần thử lại PHẢI ghi version MỚI status=DONE, không bị vứt"
 
 
 def test_run_twice_same_topic_key_no_duplicate_content_rows():
@@ -4724,8 +4945,8 @@ def test_run_twice_same_topic_key_no_duplicate_content_rows():
     row = _approved_row("Chủ đề lặp lại 2 lần", row=2, source=_URL)
     _, board, _n = _run_produce_scenario(_CleanWriterLLM(), row, run_times=2)
 
-    for t in ("article", "video", "infographic"):
-        matching = [r for r in board.appended_content if r[2] == t]
+    for t, label in (("article", "Article"), ("video", "Video"), ("infographic", "Infographic")):
+        matching = [r for r in board.appended_content if r[2] == label]
         assert len(matching) == 1, f"{t}: kỳ vọng đúng 1 dòng sau 2 lượt chạy, thực tế {len(matching)}"
         history = ds.read_history(row["topic_key"], "content_output", t, db_path=board.db_path)
         assert len(history) == 1, f"{t}: kỳ vọng ĐÚNG 1 version sau 2 lượt chạy (không ghi đè), thực tế {len(history)}"
@@ -4796,15 +5017,15 @@ def test_phase3_adversarial_reorder_insert_delete_sort_topic_key_invariant_and_r
     # ---- 3) Chụp ánh xạ GỐC {TopicKey: nội dung} ----
     original_map, original_keys = _snapshot(content_rows)
     assert original_keys == {
-        (KEY_A, "article"), (KEY_A, "video"), (KEY_A, "infographic"),
-        (KEY_B, "article"), (KEY_B, "infographic"),
+        (KEY_A, "Article"), (KEY_A, "Video"), (KEY_A, "Infographic"),
+        (KEY_B, "Article"), (KEY_B, "Infographic"),
     }
 
     # ---- 4) DỜI THỨ TỰ trên CONTENT: (a) chèn đầu, (b) xóa giữa, (c) đảo thứ tự ----
     unrelated_content = content_row(context="Chủ đề KHÔNG liên quan", type_="article",
                                     status="DONE", output="unrelated", topic_key="unrelated-probe-key")
     content_rows = [unrelated_content] + content_rows                       # (a) chèn đầu block
-    del_i = next(i for i, r in enumerate(content_rows) if r[ik] == KEY_A and r[it] == "video")
+    del_i = next(i for i, r in enumerate(content_rows) if r[ik] == KEY_A and r[it] == "Video")
     del content_rows[del_i]                                                  # (b) xóa 1 dòng Ở GIỮA
     content_rows = list(reversed(content_rows))                              # (c) re-sort (đảo thứ tự)
 
@@ -4824,12 +5045,12 @@ def test_phase3_adversarial_reorder_insert_delete_sort_topic_key_invariant_and_r
     # ---- 6) Đọc lại -> assert ánh xạ TopicKey BẤT BIẾN (0 lệch, 0 mồ côi) ----
     after_map, after_keys = _snapshot(content_rows)
     expected_after_keys = {
-        (KEY_A, "article"), (KEY_A, "infographic"),         # video A đã bị xóa CHỦ Ý ở bước (b)
-        (KEY_B, "article"), (KEY_B, "infographic"),
-        ("unrelated-probe-key", "article"),
+        (KEY_A, "Article"), (KEY_A, "Infographic"),         # video A đã bị xóa CHỦ Ý ở bước (b)
+        (KEY_B, "Article"), (KEY_B, "Infographic"),
+        ("unrelated-probe-key", "Article"),
     }
     assert after_keys == expected_after_keys, "0 lệch: khoá phải khớp CHÍNH XÁC sau chèn/xóa/sort"
-    for k in expected_after_keys - {("unrelated-probe-key", "article")}:
+    for k in expected_after_keys - {("unrelated-probe-key", "Article")}:
         assert after_map[k] == original_map[k], f"Nội dung khoá {k} bị LỆCH sau reorder"
     _k2, missing_after = content_topic_keys(CONTENT_HEADER, content_rows)
     assert missing_after == [], "0 mồ côi: không dòng nào mất khả năng định danh theo khoá"
@@ -4851,7 +5072,7 @@ def test_phase3_adversarial_reorder_insert_delete_sort_topic_key_invariant_and_r
             return _clean_writer_json()
 
     approved_list = [approved_by_key[KEY_A], approved_by_key[KEY_B], approved_by_key[KEY_C]]
-    seed = [(r[ik], r[it], {"status": "DONE", "output": r[io], "notes": "", "facts": "[]"})
+    seed = [(r[ik], r[it].lower(), {"status": "DONE", "output": r[io], "notes": "", "facts": "[]"})
            for r in content_rows if r[ik]]
     _r, board, notifier = _run_produce_scenario(
         _CleanWriterLLM(), approved_rows=approved_list, run_kwargs={"limit": 10},
@@ -4869,7 +5090,7 @@ def test_phase3_adversarial_reorder_insert_delete_sort_topic_key_invariant_and_r
     final_keys, final_missing = content_topic_keys(CONTENT_HEADER, all_rows_after)
     assert final_missing == []
     for key in (KEY_A, KEY_B, KEY_C):
-        for t in ("article", "video", "infographic"):
+        for t in ("Article", "Video", "Infographic"):
             assert (key, t) in final_keys, f"THIẾU {(key, t)} sau produce-lại"
 
     counts = Counter((r[ik], r[it]) for r in all_rows_after if r[it])
@@ -4878,10 +5099,10 @@ def test_phase3_adversarial_reorder_insert_delete_sort_topic_key_invariant_and_r
 
     # A.article/A.infographic/B.article/B.infographic KHÔNG bị sinh lại (nội
     # dung GIỮ NGUYÊN bản gốc — writer/agent KHÔNG được gọi lại cho các khoá này).
-    assert [r[io] for r in all_rows_after if r[ik] == KEY_A and r[it] == "article"] == ["A-article"]
-    assert [r[io] for r in all_rows_after if r[ik] == KEY_A and r[it] == "infographic"] == ["A-info"]
-    assert [r[io] for r in all_rows_after if r[ik] == KEY_B and r[it] == "article"] == ["B-article"]
-    assert [r[io] for r in all_rows_after if r[ik] == KEY_B and r[it] == "infographic"] == ["B-info"]
+    assert [r[io] for r in all_rows_after if r[ik] == KEY_A and r[it] == "Article"] == ["A-article"]
+    assert [r[io] for r in all_rows_after if r[ik] == KEY_A and r[it] == "Infographic"] == ["A-info"]
+    assert [r[io] for r in all_rows_after if r[ik] == KEY_B and r[it] == "Article"] == ["B-article"]
+    assert [r[io] for r in all_rows_after if r[ik] == KEY_B and r[it] == "Infographic"] == ["B-info"]
     # dòng KHÔNG liên quan không bị đụng tới (đúng 1 dòng, nguyên nội dung).
     assert [r[io] for r in all_rows_after if r[ik] == "unrelated-probe-key"] == ["unrelated"]
 
@@ -5061,7 +5282,7 @@ def test_vertical_slice_a_full_quantitative_topic_three_channels_clean():
 
     # --- Mắt xích: produce chỉ sinh tuyến true + outcome DONE ---
     types_status = {r[2]: r[3] for r in board.appended_content}
-    assert types_status == {"article": "DONE", "video": "DONE", "infographic": "DONE"}
+    assert types_status == {"Article": "DONE", "Video": "DONE", "Infographic": "DONE"}
     assert board.execute_updates.get(2) == "DONE"
     assert route_llm.router_calls == 1
 
@@ -5084,7 +5305,7 @@ def test_vertical_slice_a_full_quantitative_topic_three_channels_clean():
     assert "### Ví dụ A" in sysprompt   # anchor mặc định S5 (_DEFAULT_ANCHOR_BY_STRUCTURE)
 
     # --- Mắt xích: guardrail canonical clean (số writer viết khớp evidence) ---
-    article_row = next(r for r in board.appended_content if r[2] == "article")
+    article_row = next(r for r in board.appended_content if r[2] == "Article")
     assert article_row[3] == "DONE" and article_row[5] == ""   # Status, Notes rỗng (không compliance issue)
 
     # --- Mắt xích: Notifier bắn đúng điểm (start 1 lần, draft_changed x3, gate2_done, KHÔNG error) ---
@@ -5129,13 +5350,13 @@ def test_vertical_slice_b_router_disables_one_channel_no_error():
     result, board, notifier = _run_produce_scenario(writer_llm, _slice_row(), route_llm=route_llm)
 
     types_status = {r[2]: r[3] for r in board.appended_content}
-    assert types_status["article"] == "DONE"
-    assert types_status["infographic"] == "DONE"
-    assert types_status["video"] == "SKIPPED"           # KHÔNG phải ERROR
+    assert types_status["Article"] == "DONE"
+    assert types_status["Infographic"] == "DONE"
+    assert types_status["Video"] == "BỎ QUA"            # KHÔNG phải ERROR
 
-    video_row = next(r for r in board.appended_content if r[2] == "video")
+    video_row = next(r for r in board.appended_content if r[2] == "Video")
     assert video_row[4] == ""                            # Output rỗng (không gọi composer)
-    assert "không hợp tin này" in video_row[5]           # Notes = rationale router (video KHÔNG đổi cơ chế)
+    assert "Nội dung không phù hợp để làm video" in video_row[5]  # VIỆC 5: câu nghiệp vụ + rationale Router giữ nguyên
 
     assert board.execute_updates.get(2) == "DONE"              # KHÔNG bị SKIPPED cản DONE
     events = [e for e, _ in notifier.events]
@@ -5151,7 +5372,7 @@ def test_vertical_slice_c_fabricated_number_still_blocked_needs_human():
     writer_llm = _SliceFabricatingWriterLLM()
     result, board, notifier = _run_produce_scenario(writer_llm, _slice_row(), route_llm=route_llm)
 
-    article_row = next(r for r in board.appended_content if r[2] == "article")
+    article_row = next(r for r in board.appended_content if r[2] == "Article")
     assert article_row[3] == "ERROR"
     assert "999" in article_row[5]                              # Notes nêu đúng số bịa bị chặn
 
@@ -5375,12 +5596,10 @@ def test_infographic_poor_source_title_plus_2_stat_passes_full_pipeline_no_paddi
     spec = _json.loads(draft.body)
     assert spec["title"] == "Doanh thu và lợi nhuận cùng tăng"
     # PHÁT HIỆN (không sửa — ngoài phạm vi BƯỚC 2, chỉ báo cáo): khi Composer cố
-    # ý để subtitle rỗng (đúng §3.1), ràng buộc "title != subtitle" có sẵn trong
-    # infographic_spec_from_data() TỰ ĐIỀN subtitle bằng brief.title thay vì giữ
-    # rỗng — lệch nhẹ tinh thần "không đệm cấu trúc" của §3.1/§8.2, NHƯNG dùng
-    # TEXT THẬT (brief.title, không bịa fact/số) nên KHÔNG phải fabrication
-    # nghiêm trọng. Xem STOP-REPORT §"Phát hiện phụ".
-    assert spec["subtitle"] == brief.title
+    # ý để subtitle rỗng (đúng §3.1) -- ĐÃ SỬA (Lead 02/08): infographic_spec_
+    # from_data() giờ TÔN TRỌNG subtitle="" tường minh, KHÔNG còn tự điền
+    # brief.title (đúng tinh thần "không đệm cấu trúc" của §3.1/§8.2).
+    assert spec["subtitle"] == ""
     assert spec["hero"] == [{"label": "Tăng trưởng doanh thu", "value": "+40%"}]
     assert spec["market"] == [{"label": "Lợi nhuận kỷ lục", "value": "1,2 nghìn tỷ"}]
     assert spec["highlights"] == []                # KHÔNG bịa highlight
@@ -5459,6 +5678,65 @@ def test_analysis_fields_overwrites_llm_disclaimer_that_differs_from_canonical()
     body = render_analysis(title, sapo, sections, disclaimer, sources, brief)
     assert body.count(canonical) == 1   # ĐÚNG MỘT bản, không nối thêm
     assert "Đây là câu LLM tự viết lại" not in body   # bản LLM KHÔNG còn sót trong output
+
+
+def test_analysis_fields_from_data_empty_sections_needs_human_not_auto_written():
+    """Nhóm B (Lead 02/08, "dạng NẶNG NHẤT" của bug subtitle/related) —
+    Composer trả JSON HỢP LỆ nhưng sections RỖNG (tường minh "sections": []
+    HOẶC thiếu hẳn key) KHÔNG còn được LÙI MƯỢT tự dựng lại 100% bài từ
+    brief.evidence/brief.background -- phải EmptySectionsError, KHÁC hẳn
+    data=None (case đó VẪN LÙI MƯỢT, xem test_production_agent_graceful_
+    empty_llm -- KHÔNG đụng)."""
+    import pytest
+    from twmkt.agents.production import (
+        EmptySectionsError, ProductionBrief, analysis_fields_from_data,
+    )
+
+    brief = ProductionBrief(title="Bài có content_units verified", hook="h",
+                            url="https://cafef.vn/x.chn", evidence="Doanh thu tăng 40%.")
+
+    # (a) sections: [] tường minh.
+    with pytest.raises(EmptySectionsError) as ei:
+        analysis_fields_from_data(
+            {"title": "T", "sapo": "s", "sections": [], "disclaimer": "d", "sources": []}, brief)
+    assert "sections rỗng" in str(ei.value)
+
+    # (b) THIẾU hẳn key "sections" -- CÙNG outcome (B4: phân biệt rõ với rỗng
+    # tường minh nhưng cùng NEEDS_HUMAN, KHÔNG tự viết đè).
+    with pytest.raises(EmptySectionsError):
+        analysis_fields_from_data({"title": "T", "sapo": "s"}, brief)
+
+    # Đối chứng: data=None (LLM/composer lỗi hạ tầng thật) VẪN LÙI MƯỢT như cũ,
+    # KHÔNG bị đụng bởi thay đổi này.
+    title, sapo, sections, disclaimer, sources = analysis_fields_from_data(None, brief)
+    assert sections and title
+
+
+def test_run_writer_with_retry_empty_sections_needs_human_no_fabricated_body():
+    """Nhóm B (Lead 02/08) — tích hợp qua đường SỐNG THẬT (agents/writer.py:
+    run_writer_with_retry): Writer trả JSON hợp lệ nhưng sections=[] -> outcome
+    NEEDS_HUMAN NGAY (KHÔNG retry -- đây là lỗi VĨNH VIỄN về nội dung, giống
+    guardrail reject, KHÁC LLMCallError hạ tầng), draft.body RỖNG (KHÔNG có
+    bài tự dựng từ evidence), Notes/compliance_issues nêu rõ "sections rỗng"."""
+    import json as _json
+    from twmkt.agents.production import ProductionBrief
+    from twmkt.agents.writer import WriterOutcome, run_writer_with_retry
+
+    class _EmptySectionsWriterLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            return _json.dumps({
+                "title": "T", "sapo": "s", "sections": [],
+                "disclaimer": "d", "sources": [],
+            }, ensure_ascii=False)
+
+    brief = ProductionBrief(title="Bài có content_units verified", hook="h",
+                            url="https://cafef.vn/x.chn", evidence="Doanh thu tăng 40%.")
+    result = run_writer_with_retry(_EmptySectionsWriterLLM(), brief, settings=_writer_retry_settings())
+
+    assert result.outcome == WriterOutcome.NEEDS_HUMAN
+    assert result.attempts == 1   # KHÔNG retry -- lỗi nội dung, không phải hạ tầng
+    assert "sections rỗng" in result.reason
+    assert result.draft.body == ""   # KHÔNG có bài tự dựng thay Composer
 
 
 def test_render_analysis_and_video_use_dynamic_cta_not_hardcoded_brand():
@@ -5598,6 +5876,32 @@ def test_video_fields_from_data_rejects_fewer_than_3_scenes_no_padding():
     assert len(scenes) == 3
 
 
+def test_video_fields_from_data_empty_scenes_needs_human_not_auto_built():
+    """Nhóm B (Lead 02/08) — Composer trả JSON HỢP LỆ nhưng scenes RỖNG (tường
+    minh "scenes": [] HOẶC thiếu hẳn key "scenes") KHÔNG còn được LÙI MƯỢT tự
+    dựng 4 cảnh mặc định (bug "bịa cả video từ JSON rỗng") -- phải
+    InsufficientScenesError (LƯỚI CÓ SẴN, produce_from_sheet.run() đã bắt
+    riêng -> NEEDS_HUMAN), nêu rõ "rỗng"/0 cảnh, KHÁC hẳn data=None (case đó
+    VẪN LÙI MƯỢT, xem test ngay trên -- video_fields_from_data(None, ...))."""
+    import pytest
+    from twmkt.agents.production import (
+        InsufficientScenesError, ProductionBrief, video_fields_from_data,
+    )
+
+    brief = ProductionBrief(title="Tin có content_units verified", hook="h",
+                            url="https://cafef.vn/x.chn", evidence="Một câu tin.")
+
+    # (a) scenes: [] tường minh.
+    with pytest.raises(InsufficientScenesError) as ei:
+        video_fields_from_data({"title": "T", "scenes": []}, brief)
+    assert "rỗng" in str(ei.value) and "0 cảnh" in str(ei.value)
+
+    # (b) THIẾU hẳn key "scenes" -- PHẢI cùng hành vi (B4: phân biệt rõ với
+    # rỗng tường minh nhưng CÙNG outcome NEEDS_HUMAN, KHÔNG tự viết đè).
+    with pytest.raises(InsufficientScenesError):
+        video_fields_from_data({"title": "T"}, brief)
+
+
 def test_produce_from_sheet_insufficient_scenes_marks_needs_human_no_crash():
     """BƯỚC 3 — InsufficientScenesError bắt RIÊNG ở produce_from_sheet.run():
     dòng video ghi NEEDS_HUMAN kèm note đề xuất chuyển loại, KHÔNG crash cả
@@ -5635,15 +5939,15 @@ def test_produce_from_sheet_insufficient_scenes_marks_needs_human_no_crash():
 
     # KHÔNG crash: run() trả result bình thường, article VẪN được sản xuất.
     assert result["produced"] >= 1
-    article_rows = [r for r in board.appended_content if r[2] == "article"]
+    article_rows = [r for r in board.appended_content if r[2] == "Article"]
     assert len(article_rows) == 1 and article_rows[0][3] == "DONE"
 
     # Dòng video: NEEDS_HUMAN, note đề xuất chuyển loại — KHÔNG có cảnh bịa nào
     # (không có content_row nào type="video" với Status=DONE).
-    video_rows = [r for r in board.appended_content if r[2] == "video"]
+    video_rows = [r for r in board.appended_content if r[2] == "Video"]
     assert len(video_rows) == 1
-    assert video_rows[0][3] == "NEEDS_HUMAN"
-    assert "chuyển loại" in video_rows[0][5]   # Notes
+    assert video_rows[0][3] == "Cần người review lại nội dung"   # nhãn VI cho NEEDS_HUMAN
+    assert "Nguồn không đủ chất liệu để dựng video" in video_rows[0][5]   # VIỆC 5: INSUFFICIENT_SCENES
 
 
 def test_run_and_run_draft_die_only_at_sheet_native_config_reads_when_credential_off():
@@ -6318,8 +6622,8 @@ def test_run_output_type_explicit_infographic_on_qualitative_only_article_no_num
         route_llm=_QualitativeOnlyNoNumberRouteLLM(), content_llm=_ComposerLLM())
 
     rows_by_type = {r[2]: r for r in board.appended_content}
-    assert set(rows_by_type) == {"infographic"}
-    assert rows_by_type["infographic"][3] == "DONE", (
+    assert set(rows_by_type) == {"Infographic"}
+    assert rows_by_type["Infographic"][3] == "DONE", (
         f"Output Type chọn tường minh Infographic trên bài không số -- PHẢI thực thi, "
         f"thực tế: {rows_by_type['infographic'][3]} | {rows_by_type['infographic'][5][:150]}"
     )
@@ -8350,25 +8654,28 @@ def test_content_row_shape():
     "Approve(gate 2)"/"Gate3" cũ — so bằng hằng số, KHÔNG hard-code lại literal.
     Sheet UI cleanup Phase 6: "Social Link" chen giữa AssetPath và GATE3_COL,
     "Posting Status" append sau GATE3_COL — cả 2 đều NGƯỜI điền tay, mặc định
-    rỗng cho hàng máy ghi."""
+    rỗng cho hàng máy ghi. VIỆC 3 (2026-08-04): "Người thực hiện" chen giữa
+    AssetPath và Social Link — NGƯỜI điền tay, không có tham số ở content_row()
+    (xem docstring hàm), mặc định rỗng cho hàng máy ghi."""
     from twmkt.sheets_board import GATE2_COL, GATE3_COL, content_row, CONTENT_HEADER
     assert CONTENT_HEADER == ["Timestamp", "Context", "Type", "Status", "Output",
                              "Notes", GATE2_COL, "TopicKey",
-                             "Facts", "AssetPath", "Social Link", GATE3_COL,
+                             "Facts", "AssetPath", "Người thực hiện", "Social Link", GATE3_COL,
                              "Posting Status"]
     row = content_row(context="Bài A", type_="article", status="DONE",
                       output="nội dung", notes="ok", ts="ts", topic_key="key-a")
     d = dict(zip(CONTENT_HEADER, row))
-    assert d == {"Timestamp": "ts", "Context": "Bài A", "Type": "article", "Status": "DONE",
+    assert d == {"Timestamp": "ts", "Context": "Bài A", "Type": "Article", "Status": "DONE",
                  "Output": "nội dung", "Notes": "ok", GATE2_COL: "PENDING",
-                 "TopicKey": "key-a", "Facts": "", "AssetPath": "", "Social Link": "",
-                 GATE3_COL: "PENDING", "Posting Status": ""}
+                 "TopicKey": "key-a", "Facts": "", "AssetPath": "", "Người thực hiện": "",
+                 "Social Link": "", GATE3_COL: "PENDING", "Posting Status": ""}
     row2 = content_row(context="Bài B", type_="video", status="ERROR",
                        output="x", approve="APPROVE", ts="ts2")
     d2 = dict(zip(CONTENT_HEADER, row2))
     assert d2[GATE2_COL] == "APPROVE"
     assert d2["TopicKey"] == ""   # mặc định rỗng nếu caller chưa truyền
     assert d2["Facts"] == "" and d2["AssetPath"] == "" and d2[GATE3_COL] == "PENDING"
+    assert d2["Người thực hiện"] == ""
     assert d2["Social Link"] == "" and d2["Posting Status"] == ""
 
 
@@ -8868,6 +9175,298 @@ def test_render_one_missing_topic_key_in_store_returns_error_reason(monkeypatch,
     assert "khong-ton-tai" in warn_map[rpa._PRIMARY_RATIO]
 
 
+def test_render_production_assets_run_ranking_guard_notes_survive_resync(monkeypatch, tmp_path):
+    """VIỆC A5 (Lead 02/08) — PHÉP THỬ DUY NHẤT chứng minh vá đúng: chạy 1 job
+    có ranking giả (spec 4 highlights, cap tỷ lệ "4:5" chỉ giữ 3 -> density
+    cap CẮT 1, xem render/ai_full.apply_density_cap/_priority_rank) qua
+    render_production_assets.run() THẬT, rồi gọi LẠI store/sync_service.
+    render_content_to_sheet() (mô phỏng lượt sync kế tiếp) -- Notes PHẢI CÒN
+    nguyên mã RENDER_RANKING_GUARD trên Sheet SAU khi sync chạy lại.
+
+    Trước bản vá (VIỆC A): renderer ghi Notes THẲNG board.set_content_cell()
+    (KHÔNG ingest ngược store) -> render_content_to_sheet() dựng lại TOÀN BỘ
+    tab từ store (không có Notes đó) -> mất trắng. Test này khoá ĐÚNG luồng
+    ngược lại: ghi store trước (A1), rồi để sync hiển thị theo cơ chế chung
+    (A3) -- không phải test riêng lẻ render_one()/set_content_cell()."""
+    import json as _json
+    import httpx
+    from store import document_store as ds
+    from store import pipeline_store as ps
+    from store import sync_service as ss
+    from twmkt.config import Settings
+    from twmkt.sheets_board import CONTENT_HEADER, SheetsBoard, content_row
+
+    rpa = _render_prod_assets_module()
+    tiny_png_b64 = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+
+    def _fake_success(*a, **kw):
+        return httpx.Response(200, json={"data": [{"b64_json": tiny_png_b64}]},
+                              request=httpx.Request("POST", "https://api.openai.com/v1/images/generations"))
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-fake-key-not-real")
+    monkeypatch.setattr(httpx, "post", _fake_success)
+
+    db_path = tmp_path / "store.db"
+    monkeypatch.setenv("DOCUMENT_STORE_PATH", str(db_path))
+    ds.init_db(db_path)
+
+    # Spec "ranking giả": 4 highlights, tỷ lệ "4:5" (cap highlights=3, xem
+    # render.ai_full._DEFAULT_DENSITY_CAPS) -> density cap CHẮC CHẮN cắt 1.
+    spec = {
+        "title": "Tin ranking giả", "subtitle": "", "hero": [{"label": "X", "value": "1%"}],
+        "market": [], "highlights": ["A", "B", "C", "D"], "related": [],
+        "priority": {"primary": [], "secondary": [], "minor": []},
+        "source": "test.vn", "render_hint": {"ratio": "4:5"},
+    }
+    ps.write_content_output("tk-rank", "infographic", {"output": _json.dumps(spec), "status": "DONE"},
+                            db_path=db_path)
+
+    row = content_row(context="Tin ranking giả", type_="infographic", status="DONE",
+                      output=_json.dumps(spec), topic_key="tk-rank", approve="APPROVE")
+
+    class _FakeContentWS:
+        id = 1
+        def __init__(self, values):
+            self._v = [list(r) for r in values]
+        def get_all_values(self):
+            return [list(r) for r in self._v]
+
+    fake_board = SheetsBoard(spreadsheet_id="X", creds_path="Y")
+    fake_board._ws["CONTENT"] = _FakeContentWS([list(CONTENT_HEADER), row])
+
+    test_settings = Settings({"storage": {"data_root": str(tmp_path / "data")}})
+    monkeypatch.setattr(rpa, "load_settings", lambda: test_settings)
+    monkeypatch.setattr(rpa, "_open_board", lambda settings: fake_board)
+
+    result = rpa.run(limit=1)
+    assert result["rendered"] == 1
+
+    # (1) content_output.notes trong STORE có mã RENDER_RANKING_GUARD ngay
+    # sau render — xác nhận A1 (ghi store, không ghi thẳng Sheet).
+    rec = ps.read_content_output("tk-rank", "infographic", db_path=db_path)
+    assert "RENDER_RANKING_GUARD" in rec["notes"], f"thiếu mã lý do trong store: {rec['notes']!r}"
+    assert "highlights" in rec["notes"] and "4:5" in rec["notes"]
+
+    # (2) PHÉP THỬ A5 THẬT: mô phỏng lượt SYNC KẾ TIẾP (store/sync_service.
+    # render_content_to_sheet(), CHÍNH nơi trước đây "dựng lại toàn bộ tab từ
+    # store" XOÁ MẤT Notes ghi thẳng Sheet) -- Notes PHẢI CÒN NGUYÊN sau đó.
+    class _FakeSyncWS:
+        def __init__(self):
+            self._v: list[list[str]] = []
+        def get_all_values(self):
+            return [list(r) for r in self._v]
+        def update(self, range_str, values, value_input_option="RAW"):
+            start = int(range_str[1:]) if len(range_str) > 1 else 1
+            need = start - 1 + len(values)
+            while len(self._v) < need:
+                self._v.append([])
+            for i, r in enumerate(values):
+                self._v[start - 1 + i] = [str(c) for c in r]
+        def batch_clear(self, ranges):
+            import re as _re
+            for rng in ranges:
+                m = _re.match(r"A(\d+):", rng)
+                if m:
+                    self._v = self._v[: int(m.group(1)) - 1]
+
+    class _FakeSyncBoard:
+        def __init__(self):
+            self._tabs = {"CONTENT": _FakeSyncWS()}
+        def _tab(self, name):
+            return self._tabs[name]
+
+    sync_board = _FakeSyncBoard()
+    ss.render_content_to_sheet(sync_board, db_path=db_path)
+    grid = sync_board._tab("CONTENT").get_all_values()
+    header = grid[0]
+    i_tk = [h.strip().lower() for h in header].index("topickey")
+    i_notes = [h.strip().lower() for h in header].index("notes")
+    row_out = next(r for r in grid[1:] if r[i_tk] == "tk-rank")
+    # Nhãn VI của RENDER_RANKING_GUARD (B3, sheets_board._display_notes) —
+    # Sheet hiển thị chữ đã dịch, store (kiểm ở assert phía trên) vẫn tiếng Anh.
+    assert "Ảnh tự thêm số thứ tự xếp hạng không có trong dữ liệu" in row_out[i_notes], (
+        f"Notes bị MẤT sau lượt sync kế tiếp -- đúng lỗi VIỆC A mô tả, thực tế: {row_out[i_notes]!r}"
+    )
+
+
+class _FakeSyncWS:
+    """VIỆC 4/5 (2026-08-03) — fake worksheet DÙNG CHUNG cho các test render_
+    content_to_sheet() dưới đây, cùng khuôn với _FakeSyncWS/_FakeSyncBoard cục
+    bộ ở test_render_production_assets_run_ranking_guard_notes_survive_resync
+    (không tái cấu trúc file để dùng chung — tránh đụng test đã có)."""
+    def __init__(self):
+        self._v: list[list[str]] = []
+
+    def get_all_values(self):
+        return [list(r) for r in self._v]
+
+    def update(self, range_str, values, value_input_option="RAW"):
+        start = int(range_str[1:]) if len(range_str) > 1 else 1
+        need = start - 1 + len(values)
+        while len(self._v) < need:
+            self._v.append([])
+        for i, r in enumerate(values):
+            self._v[start - 1 + i] = [str(c) for c in r]
+
+    def batch_clear(self, ranges):
+        import re as _re
+        for rng in ranges:
+            m = _re.match(r"A(\d+):", rng)
+            if m:
+                self._v = self._v[: int(m.group(1)) - 1]
+
+
+class _FakeSyncBoard:
+    def __init__(self):
+        self._tabs = {"CONTENT": _FakeSyncWS()}
+
+    def _tab(self, name):
+        return self._tabs[name]
+
+
+def _render_content_grid(db_path):
+    from store import sync_service as ss
+    board = _FakeSyncBoard()
+    ss.render_content_to_sheet(board, db_path=db_path)
+    grid = board._tab("CONTENT").get_all_values()
+    header = grid[0]
+    idx = {h.strip().lower(): i for i, h in enumerate(header)}
+    return grid[1:], idx
+
+
+def test_auto_total_failure_collapses_to_single_auto_error_row(tmp_path):
+    """VIỆC 4.2 — Output Type=AUTO, CẢ 3 tuyến đều KHÔNG sinh (0 DONE) -> ĐÚNG
+    1 dòng Type=AUTO/Status=ERROR/Notes gộp đủ nguyên nhân từng loại (khớp ví
+    dụ Nafoods Lead đưa). VIỆC 4.3 — store vẫn giữ đủ 3 bản ghi gốc (kiểm riêng
+    qua ps.read_content_output, KHÔNG bị xoá)."""
+    from store import document_store as ds
+    from store import pipeline_store as ps
+
+    db_path = tmp_path / "store.db"
+    ds.init_db(db_path)
+    tk = "tk-auto-fail"
+    ps.write_raw(tk, {"context": "Chủ đề AUTO thất bại toàn phần", "timestamp": "03/08/2026"}, db_path=db_path)
+    ps.write_gate_status(tk, gate1="APPROVE", execute="DONE", output_type=["AUTO"], db_path=db_path)
+    ps.write_content_output(tk, "article", {
+        "status": "ERROR", "output": "",
+        "notes": "Số liệu không thấy trong evidence/background: 28%",
+    }, db_path=db_path)
+    ps.write_content_output(tk, "infographic", {
+        "status": "ERROR", "output": "",
+        "notes": "SOURCE_BROKEN: content_units[] rỗng (Brief chưa trích được số liệu, "
+                "brief_status=FAILED — lỗi hạ tầng thật) -> NEEDS_HUMAN, không bịa nhãn 'Số liệu N'",
+    }, db_path=db_path)
+    ps.write_content_output(tk, "video", {
+        "status": "ERROR", "output": "",
+        "notes": "Nguồn chỉ đủ dựng 1 cảnh (cần tối thiểu 3 để video có hook+thân+outro) — "
+                "KHÔNG bịa cảnh đệm cho đủ số. Đề xuất chuyển loại nội dung sang "
+                "infographic/article cho chủ đề này (nguồn nghèo SCENE video, KHÔNG có "
+                "nghĩa nghèo SỐ LIỆU — 2 loại kia dùng chung content_units[]).",
+    }, db_path=db_path)
+
+    rows, idx = _render_content_grid(db_path)
+    matching = [r for r in rows if r[idx["topickey"]] == tk]
+    assert len(matching) == 1, f"kỳ vọng ĐÚNG 1 dòng gộp, thực tế {len(matching)} dòng"
+    row = matching[0]
+    assert row[idx["type"]] == "AUTO"
+    assert row[idx["status"]] == "ERROR"
+    notes = row[idx["notes"]]
+    assert notes.startswith("Không tạo được nội dung nào.")
+    assert "Bài viết: Số liệu 28% trong bài không có trong nguồn" in notes
+    assert "Ảnh: Không trích được dữ kiện nào từ bài gốc" in notes
+    assert "Video: Nguồn không đủ chất liệu để dựng video" in notes
+    # 5.1 -- KHÔNG được lộ thuật ngữ kỹ thuật trong câu gộp hiển thị.
+    for banned in ("content_units[]", "brief_status", "evidence/background", "SOURCE_BROKEN"):
+        assert banned not in notes, f"Notes gộp còn lộ thuật ngữ kỹ thuật: {banned!r} trong {notes!r}"
+
+    # VIỆC 4.3 -- store vẫn giữ đủ 3 bản ghi gốc kèm mã lý do GỐC tiếng Anh.
+    assert "SOURCE_BROKEN" in ps.read_content_output(tk, "infographic", db_path=db_path)["notes"]
+    assert "content_units[]" in ps.read_content_output(tk, "video", db_path=db_path)["notes"]
+
+
+def test_auto_partial_success_hides_error_row_keeps_done_and_skipped(tmp_path):
+    """VIỆC 4.2 — Output Type=AUTO, ≥1 tuyến DONE -> BỎ dòng của loại LỖI
+    (Status=ERROR), GIỮ dòng DONE và dòng SKIPPED (Router chủ động từ chối,
+    KHÔNG PHẢI lỗi — không đụng, đã có Notes giải thích riêng từ trước)."""
+    from store import document_store as ds
+    from store import pipeline_store as ps
+
+    db_path = tmp_path / "store.db"
+    ds.init_db(db_path)
+    tk = "tk-auto-partial"
+    ps.write_raw(tk, {"context": "Chủ đề AUTO thành công 1 phần", "timestamp": "03/08/2026"}, db_path=db_path)
+    ps.write_gate_status(tk, gate1="APPROVE", execute="DONE", output_type=["AUTO"], db_path=db_path)
+    ps.write_content_output(tk, "article", {"status": "DONE", "output": "# Bài viết thật", "notes": ""},
+                            db_path=db_path)
+    ps.write_content_output(tk, "infographic", {
+        "status": "ERROR", "output": "",
+        "notes": "SOURCE_BROKEN: content_units[] rỗng (Brief chưa trích được số liệu)",
+    }, db_path=db_path)
+    ps.write_content_output(tk, "video", {
+        "status": "SKIPPED", "output": "",
+        "notes": "FORMAT_MISMATCH: Router quyết định tuyến video không hợp tin này: "
+                "Thiếu narrative kể chuyện.",
+    }, db_path=db_path)
+
+    rows, idx = _render_content_grid(db_path)
+    matching = {r[idx["type"]]: r for r in rows if r[idx["topickey"]] == tk}
+    assert set(matching) == {"Article", "Video"}, (
+        f"kỳ vọng CHỈ Article (DONE) + Video (SKIPPED), KHÔNG Infographic (ERROR bị ẩn) -- "
+        f"thực tế: {sorted(matching)}"
+    )
+    assert matching["Article"][idx["status"]] == "DONE"
+    assert matching["Video"][idx["status"]] == "BỎ QUA"
+    assert "Nội dung không phù hợp để làm video" in matching["Video"][idx["notes"]]
+
+    # Store vẫn giữ NGUYÊN bản ghi infographic ERROR (chỉ ẩn ở Sheet, không xoá).
+    assert ps.read_content_output(tk, "infographic", db_path=db_path)["status"] == "ERROR"
+
+
+def test_explicit_output_type_error_not_collapsed_to_auto():
+    """VIỆC 4.1 — Output Type CHỌN TƯỜNG MINH (không phải AUTO) mà hỏng ->
+    GIỮ NGUYÊN Type = loại đã chọn, Status = ERROR — KHÔNG gộp thành AUTO (che
+    mất việc hệ thống không làm được điều người yêu cầu)."""
+    import tempfile
+    from pathlib import Path
+    from store import document_store as ds
+    from store import pipeline_store as ps
+
+    db_path = Path(tempfile.mkdtemp()) / "store.db"
+    ds.init_db(db_path)
+    tk = "tk-explicit-error"
+    ps.write_raw(tk, {"context": "Chủ đề chọn Article tường minh mà hỏng", "timestamp": "03/08/2026"},
+                db_path=db_path)
+    ps.write_gate_status(tk, gate1="APPROVE", execute="NEEDS_HUMAN", output_type=["Article"], db_path=db_path)
+    ps.write_content_output(tk, "article", {
+        "status": "ERROR", "output": "",
+        "notes": "Số liệu không thấy trong evidence/background: 96%",
+    }, db_path=db_path)
+
+    rows, idx = _render_content_grid(db_path)
+    matching = [r for r in rows if r[idx["topickey"]] == tk]
+    assert len(matching) == 1
+    assert matching[0][idx["type"]] == "Article"          # KHÔNG bị đổi thành AUTO
+    assert matching[0][idx["status"]] == "ERROR"
+    assert "Số liệu 96% trong bài không có trong nguồn" in matching[0][idx["notes"]]
+
+
+def test_notes_business_unknown_code_falls_back_to_generic_message(capsys):
+    """VIỆC 5.6 — mã lý do MỚI phát sinh sau này (chưa có trong labels.vi.
+    notes_messages/notes_codes) mà câu vẫn còn dấu hiệu kỹ thuật (ở đây:
+    "null", chưa từng dịch) -> hiển thị câu chung "Không xử lý được, cần kiểm
+    tra lại", KHÔNG lộ chuỗi kỹ thuật ra Sheet, VÀ ghi log cảnh báo."""
+    from twmkt.sheets_board import _display_notes_business
+
+    raw = "SOME_BRAND_NEW_CODE: giá trị trả về là null, chưa có bộ dịch cho mã này"
+    out = _display_notes_business(raw)
+    assert out == "Không xử lý được, cần kiểm tra lại"
+    assert "null" not in out and "SOME_BRAND_NEW_CODE" not in out
+    captured = capsys.readouterr()
+    assert "CẢNH BÁO" in captured.out and "mã lý do mới" in captured.out
+
+
 # =============================================================================
 # PHASE QUEUE (2026-07-27) — scripts/queue_worker.py::run_once()
 # =============================================================================
@@ -9043,9 +9642,18 @@ def test_queue_worker_run_once_ingests_sheet_approval_before_claiming(monkeypatc
     monkeypatch.setenv("DOCUMENT_STORE_PATH", str(db_path))
     ds.init_db(db_path)
 
+    # Timestamp = HÔM NAY (không hard-code ngày cụ thể): render_context_to_sheet()
+    # lọc qua _visible_rows() (store/sync_service.py) -- chỉ giữ dòng trong
+    # `sheets.display_days` ngày gần nhất (mặc định 7). Test gốc hard-code
+    # "24/07/2026", trôi ra ngoài cửa sổ 7 ngày khi chạy sau đó vài ngày ->
+    # dòng bị lọc mất khỏi Sheet render, StopIteration ở dưới (Lead 02/08,
+    # Phần 2: đây là hành vi ĐÚNG của Sheet thật/_visible_rows, KHÔNG phải bug
+    # queue_worker -- sửa test cho khớp, không đụng code production).
+    from datetime import datetime as _dt
+    today_ddmmyyyy = _dt.now().strftime("%d/%m/%Y")
     board = _FakeBoard([
         CONTEXT_HEADER,
-        ["24/07/2026", "0.0", "0", "", "", "Bài vừa duyệt", "h", "u1",
+        [today_ddmmyyyy, "0.0", "0", "", "", "Bài vừa duyệt", "h", "u1",
          "APPROVE", "", "", "", "", "tk-vua-duyet"],
     ])
 
@@ -9067,16 +9675,68 @@ def test_queue_worker_run_once_ingests_sheet_approval_before_claiming(monkeypatc
     i_tk = header.index("TopicKey")
     row = next(r for r in rendered[1:] if r[i_tk] == "tk-vua-duyet")
     # 2026-07-28: worker ghi "Running..." NGAY sau claim; NHƯNG `_sync_sheet()`
-    # cuối lượt ingest LẠI Sheet trước khi render, mà Sheet (fake) vẫn còn
-    # Gate1=APPROVE trong khi store đã APPROVE -> không có chuyển tiếp, không
-    # reset. Giá trị cuối là "Waiting" vì lượt ingest ĐẦU (khi store chưa có
-    # gate1) đã đặt Waiting, rồi `run` bị stub nên không ghi outcome nào đè lên
-    # "Running...". Điều test này khoá là Sheet PHẢI phản ánh store, không phải
-    # đứng hình ở giá trị lúc duyệt.
+    # cuối lượt ingest LẠI Sheet trước khi render (ingest thứ 2 đọc lại Sheet
+    # giả vẫn còn Execute="" từ fixture gốc, không phải giá trị "Running..."
+    # vừa ghi) -> giá trị cuối quan sát được là "Waiting" (mặc định
+    # EXECUTE_WAITING khi gate_status.execute rỗng), không phải "Running...".
+    # Test CHỈ khoá "Sheet PHẢI phản ánh store, KHÔNG đứng hình ở giá trị lúc
+    # duyệt (APPROVE)" -- chấp nhận CẢ 2 giá trị vì race ingest/render 2 lượt
+    # liên tiếp trong 1 lượt gọi produce=stub là hành vi biết trước của test
+    # double, KHÔNG phải điều cần khoá chặt ở đây. Cần XÁC NHẬN BẰNG LƯỢT
+    # CHẠY THẬT (Lead 02/08, Phần 2.2): bấm APPROVE trên Sheet thật, cột
+    # Execute phải đi Waiting -> Running -> DONE; nếu đứng hình ở Waiting mãi
+    # (không đi tiếp) thì ĐÓ MỚI là bug thật trong run_once()/_sync_sheet(),
+    # quay lại sửa production code.
     assert row[i_ex] in ("Running...", "Waiting")
 
     row = qs.list_queue(db_path=db_path)[0]
     assert row["topic_key"] == "tk-vua-duyet" and row["status"] == "done"
+
+
+# =============================================================================
+# scripts/queue_worker_watchdog.py (2026-08-04, Lead: "hệ thống chạy full
+# tính năng mà không cần thông qua agent") — Task Scheduler từ chối đăng ký
+# trigger "At log on"/"At startup" trên máy này (Access is denied, cần quyền
+# nâng cao không có sẵn trong môi trường agent) -- watchdog chạy theo lịch
+# MINUTE (không cần quyền nâng cao, đã dùng cho TWMKT-Crawl-*/TWMKT-Draft)
+# để đạt hiệu quả tương đương "tự khởi động lại khi crash".
+# =============================================================================
+
+def _queue_worker_watchdog_module():
+    import os as _os
+    import sys as _sys
+    REPO_ROOT_ = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), ".."))
+    _sys.path.insert(0, _os.path.join(REPO_ROOT_, "scripts"))
+    import queue_worker_watchdog as wd
+    return wd
+
+
+def test_watchdog_relaunches_when_no_lock_file_yet():
+    wd = _queue_worker_watchdog_module()
+    relaunch, reason = wd.should_relaunch(None)
+    assert relaunch is True
+    assert "lần đầu" in reason
+
+
+def test_watchdog_relaunches_when_lock_content_is_malformed():
+    wd = _queue_worker_watchdog_module()
+    relaunch, reason = wd.should_relaunch("khong-phai-host:pid-hop-le")
+    assert relaunch is True
+    assert "hỏng" in reason
+
+
+def test_watchdog_relaunches_when_pid_in_lock_is_dead():
+    wd = _queue_worker_watchdog_module()
+    relaunch, reason = wd.should_relaunch("may-a:4242", is_pid_alive_fn=lambda pid: False)
+    assert relaunch is True
+    assert "4242" in reason and "chết" in reason
+
+
+def test_watchdog_does_not_relaunch_when_pid_in_lock_is_alive():
+    wd = _queue_worker_watchdog_module()
+    relaunch, reason = wd.should_relaunch("may-a:4242", is_pid_alive_fn=lambda pid: True)
+    assert relaunch is False
+    assert "4242" in reason
 
 
 def test_asset_hyperlink_formula_wraps_url_string():
@@ -9218,6 +9878,33 @@ def test_format_message_escapes_html_special_chars():
     assert "&lt;script&gt;" in msg
     assert "<script>" not in msg
     assert "⏳" in msg   # emoji đúng event
+
+
+def test_format_message_uses_vietnamese_labels_for_known_events_and_keys():
+    """Yêu cầu Trung 02/08 — nhãn tiếng Việt CHỈ ở tầng hiển thị (build text
+    gửi Telegram), KHÔNG đổi string "event"/key ctx dùng làm định danh nội bộ
+    (notify() call site vẫn gọi "start"/"skipped"/"error"/"draft_changed"/
+    "topic"/"reason" y hệt, xem _EMOJI/notifier.events trong các test khác)."""
+    from twmkt.utils.telegram_notifier import format_message
+
+    msg = format_message("start", {"topic": "Bài test"})
+    assert "Bắt đầu xử lý nội dung" in msg and "Chủ đề:" in msg
+
+    msg = format_message("new_topic", {"topic": "Bài mới", "reason": "vì X"})
+    assert "Chủ đề mới" in msg and "Chủ đề:" in msg and "Lý do:" in msg
+
+    msg = format_message("skipped", {"topic": "t", "reason": "vì Y"})
+    assert "Bỏ qua" in msg and "Lý do:" in msg
+
+    msg = format_message("error", {"topic": "t", "reason": "vì Z"})
+    assert "Lỗi xử lý" in msg
+
+    msg = format_message("draft_changed", {"topic": "t"})
+    assert "Cập nhật nội dung" in msg
+
+    # Event/key LẠ (không trong bảng dịch) giữ NGUYÊN tiếng Anh.
+    msg = format_message("gate2_done", {"written": 3, "approved": 2})
+    assert "gate2_done" in msg and "written:" in msg and "approved:" in msg
 
 
 def test_format_message_maps_writer_retry_events_to_error_emoji():
@@ -10135,7 +10822,7 @@ def test_execute_column_has_one_color_rule_per_state_and_no_dropdown():
     (read-only với người). Khoá cả 2 mặt để không ai vô tình thêm lại dropdown
     hay bỏ sót màu khi thêm trạng thái mới."""
     from twmkt.sheets_board import (
-        CONTEXT_HEADER, EXECUTE_VALUES, TabMeta, _tab_requests,
+        CONTEXT_HEADER, EXECUTE_VALUES, TabMeta, _display_status, _tab_requests,
     )
 
     t = TabMeta(name="CONTEXT", header=list(CONTEXT_HEADER), sheet_id=1, n_rows=3)
@@ -10151,12 +10838,137 @@ def test_execute_column_has_one_color_rule_per_state_and_no_dropdown():
         vals = rule.get("booleanRule", {}).get("condition", {}).get("values", [])
         if vals:
             colored.add(vals[0]["userEnteredValue"])
-    assert set(EXECUTE_VALUES) <= colored, f"thiếu màu cho: {set(EXECUTE_VALUES) - colored}"
+    # Rule khớp CHỮ THẬT SỰ ghi lên ô (context_row() dịch NEEDS_HUMAN -> nhãn
+    # VI, xem _display_status()) — so bằng giá trị ĐÃ DỊCH, không phải hằng số
+    # nội bộ trần (chỉ NEEDS_HUMAN có nhãn khác; còn lại _display_status trả
+    # nguyên giá trị đầu vào).
+    expected = {_display_status(v) for v in EXECUTE_VALUES}
+    assert expected <= colored, f"thiếu màu cho: {expected - colored}"
 
     for r in reqs:
         sd = r.get("setDataValidation")
         if sd and sd["range"].get("startColumnIndex") == i_exec:
             assert "rule" not in sd, "Execute là cột read-only -> KHÔNG được có dropdown"
+
+
+def test_content_rows_taller_than_context_rows_for_easier_skimming():
+    """Trung 02/08 — tab CONTENT (Output/Notes dài, thân bài/JSON preview) cần
+    khoảng đọc rộng hơn CONTEXT để liếc nhanh nhiều dòng, KHÔNG auto-resize
+    theo độ dài nội dung (Sheets API không có, xem _CONTENT_ROW_HEIGHT) — chỉ
+    set 1 chiều cao CỐ ĐỊNH cao hơn mặc định cho MỌI dòng dữ liệu CONTENT.
+    CONTEXT KHÔNG bị đụng (giữ mặc định Sheets như trước)."""
+    from twmkt.sheets_board import CONTENT_HEADER, CONTEXT_HEADER, TabMeta, _tab_requests
+
+    def _row_height_requests(tab_name, header):
+        t = TabMeta(name=tab_name, header=list(header), sheet_id=1, n_rows=5)
+        reqs = _tab_requests(t)
+        return [r["updateDimensionProperties"] for r in reqs
+                if "updateDimensionProperties" in r
+                and r["updateDimensionProperties"]["range"].get("dimension") == "ROWS"
+                and r["updateDimensionProperties"]["range"].get("startIndex") == 1]
+
+    content_reqs = _row_height_requests("CONTENT", CONTENT_HEADER)
+    assert len(content_reqs) == 1, f"kỳ vọng ĐÚNG 1 request chiều cao dòng CONTENT: {content_reqs}"
+    # Trung 02/08 (chốt sau khi đo thật): dải 45-60px, CỐ ĐỊNH (không tự giãn
+    # theo nội dung như trước khi sửa).
+    px = content_reqs[0]["properties"]["pixelSize"]
+    assert 45 <= px <= 60, f"chiều cao dòng CONTENT phải trong dải 45-60px, thực tế {px}"
+
+    context_reqs = _row_height_requests("CONTEXT", CONTEXT_HEADER)
+    assert context_reqs == [], "CONTEXT KHÔNG được set chiều cao dòng riêng (giữ mặc định)"
+
+
+def test_display_status_and_notes_read_vi_labels_from_config(monkeypatch):
+    """B2 (Lead 02/08) — bảng ánh xạ nhãn tiếng Việt PHẢI đọc từ config/
+    settings.yaml (`labels.vi.*`), không hard-code: đổi config -> đổi nhãn
+    hiển thị NGAY, không cần sửa code. Test bằng cách monkeypatch load_
+    settings() trả về 1 bảng KHÁC bảng mặc định hard-code trong code, xác
+    nhận sheets_board._display_status()/_display_notes() dùng ĐÚNG bảng đó."""
+    import twmkt.config as twmkt_config
+    from twmkt.config import Settings
+    from twmkt.sheets_board import _display_notes, _display_status
+
+    custom = Settings({"labels": {"vi": {
+        "sheet_status": {"SKIPPED": "ĐÃ HUỶ (test)"},
+        "notes_codes": {"FORMAT_MISMATCH": "Sai định dạng (test)"},
+    }}})
+    monkeypatch.setattr(twmkt_config, "load_settings", lambda *a, **kw: custom)
+
+    assert _display_status("SKIPPED") == "ĐÃ HUỶ (test)"      # KHÁC mặc định "BỎ QUA"
+    assert "Sai định dạng (test)" in _display_notes("FORMAT_MISMATCH: lý do X")
+    # Giá trị KHÔNG có trong bảng config tuỳ biến (NEEDS_HUMAN) -> lùi về giá
+    # trị GỐC (config này không định nghĩa) -- không đoán/không giữ mặc định
+    # hard-code cũ khi ĐàCÓ khối labels.vi.sheet_status hợp lệ (dù thiếu key).
+    assert _display_status("NEEDS_HUMAN") == "NEEDS_HUMAN"
+
+
+def test_display_status_and_notes_fall_back_to_hardcoded_default_when_config_missing(monkeypatch):
+    """B2 — thiếu file config/khối labels.vi hoàn toàn (hoặc lỗi đọc bất kỳ)
+    -> KHÔNG nổ, lùi về bảng mặc định hard-code trong code (an toàn vận
+    hành — 1 lỗi cấu hình không được chặn hiển thị Sheet)."""
+    import twmkt.config as twmkt_config
+    from twmkt.sheets_board import _display_notes, _display_status
+
+    def _raise(*a, **kw):
+        raise FileNotFoundError("không có settings.yaml (mô phỏng)")
+
+    monkeypatch.setattr(twmkt_config, "load_settings", _raise)
+
+    assert _display_status("SKIPPED") == "BỎ QUA"
+    assert _display_status("NEEDS_HUMAN") == "Cần người review lại nội dung"
+    assert "Không hợp định dạng" in _display_notes("FORMAT_MISMATCH: lý do X")
+
+
+def test_vi_labels_do_not_affect_internal_string_comparisons_b4(monkeypatch, tmp_path):
+    """B4 (Lead 02/08) — đổi nhãn hiển thị KHÔNG được gãy bất kỳ so sánh
+    trạng thái nào bằng chuỗi TRONG CODE (B1: giá trị store/code giữ nguyên
+    tiếng Anh, chỉ Sheet/Telegram hiển thị khác). Khoá cứng bằng lượt chạy
+    THẬT: đổi config `labels.vi` sang bảng KHÁC HẲN, chạy produce_from_sheet.
+    run() với 1 chủ đề bị SKIP (NO_USABLE_CONTENT) -- kết quả nghiệp vụ
+    (skipped/produced/Execute) PHẢI GIỐNG HỆT dù nhãn hiển thị đổi, chứng tỏ
+    mọi rẽ nhánh trong code đọc giá trị GỐC tiếng Anh, không đọc chữ đã dịch."""
+    import json as _json
+    import twmkt.config as twmkt_config
+    from twmkt.config import Settings, load_settings as real_load_settings
+
+    class _PoisonWriterLLM:
+        def complete(self, *a, **kw):
+            raise AssertionError("KHÔNG được gọi writer khi brief_status=NO_USABLE_CONTENT")
+
+    class _BoilerplateRouteLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False, **kw):
+            if "no_numeric_content" in system:
+                return _json.dumps({"content_units": [], "no_numeric_content": False}, ensure_ascii=False)
+            return ""
+
+    base = real_load_settings()
+    weird = dict(base._data)   # Settings._data — xem twmkt/config.py
+    weird["labels"] = {"vi": {
+        "sheet_status": {"SKIPPED": "XXX_KHÁC_HẲN"},
+        # VIỆC 5 (2026-08-03) — NO_USABLE_CONTENT giờ dịch CẢ CÂU qua
+        # `notes_messages.NO_USABLE_CONTENT_FULL` (xem sheets_board.
+        # _display_notes_business()), KHÔNG còn qua `notes_codes` (đó là cơ
+        # chế CŨ, chỉ thay 1 token — vẫn giữ cho _display_notes() cũ, không
+        # còn là đường content_row() dùng nữa).
+        "notes_messages": {"NO_USABLE_CONTENT_FULL": "YYY_KHÁC_HẲN"},
+    }}
+    monkeypatch.setattr(twmkt_config, "load_settings", lambda *a, **kw: Settings(weird))
+
+    result, board, notifier = _run_produce_scenario(
+        _PoisonWriterLLM(),
+        _approved_row("Trang chủ. Menu. Đăng nhập. Đang cập nhật nội dung...", row=2),
+        route_llm=_BoilerplateRouteLLM())
+
+    # Nghiệp vụ vẫn ĐÚNG y hệt hành vi gốc (test_run_boilerplate_source_now_
+    # skipped_not_fabricated_article_phase_c) dù nhãn config đổi hẳn --
+    # produce_from_sheet.py hoàn toàn KHÔNG đọc bảng labels.vi.
+    statuses = {r[2]: r[3] for r in board.appended_content}
+    assert statuses.get("Article") == "XXX_KHÁC_HẲN"   # Sheet hiển thị nhãn MỚI (đổi config có tác dụng)
+    for r in board.appended_content:
+        if r[2] == "Article":
+            assert "YYY_KHÁC_HẲN" in r[5]
+    assert result["produced"] == 0 and result["skipped"] >= 1   # nghiệp vụ KHÔNG đổi
+
 
 
 def test_queue_worker_sync_sheet_ingests_before_render_never_loses_approval(monkeypatch):
@@ -10386,6 +11198,33 @@ def test_drive_upload_same_name_updates_instead_of_duplicating(tmp_path):
     assert svc.updated == [first["id"]]
 
 
+def test_drive_upload_target_mime_type_converts_to_google_doc(tmp_path):
+    """VIỆC 2.1 (2026-08-03, Lead) — upload .md kèm target_mime_type=GOOGLE_DOC_
+    MIME -> body["mimeType"] gửi lên Drive PHẢI là mimeType Google Docs native
+    (Drive tự convert, KHÔNG tự dựng bộ chuyển đổi markdown->docx ở đây).
+    KHÔNG truyền target_mime_type (mặc định, vd ảnh/video) -> hành vi CŨ,
+    không đụng mimeType metadata."""
+    from twmkt.publishers.drive_store import GOOGLE_DOC_MIME, DriveAssetStore
+
+    f = tmp_path / "bai-viet_article.md"
+    f.write_text("# Tiêu đề\n\nNội dung.", encoding="utf-8")
+    svc = _FakeDriveSvc()
+    st = DriveAssetStore(folder_id="root", service=svc)
+
+    res = st.upload(f, topic="Bài viết test", topic_key="tk-doc",
+                    mime_type="text/markdown", target_mime_type=GOOGLE_DOC_MIME)
+
+    created = svc.items[res["id"]]
+    assert created["mime"] == GOOGLE_DOC_MIME
+
+    # Không truyền target_mime_type -> KHÔNG đổi hành vi cũ (mimeType mặc định
+    # do _FakeDriveSvc.create() suy ra "image/png" khi body thiếu mimeType).
+    f2 = tmp_path / "anh.png"
+    f2.write_bytes(b"\x89PNG")
+    res2 = st.upload(f2, topic="Ảnh test", topic_key="tk-img")
+    assert svc.items[res2["id"]]["mime"] == "image/png"
+
+
 def test_drive_store_requires_folder_id_with_actionable_message():
     from twmkt.publishers.drive_store import DriveAssetStore, DriveConfigError
 
@@ -10561,7 +11400,10 @@ def test_output_type_dropdown_offers_multi_format_combinations():
 
     # Mọi TỔ HỢP người có thể chọn (>=1 loại) phải map đúng.
     assert mod._allowed_output_types(["AUTO"]) is None
-    assert mod._allowed_output_types(["Long-Article"]) == set()
+    # VIỆC 1 (2026-08-03) — Long-Article giờ ĐÃ NỐI, dùng CHUNG kênh router
+    # "article" (Long-Article KHÔNG PHẢI kênh router riêng, chỉ khác content_type
+    # ghi ra + bộ rules, xem _wants_long_article()).
+    assert mod._allowed_output_types(["Long-Article"]) == {"article"}
     assert mod._allowed_output_types(["Article"]) == {"article"}
     assert mod._allowed_output_types(["Article", "Infographic"]) == {"article", "infographic"}
     assert mod._allowed_output_types(["Infographic", "Video"]) == {"infographic", "video"}
@@ -10586,6 +11428,144 @@ def test_output_type_auto_is_not_the_same_as_selecting_all_three():
     assert mod._allowed_output_types(["AUTO"]) is None
     assert mod._allowed_output_types(["Article", "Infographic", "Video"]) == \
         {"article", "infographic", "video"}
+
+
+class _FakeTextBoard:
+    """VIỆC 2 — fake board CHỈ đủ phần run_text_assets() dùng
+    (read_content_for_render), KHÔNG cần Sheet thật."""
+    def __init__(self, items_by_type: dict[str, list[dict]]):
+        self._items = items_by_type
+
+    def read_content_for_render(self, *, type_):
+        return self._items.get(type_, [])
+
+
+class _FakeTextDrive:
+    """Fake drive.upload() — ghi lại MỌI lệnh gọi (kèm target_mime_type) để
+    assert, KHÔNG chạm mạng thật."""
+    def __init__(self):
+        self.calls: list[dict] = []
+        self._n = 0
+
+    def upload(self, local_path, *, topic, topic_key, mime_type, target_mime_type=""):
+        self._n += 1
+        self.calls.append({
+            "topic_key": topic_key, "mime_type": mime_type,
+            "target_mime_type": target_mime_type,
+        })
+        return {"id": f"fid-{self._n}", "view_link": f"https://drive.google.com/file/d/fid-{self._n}/view"}
+
+
+def test_run_text_assets_converts_article_to_google_doc_not_video(tmp_path):
+    """VIỆC 2.1/2.3 (2026-08-03, Lead) — Article/Long-Article upload kèm
+    target_mime_type=GOOGLE_DOC_MIME (Drive tự convert).
+
+    SỬA LỖI THẬT (2026-08-03, Lead báo qua ca "Thế giới Di động") — "video"
+    KHÔNG còn trong _TEXT_OUTPUTS: trước đây có mặt để upload KỊCH BẢN JSON
+    làm AssetPath "cho đỡ trống" khi aigen "chưa nối" — nhưng aigen ĐÃ nối
+    thật (run_videos()/render_video_one() dựng .mp4 thật), và "video" vẫn còn
+    trong dict khiến run_text_assets() âm thầm ghi AssetPath = link KỊCH BẢN
+    (không phải video thật) mỗi khi run_videos() bỏ qua/lỗi ở lượt đó — Gate 2
+    trông như "đã xong" dù CHƯA có video thật. Lead xác nhận: CHỈ video.mp4
+    thật lên Drive mới được coi là hoàn thành -> run_text_assets() PHẢI bỏ
+    qua hoàn toàn dòng "video", dù Gate 2 đã APPROVE."""
+    from store import document_store as ds
+    from store import pipeline_store as ps
+    from twmkt.config import Settings
+    from twmkt.publishers.drive_store import GOOGLE_DOC_MIME
+
+    rpa = _render_prod_assets_module()
+    db_path = tmp_path / "store.db"
+    ds.init_db(db_path)
+
+    ps.write_content_output("tk-art", "article", {"status": "DONE", "output": "# Bài viết\n\nNội dung."},
+                            db_path=db_path)
+    ps.write_content_output("tk-long", "long_article", {"status": "DONE", "output": "# Bài dài\n\nNội dung dài."},
+                            db_path=db_path)
+    ps.write_content_output("tk-vid", "video", {"status": "DONE", "output": '{"scenes": []}'},
+                            db_path=db_path)
+    for tk in ("tk-art", "tk-long", "tk-vid"):
+        ps.write_content_status(tk, {"tk-art": "article", "tk-long": "long_article",
+                                    "tk-vid": "video"}[tk], gate2="APPROVE", db_path=db_path)
+
+    board = _FakeTextBoard({
+        "article": [{"topic_key": "tk-art", "context": "Bài viết", "approve_gate2": "APPROVE"}],
+        "long_article": [{"topic_key": "tk-long", "context": "Bài dài", "approve_gate2": "APPROVE"}],
+        "video": [{"topic_key": "tk-vid", "context": "Video", "approve_gate2": "APPROVE"}],
+    })
+    drive = _FakeTextDrive()
+    settings = Settings({"storage": {"data_root": str(tmp_path)}})
+    out_dir = tmp_path / "assets"
+    out_dir.mkdir()
+
+    with monkeypatch_db_path(db_path):
+        result = rpa.run_text_assets(settings=settings, board=board, drive=drive, out_dir=out_dir)
+
+    assert result["text_uploaded"] == 2   # CHỈ article + long_article -- video KHÔNG qua đường này
+    by_tk = {c["topic_key"]: c for c in drive.calls}
+    assert "tk-vid" not in by_tk, "video KHÔNG được upload kịch bản làm AssetPath giả -- phải qua aigen thật"
+    assert by_tk["tk-art"]["target_mime_type"] == GOOGLE_DOC_MIME
+    assert by_tk["tk-long"]["target_mime_type"] == GOOGLE_DOC_MIME
+    # content_status của tk-vid KHÔNG bị đụng -- vẫn chờ run_videos()/aigen thật.
+    assert not (ps.read_content_status("tk-vid", "video", db_path=db_path).get("asset_url") or "").strip()
+
+
+def test_run_text_assets_idempotent_by_content_hash_reuploads_on_change(tmp_path):
+    """VIỆC 2.4 — cùng TopicKey + cùng loại + cùng NỘI DUNG (hash) -> KHÔNG
+    upload lại (drive.upload() KHÔNG được gọi lần 2). Nội dung ĐỔI (viết lại)
+    -> hash khác -> upload lại (dùng lại CÙNG file qua update(), không tạo mới
+    — đã khoá riêng ở DriveAssetStore, ở đây chỉ kiểm drive.upload() ĐƯỢC gọi)."""
+    from store import document_store as ds
+    from store import pipeline_store as ps
+    from twmkt.config import Settings
+
+    rpa = _render_prod_assets_module()
+    db_path = tmp_path / "store.db"
+    ds.init_db(db_path)
+    ps.write_content_output("tk-art", "article", {"status": "DONE", "output": "# Bản 1"}, db_path=db_path)
+    ps.write_content_status("tk-art", "article", gate2="APPROVE", db_path=db_path)
+
+    board = _FakeTextBoard({
+        "article": [{"topic_key": "tk-art", "context": "Bài viết", "approve_gate2": "APPROVE"}],
+    })
+    drive = _FakeTextDrive()
+    settings = Settings({"storage": {"data_root": str(tmp_path)}})
+    out_dir = tmp_path / "assets"
+    out_dir.mkdir()
+
+    with monkeypatch_db_path(db_path):
+        r1 = rpa.run_text_assets(settings=settings, board=board, drive=drive, out_dir=out_dir)
+        assert r1["text_uploaded"] == 1 and len(drive.calls) == 1
+
+        # Chạy lại, NỘI DUNG KHÔNG đổi -> KHÔNG upload lại.
+        r2 = rpa.run_text_assets(settings=settings, board=board, drive=drive, out_dir=out_dir)
+        assert r2["text_uploaded"] == 0 and len(drive.calls) == 1
+
+        # Nội dung ĐỔI (viết lại bài) -> hash khác -> upload LẠI.
+        ps.write_content_output("tk-art", "article", {"status": "DONE", "output": "# Bản 2 (viết lại)"},
+                                db_path=db_path)
+        r3 = rpa.run_text_assets(settings=settings, board=board, drive=drive, out_dir=out_dir)
+        assert r3["text_uploaded"] == 1 and len(drive.calls) == 2
+
+
+class monkeypatch_db_path:
+    """Context manager nhỏ: đặt ENV DOCUMENT_STORE_PATH trong khối `with` rồi
+    khôi phục — pipeline_store/document_store đọc ENV này khi caller không
+    truyền db_path tường minh (run_text_assets() không nhận db_path, luôn đọc
+    qua ENV giống hệt production thật, xem store/document_store.py)."""
+    def __init__(self, db_path):
+        self._db_path = str(db_path)
+        self._orig = None
+
+    def __enter__(self):
+        self._orig = os.environ.get("DOCUMENT_STORE_PATH")
+        os.environ["DOCUMENT_STORE_PATH"] = self._db_path
+
+    def __exit__(self, *exc):
+        if self._orig is None:
+            os.environ.pop("DOCUMENT_STORE_PATH", None)
+        else:
+            os.environ["DOCUMENT_STORE_PATH"] = self._orig
 
 
 def test_render_videos_skips_rows_without_gate2_and_already_rendered(monkeypatch, tmp_path):
