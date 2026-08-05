@@ -16,8 +16,16 @@
 ## 1. NGUỒN CRAWL
 
 **Kết luận:** Nguồn crawl thật đọc từ tab SOURCES trên Google Sheet (13 nguồn,
-Enable=TRUE), KHÔNG phải từ `config/settings.yaml` (chỉ có 8 nguồn tĩnh, đã
-lệch so với Sheet — 5 nguồn chỉ tồn tại trên Sheet).
+Enable=TRUE), KHÔNG phải từ `config/settings.yaml` (có 9 nguồn `enabled: true`
+— [config/settings.yaml:210-313](../config/settings.yaml#L210), đã lệch so với
+Sheet — 4 nguồn chỉ tồn tại trên Sheet: Baochinhphu - Vĩ mô, Baochinhphu -
+Chứng khoán, Nguoiquansat - Tài chính Ngân hàng, VietnamBiz - Tài Chính Ngân
+Hàng).
+
+> **Ghi chú lệch config/Sheet (priority Vietstock):** `config/settings.yaml:318`
+> ghi `priority: 3` cho `vietstock-rss-co-phieu`, nhưng bảng dưới đây (đọc trực
+> tiếp Sheet) ghi Priority 5 — giữ nguyên số liệu Sheet trong bảng, chỉ ghi chú
+> lệch tại đây, không suy ra nguồn nào đúng.
 
 **Bằng chứng:**
 - Precedence Sheet-trước-config: [scripts/review_to_sheet.py:199](../scripts/review_to_sheet.py#L199)
@@ -129,7 +137,17 @@ DUY NHẤT, mode = `"full"` (đọc file nguyên văn, không cắt section).
 - Mode cấu hình: [config/settings.yaml:545](../config/settings.yaml#L545) (`rules_load_mode: "full"`)
 - File base: [config/settings.yaml:551](../config/settings.yaml#L551)
 - File supplement (chỉ Long-Article): [config/settings.yaml:557](../config/settings.yaml#L557)
-- Lời gọi thật: Article [production.py:602](../src/twmkt/agents/production.py#L602),
+- Lời gọi thật: Article/Long-Article [src/twmkt/agents/writer.py:88](../src/twmkt/agents/writer.py#L88)
+  (`build_writer_system()`, docstring dòng 68 tự khai "ĐÂY là đường Article/
+  Long-Article THẬT đang chạy sản xuất"), chuỗi gọi:
+  `scripts/produce_from_sheet.py:651` (`run_writer_with_retry(...)`) →
+  `run_writer()` [writer.py:106](../src/twmkt/agents/writer.py#L106) →
+  `build_writer_system()` [writer.py:88](../src/twmkt/agents/writer.py#L88).
+  `production.py:602` nằm trong `AnalysisWriterAgent.run()` nhưng agent này
+  **KHÔNG được gọi ở đường sản xuất thật** — chỉ 2 nơi gọi
+  `AnalysisWriterAgent(`: [scripts/ab_voice.py:74](../scripts/ab_voice.py#L74)
+  và [scripts/ab_voice2.py:62](../scripts/ab_voice2.py#L62) (script A/B thử
+  giọng văn, không phải sản xuất).
   Video [production.py:797](../src/twmkt/agents/production.py#L797),
   Infographic [production.py:1329](../src/twmkt/agents/production.py#L1329)
 
@@ -137,6 +155,9 @@ DUY NHẤT, mode = `"full"` (đọc file nguyên văn, không cắt section).
 ```bash
 sed -n '274,341p' src/twmkt/agents/production.py
 grep -n "rules_load_mode\|content_rules_path\|content_rules_supplement_path" config/settings.yaml
+grep -rn "_load_composer_rules(" src/ scripts/
+grep -rn "AnalysisWriterAgent(" scripts/ src/
+sed -n '64,91p' src/twmkt/agents/writer.py
 ```
 
 **Mức chắc chắn:** ĐÃ XÁC MINH BẰNG CODE.
@@ -145,15 +166,21 @@ grep -n "rules_load_mode\|content_rules_path\|content_rules_supplement_path" con
 
 ### 2.2 — Video Script có `rules_settings` theo request chưa
 
-**Kết luận:** Chưa. Cơ chế `rules_settings` (A/B theo request) tồn tại ở base
-class `Agent`, dùng CHUNG cho Article/Video/Infographic — nhưng grep toàn bộ
-`scripts/produce_from_sheet.py` + `agents/production.py` cho `.rules_settings =`
-ra **0 kết quả**. Nghĩa là trong sản xuất thật, tham số này luôn `None` — mọi
-loại output đều đọc `settings` toàn cục.
+**Kết luận:** Chưa. Cơ chế `rules_settings` (A/B theo request, khai báo ở base
+class `Agent`) chỉ THẬT SỰ được dùng ở Video ([production.py:797](../src/twmkt/agents/production.py#L797))
+và Infographic ([production.py:1329](../src/twmkt/agents/production.py#L1329))
+— nhưng grep toàn bộ `scripts/produce_from_sheet.py` + `agents/production.py`
+cho `.rules_settings =` ra **0 kết quả**, nên tham số này luôn `None` ở cả 2
+loại output đó. Đường Article/Long-Article THẬT (`writer.py:88`, xem mục 2)
+**KHÔNG đi qua cơ chế `rules_settings` này** — `build_writer_system()` nhận
+`settings` toàn cục qua tham số hàm thẳng từ `produce_from_sheet.py:651`, không
+qua thuộc tính `.rules_settings` của agent nào cả.
 
 **Bằng chứng:**
 - Khai báo: [src/twmkt/agents/base.py:242](../src/twmkt/agents/base.py#L242) (`rules_settings: object | None = None`)
 - Khởi tạo: [src/twmkt/agents/base.py:247](../src/twmkt/agents/base.py#L247) (`self.rules_settings = None`)
+- Dùng ở Video/Infographic: [production.py:797](../src/twmkt/agents/production.py#L797),
+  [production.py:1329](../src/twmkt/agents/production.py#L1329)
 
 **Lệnh kiểm nhanh:**
 ```bash
