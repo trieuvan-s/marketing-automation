@@ -11084,6 +11084,182 @@ def test_clean_document_inherits_published_at_from_raw():
     assert out and out[0].published_at == pub
 
 
+# --- TASK-009: log per-nguồn PERSIST (mở khoá chẩn đoán "nguồn im lặng") ----
+# Trước bản này, per_source (review_to_sheet.py) chỉ đi vào print() rồi mất
+# sau khi tiến trình kết thúc -- báo cáo khảo sát 1.2/1.3 không xác định được
+# vì sao 7/9 nguồn của lô 03/08 không ra bài nào. 4 hàm dưới đây tách theo
+# tầng: TẦNG 1 (_collect_one -- lỗi collector), TẦNG 2 (_dedup_dropped_by_
+# source -- trùng content-hash, cùng ĐÚNG luật/thứ tự với curation.normalize.
+# normalize()), TẦNG 3 (_bump_by_source -- quy cụm sự kiện chéo nguồn về
+# nguồn gốc), và persist (_log_source_stats -- board.log() có sẵn, 1 dòng/
+# nguồn). Test dùng FakeBoard nội bộ, KHÔNG gọi mạng/Sheet/LLM thật.
+class _FakeLogBoard:
+    """Board giả CHỈ cần log() -- ghi lại nguyên văn từng lượt gọi để test
+    xác nhận mỗi nguồn để lại ĐÚNG 1 bản ghi persist."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, str]] = []
+
+    def log(self, level, message, *, engine=""):
+        self.calls.append((level, message))
+
+
+def test_dedup_dropped_by_source_counts_duplicate_content_hash_per_source():
+    mod = _rpa_review_module()
+    from twmkt.models import RawDocument
+
+    docs = [
+        RawDocument(source="A", url="http://a/1", title="t1", markdown="Nội dung giống hệt nhau"),
+        RawDocument(source="A", url="http://a/2", title="t2", markdown="Nội dung giống hệt nhau"),  # trùng A
+        RawDocument(source="B", url="http://b/1", title="t3", markdown="Nội dung khác hẳn B"),
+        RawDocument(source="B", url="http://b/2", title="t4", markdown="Nội dung khác hẳn B"),  # trùng B
+        RawDocument(source="B", url="http://b/3", title="t5", markdown="Nội dung khác hẳn B nữa"),
+        RawDocument(source="C", url="http://c/1", title="t6", markdown="Nguồn C không trùng gì cả"),
+    ]
+    dropped = mod._dedup_dropped_by_source(docs)
+    assert dropped == {"A": 1, "B": 1}   # C không xuất hiện (0 bài trùng)
+
+
+def test_dedup_dropped_by_source_total_matches_normalize_dedup_exactly():
+    """Số dedup_dropped tính riêng PHẢI khớp với số normalize() thật sự dedup
+    trên CÙNG raw_docs -- nếu lệch nghĩa là đã đục sai luật seen_hashes.
+
+    3 bài đều PHẢI liên quan (có mã CK) để cô lập ĐÚNG tầng dedup -- normalize()
+    còn 1 tầng lọc relevance riêng (is_relevant), test đó ở chỗ khác."""
+    mod = _rpa_review_module()
+    from twmkt.curation import normalize
+    from twmkt.curation.config import CurationConfig
+    from twmkt.models import RawDocument
+
+    docs = [
+        RawDocument(source="CafeF", url="http://a/1", title="Cổ phiếu FPT tăng",
+                   markdown="Cổ phiếu FPT hôm nay tăng điểm mạnh " * 5),
+        RawDocument(source="Vietstock", url="http://b/1", title="Cổ phiếu FPT tăng",
+                   markdown="Cổ phiếu FPT hôm nay tăng điểm mạnh " * 5),   # trùng content-hash với bài trên
+        RawDocument(source="CafeF", url="http://a/2", title="Cổ phiếu HPG",
+                   markdown="Cổ phiếu HPG hưởng lợi giá thép " * 5),
+    ]
+    dropped = mod._dedup_dropped_by_source(docs)
+    clean = normalize(docs, CurationConfig())
+    assert sum(dropped.values()) == len(docs) - len(clean)
+
+
+def test_bump_by_source_attributes_cluster_urls_back_to_original_source():
+    """Cụm sự kiện gộp chéo nguồn (cluster_by_event) phải quy được TỪNG url
+    trong cụm về ĐÚNG nguồn đã crawl ra nó."""
+    mod = _rpa_review_module()
+    from twmkt.models import CleanDocument
+
+    by_url = {
+        "http://cafef/1": CleanDocument(source="CafeF", url="http://cafef/1", title="t", markdown="m"),
+        "http://vietstock/1": CleanDocument(source="Vietstock", url="http://vietstock/1",
+                                           title="t", markdown="m"),
+    }
+    counts: dict[str, int] = {}
+    mod._bump_by_source(counts, ["http://cafef/1", "http://vietstock/1"], by_url)   # 1 cụm, 2 nguồn
+    mod._bump_by_source(counts, ["http://cafef/1"], by_url)                          # cụm khác, chỉ CafeF
+    assert counts == {"CafeF": 2, "Vietstock": 1}
+
+
+def test_bump_by_source_ignores_url_not_found_in_by_url():
+    mod = _rpa_review_module()
+    counts: dict[str, int] = {}
+    mod._bump_by_source(counts, ["http://khong-ton-tai/1"], {})
+    assert counts == {}
+
+
+def test_collect_one_catches_exception_returns_error_string_not_crash():
+    """Nguồn lỗi mạng/parse KHÔNG được crash cả run() -- _collect_one() bắt
+    exception NGAY và trả về error string để per_source ghi lại."""
+    mod = _rpa_review_module()
+    from twmkt.models import Source
+
+    class _RaisingCollector:
+        def collect(self, s, limit):
+            raise ConnectionError("timeout sau 10s")
+
+    docs, error = mod._collect_one(_RaisingCollector(), Source("BaoLoi", "http://loi"), 3)
+    assert docs == []
+    assert error == "ConnectionError: timeout sau 10s"
+
+
+def test_collect_one_returns_docs_and_no_error_on_success():
+    mod = _rpa_review_module()
+    from twmkt.models import Source
+
+    class _OkCollector:
+        def collect(self, s, limit):
+            return ["doc1", "doc2"]
+
+    docs, error = mod._collect_one(_OkCollector(), Source("OK", "http://ok"), 3)
+    assert docs == ["doc1", "doc2"] and error is None
+
+
+def test_log_source_stats_persists_one_record_per_source_with_full_breakdown():
+    """Yêu cầu TASK-009: mỗi nguồn để lại 1 bản ghi PERSIST (board.log()), đủ
+    tách crawled / dedup_dropped / relevance_dropped / freshness_dropped /
+    full_fetch_dropped / context -- KHÔNG còn chỉ đi vào print() rồi mất."""
+    mod = _rpa_review_module()
+    board = _FakeLogBoard()
+    per_source = [
+        {"name": "CafeF", "fetch_type": "html", "crawled": 5, "dedup_dropped": 1,
+         "relevance_dropped": 1, "freshness_dropped": 1, "full_fetch_dropped": 0, "context": 2},
+        {"name": "Vietstock", "fetch_type": "rss", "crawled": 2, "dedup_dropped": 0,
+         "relevance_dropped": 0, "freshness_dropped": 0, "full_fetch_dropped": 1, "context": 1},
+    ]
+    mod._log_source_stats(board, per_source)
+
+    assert len(board.calls) == 2   # ĐÚNG 1 bản ghi/nguồn
+    level0, msg0 = board.calls[0]
+    assert level0 == "INFO"
+    assert "CafeF" in msg0 and "crawled=5" in msg0 and "dedup_dropped=1" in msg0
+    assert "relevance_dropped=1" in msg0 and "freshness_dropped=1" in msg0
+    assert "full_fetch_dropped=0" in msg0 and "context=2" in msg0
+    level1, msg1 = board.calls[1]
+    assert level1 == "INFO" and "Vietstock" in msg1 and "full_fetch_dropped=1" in msg1
+
+
+def test_log_source_stats_persists_error_record_for_source_that_raised():
+    """Nguồn ném exception khi collect() vẫn phải có bản ghi persist ghi rõ
+    lỗi -- im lặng vì exception cũng là một câu trả lời (yêu cầu TASK-009)."""
+    mod = _rpa_review_module()
+    board = _FakeLogBoard()
+    per_source = [
+        {"name": "MatKetNoi", "fetch_type": "html", "crawled": 0,
+         "error": "ConnectionError: timeout sau 10s"},
+    ]
+    mod._log_source_stats(board, per_source)
+
+    assert len(board.calls) == 1
+    level, msg = board.calls[0]
+    assert level == "WARN"
+    assert "MatKetNoi" in msg and "LỖI" in msg and "ConnectionError" in msg and "timeout" in msg
+
+
+def test_log_source_stats_mixed_batch_persists_record_for_every_source():
+    """Lô trộn: vài nguồn OK, vài nguồn lỗi -- KHÔNG nguồn nào bị bỏ sót
+    (đúng vấn đề gốc: lô 03/08 có 7 nguồn im lặng không cách nào xác định)."""
+    mod = _rpa_review_module()
+    board = _FakeLogBoard()
+    per_source = [
+        {"name": "CafeF", "fetch_type": "html", "crawled": 3, "dedup_dropped": 0,
+         "relevance_dropped": 0, "freshness_dropped": 0, "full_fetch_dropped": 0, "context": 3},
+        {"name": "NguonLoi1", "fetch_type": "html", "crawled": 0, "error": "TimeoutError: 10s"},
+        {"name": "NguonLoi2", "fetch_type": "rss", "crawled": 0, "error": "HTTPError: 403"},
+        {"name": "NguonImLangDoLoc", "fetch_type": "html", "crawled": 4, "dedup_dropped": 0,
+         "relevance_dropped": 4, "freshness_dropped": 0, "full_fetch_dropped": 0, "context": 0},
+    ]
+    mod._log_source_stats(board, per_source)
+
+    assert len(board.calls) == 4
+    logged_names = {msg.split("SOURCE ")[1].split(" (")[0] for _, msg in board.calls}
+    assert logged_names == {"CafeF", "NguonLoi1", "NguonLoi2", "NguonImLangDoLoc"}
+    # Nguồn "im lặng" vì relevance_dropped hết 4/4 -- PHÂN BIỆT ĐƯỢC với lỗi
+    # kết nối, đúng mục tiêu gốc của TASK-009.
+    im_lang_msg = next(msg for _, msg in board.calls if "NguonImLangDoLoc" in msg)
+    assert "context=0" in im_lang_msg and "relevance_dropped=4" in im_lang_msg
+
+
 # --- Drive adapter (2026-07-28) ----------------------------------------------
 class _FakeDriveSvc:
     """Giả lập đủ phần Drive API mà DriveAssetStore dùng — KHÔNG chạm mạng."""
