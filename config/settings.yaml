@@ -370,6 +370,38 @@ curation:
     keywords_file: "data/keywords_macro.txt"
     min_macro_keywords: 2         # giữ bài macro khi >= n từ khóa (nếu 0 mã)
 
+    # --- TASK-012 (2026-08-06, quy định biên tập chủ dự án) --------------
+    # Doanh nghiệp: "có mã" chỉ tính khi mã thuộc watchlist TOP 300
+    # (curation.watchlist_file, data/tickers.txt) — KHÔNG phải toàn bộ
+    # curation.tickers_file (1526 mã, vẫn dùng để TRÍCH/gắn tag mã, chỉ không
+    # còn tự động coi bài là "liên quan"). Đường lùi: đặt false để quay lại
+    # hành vi CŨ (bất kỳ mã nào đã trích cũng đủ để giữ bài).
+    use_watchlist_for_relevance: true
+    # Vĩ mô/chính sách: ngưỡng RIÊNG cho tín hiệu CHÍNH SÁCH VIỆT NAM (dùng
+    # chung danh sách curation.groups.ChinhSach — không tách file mới để tránh
+    # 2 nguồn sự thật). Thấp hơn min_macro_keywords vì từ khóa đặc hiệu hơn
+    # (nghị định/thông tư/ngân hàng nhà nước...). Vĩ mô nước ngoài thuần túy
+    # (Fed, Dow Jones, phố Wall...) KHÔNG nằm trong ChinhSach/keywords_file nên
+    # không tự đủ điều kiện qua policy lẫn macro — đây là quyết định biên tập
+    # có chủ ý, không phải thiếu sót.
+    min_policy_keywords: 1
+    # Chủ đề nóng: bài đạt đủ tín hiệu "đáng lên bài" (dưới) thì giữ dù mã/
+    # macro/policy yếu. Độc lập với enrich.hotness_pct (dùng SẮP XẾP CONTEXT
+    # sau khi đã lọc, cần priority_groups sống từ Sheet) — đây là bộ tín hiệu
+    # tất định từ text, chạy được ngay ở bước crawl/normalize.
+    enable_hotness_override: true
+    min_hotness_keywords: 3
+    hotness_keywords:
+      - "%"
+      - "tỷ đồng"
+      - "nghìn tỷ"
+      - "kỷ lục"
+      - "tăng mạnh"
+      - "giảm mạnh"
+      - "lần đầu"
+      - "cao nhất"
+      - "thấp nhất"
+
   # Nhóm chủ đề (curation/enrich.py: classify) — khớp từ khóa không phân biệt
   # hoa/thường trên title+thân bài. 1 bài có thể khớp nhiều/0 nhóm. Mirror
   # DEFAULT_GROUPS trong code (dự phòng khi mục này rỗng) — đưa ra đây để team
