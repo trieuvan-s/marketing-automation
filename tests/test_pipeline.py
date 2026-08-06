@@ -374,6 +374,118 @@ def test_relevance_filter_by_macro_keywords():
     assert is_relevant("bài có mã", ["FPT"], cfg) is True   # có mã -> luôn liên quan
 
 
+# --- TASK-012: nới is_relevant() theo quy định biên tập chủ dự án -----------
+# 1) Doanh nghiệp: "có mã" chỉ đủ khi mã thuộc watchlist TOP 300
+#    (config.relevance_tickers), KHÔNG phải toàn bộ whitelist trích mã (có thể
+#    rộng hơn, vd 1526 mã tickers_full.txt).
+def test_relevance_ticker_outside_top300_watchlist_is_dropped():
+    cfg = CurationConfig(
+        tickers={"FPT", "ABC"},          # whitelist TRÍCH mã (rộng)
+        relevance_tickers={"FPT"},       # watchlist TOP 300 (hẹp) -- quyết định liên quan
+    )
+    # ABC được TRÍCH (nằm trong whitelist trích) nhưng NGOÀI watchlist top 300
+    # -> không đủ để coi bài "liên quan", và câu không có tín hiệu macro/policy/hot nào khác.
+    assert is_relevant("Doanh nghiệp ABC công bố kế hoạch mới", ["ABC"], cfg) is False
+    # FPT thuộc watchlist top 300 -> liên quan ngay.
+    assert is_relevant("Doanh nghiệp FPT công bố kế hoạch mới", ["FPT"], cfg) is True
+
+
+def test_relevance_ticker_rollback_toggle_restores_old_behavior():
+    """Đường lùi requirement 5: use_watchlist_for_relevance=False -> quay lại
+    hành vi CŨ (bất kỳ mã đã trích cũng đủ, không cần nằm trong watchlist)."""
+    cfg = CurationConfig(
+        tickers={"FPT", "ABC"}, relevance_tickers={"FPT"},
+        use_watchlist_for_relevance=False,
+    )
+    assert is_relevant("Doanh nghiệp ABC công bố kế hoạch mới", ["ABC"], cfg) is True
+
+
+def test_relevance_ticker_relevance_tickers_empty_falls_back_to_extracted_tickers():
+    """watchlist rỗng (chưa cấu hình/thiếu file) -> KHÔNG âm thầm loại sạch mọi
+    bài có mã, lùi về hành vi CŨ (coi như use_watchlist_for_relevance chưa có tác dụng)."""
+    cfg = CurationConfig(tickers={"ABC"})  # relevance_tickers mặc định rỗng
+    assert is_relevant("Doanh nghiệp ABC công bố kế hoạch mới", ["ABC"], cfg) is True
+
+
+# 2) Vĩ mô/chính sách: tín hiệu CHÍNH SÁCH VIỆT NAM có ngưỡng riêng, thấp hơn
+#    ngưỡng macro chung -- vì từ khóa đặc hiệu hơn (nghị định/thông tư/NHNN...).
+def test_relevance_vn_policy_keyword_kept_even_below_macro_threshold():
+    cfg = CurationConfig(
+        macro_keywords=["lãi suất", "lạm phát", "gdp"], min_macro_keywords=2,
+        policy_keywords=["nghị định", "ngân hàng nhà nước"], min_policy_keywords=1,
+    )
+    # Chỉ 1 từ khóa chính sách VN (< min_macro_keywords nếu tính theo nhánh macro)
+    # nhưng đủ ngưỡng policy riêng -> giữ.
+    assert is_relevant("Chính phủ vừa ban hành nghị định mới", [], cfg) is True
+
+
+# 3) Vĩ mô nước ngoài thuần túy KHÔNG phải trọng tâm: không mã, không khớp
+#    policy/macro VN, không đủ ngưỡng hot -> loại.
+def test_relevance_pure_foreign_macro_without_vn_signal_is_dropped():
+    cfg = CurationConfig(
+        macro_keywords=["lãi suất", "lạm phát", "gdp"], min_macro_keywords=2,
+        policy_keywords=["nghị định", "ngân hàng nhà nước"], min_policy_keywords=1,
+        hotness_keywords=["kỷ lục", "tăng mạnh", "cao nhất"], min_hotness_keywords=3,
+    )
+    text = "Fed giữ nguyên lãi suất, Dow Jones và Nasdaq đồng loạt đi lên, phố Wall lạc quan"
+    assert is_relevant(text, [], cfg) is False
+
+
+# 4) Chủ đề nóng được ưu ái: đạt ngưỡng hotness thì giữ dù mã/macro/policy yếu.
+def test_relevance_hot_topic_kept_despite_weak_other_signals():
+    cfg = CurationConfig(
+        macro_keywords=["lãi suất", "lạm phát", "gdp"], min_macro_keywords=2,
+        policy_keywords=["nghị định", "ngân hàng nhà nước"], min_policy_keywords=1,
+        hotness_keywords=["kỷ lục", "tăng mạnh", "cao nhất", "%"], min_hotness_keywords=3,
+    )
+    text = "Cổ phiếu ngành thép tăng kịch trần 7%, khối lượng lập kỷ lục, mức cao nhất 3 năm"
+    assert is_relevant(text, [], cfg) is True   # 0 mã, 0 macro/policy nhưng đủ 3 tín hiệu hot
+
+
+def test_relevance_hot_topic_override_can_be_disabled():
+    """Đường lùi requirement 5: enable_hotness_override=False -> bỏ nhánh hot,
+    hành vi như trước khi có TASK-012 (chỉ còn mã + macro/policy)."""
+    cfg = CurationConfig(
+        hotness_keywords=["kỷ lục", "tăng mạnh", "cao nhất", "%"], min_hotness_keywords=3,
+        enable_hotness_override=False,
+    )
+    # Cùng text đạt 3 tín hiệu hot ở test trên (được giữ khi override BẬT) --
+    # nhưng tắt công tắc thì phải loại, chứng minh switch có tác dụng thật.
+    text = "Cổ phiếu ngành thép tăng kịch trần 7%, khối lượng lập kỷ lục, mức cao nhất 3 năm"
+    assert is_relevant(text, [], cfg) is False
+
+
+def test_curation_config_from_settings_loads_task012_relevance_fields():
+    """from_settings() phải nạp đúng các tham số TASK-012 từ settings.yaml
+    (config-first: không hard-code), kể cả fallback khi thiếu curation.groups.ChinhSach
+    / curation.relevance.hotness_keywords trong settings truyền vào."""
+    s = Settings({
+        "curation": {
+            "tickers_file": "data/tickers_full.txt",
+            "watchlist_file": "data/tickers.txt",
+            "ambiguous_file": "data/tickers_ambiguous.txt",
+            "relevance": {
+                "keywords_file": "data/keywords_macro.txt",
+                "min_macro_keywords": 2,
+                "use_watchlist_for_relevance": False,
+                "min_policy_keywords": 5,
+                "enable_hotness_override": False,
+                "min_hotness_keywords": 7,
+            },
+        }
+    })
+    cfg = CurationConfig.from_settings(s)
+    assert cfg.use_watchlist_for_relevance is False
+    assert cfg.min_policy_keywords == 5
+    assert cfg.enable_hotness_override is False
+    assert cfg.min_hotness_keywords == 7
+    assert len(cfg.relevance_tickers) == 300   # data/tickers.txt
+    # curation.groups.ChinhSach không truyền -> fallback default policy keywords.
+    assert "nghị định" in cfg.policy_keywords
+    # curation.relevance.hotness_keywords không truyền -> fallback default.
+    assert "kỷ lục" in cfg.hotness_keywords
+
+
 # --- Gate factory: đúng loại theo config (không gọi mạng) -------------------
 def _settings_with_gate(gate_type: str) -> Settings:
     return Settings({

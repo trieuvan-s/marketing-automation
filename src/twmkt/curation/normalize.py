@@ -82,10 +82,30 @@ def _has_ticker_context(ctx_raw: str, ctx_low: str, config: "CurationConfig",
 
 
 def is_relevant(text: str, tickers: list[str], config: "CurationConfig") -> bool:
-    """Bài liên quan khi có ít nhất 1 mã, hoặc đủ từ khóa vĩ mô (bài macro)."""
-    if tickers:
+    """Bài liên quan khi thỏa 1 trong 4 nhánh (TASK-012, quy định biên tập):
+
+    1. Có mã thuộc watchlist TOP 300 (`config.relevance_tickers`) — khi
+       `use_watchlist_for_relevance` bật và watchlist có dữ liệu. Watchlist rỗng
+       (chưa cấu hình) hoặc công tắc tắt -> lùi về hành vi CŨ (bất kỳ mã nào đã
+       trích cũng tính).
+    2. Đủ từ khóa CHÍNH SÁCH VIỆT NAM (`min_policy_keywords`, ngưỡng thấp vì từ
+       khóa đặc hiệu) — vĩ mô nước ngoài thuần túy không khớp nhánh này.
+    3. Đủ từ khóa vĩ mô nói chung (hành vi CŨ, `min_macro_keywords`).
+    4. Đủ tín hiệu "chủ đề nóng" (`min_hotness_keywords`, khi
+       `enable_hotness_override` bật) — giữ bài hot dù mã/macro/policy yếu.
+    """
+    if config.use_watchlist_for_relevance and config.relevance_tickers:
+        if any(t in config.relevance_tickers for t in tickers):
+            return True
+    elif tickers:
         return True
-    return config.macro_hits(text) >= config.min_macro_keywords
+    if config.policy_hits(text) >= config.min_policy_keywords:
+        return True
+    if config.macro_hits(text) >= config.min_macro_keywords:
+        return True
+    if config.enable_hotness_override and config.hotness_hits(text) >= config.min_hotness_keywords:
+        return True
+    return False
 
 
 def derive_tags(text: str) -> list[str]:
