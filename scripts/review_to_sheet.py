@@ -54,6 +54,7 @@ from twmkt import factory  # noqa: E402
 from datetime import datetime, timedelta, timezone  # noqa: E402
 
 from twmkt.agents.hook import HookAgent, _try_json  # noqa: E402
+from twmkt.collectors.http_collector import HttpFirstCollector  # noqa: E402
 from twmkt.config import load_settings  # noqa: E402
 from twmkt.curation import normalize  # noqa: E402
 from twmkt.curation.config import CurationConfig, _load_lines  # noqa: E402
@@ -190,15 +191,30 @@ def _bump_by_source(counts: dict[str, int], urls: list[str], by_url: dict[str, C
             counts[doc.source] = counts.get(doc.source, 0) + 1
 
 
-def _collect_one(collector, s: Source, limit: int) -> tuple[list, str | None]:
+def _collect_one(collector, s: Source, limit: int) -> tuple[list, str | None, dict]:
     """collector.collect() cho 1 nguồn, bắt exception NGAY TẠI ĐÂY để nguồn
-    lỗi (mạng/parse) không chặn các nguồn khác — trả (docs, None) khi OK,
-    ([], "Loại: thông điệp") khi lỗi. Tách riêng để unit-test đường lỗi mà
-    không cần dựng toàn bộ run() (Sheet/LLM thật)."""
+    lỗi (mạng/parse) không chặn các nguồn khác — trả (docs, None, diag) khi
+    OK, ([], "Loại: thông điệp", {}) khi lỗi. Tách riêng để unit-test đường
+    lỗi mà không cần dựng toàn bộ run() (Sheet/LLM thật).
+
+    TASK-011: với `HttpFirstCollector` (fetch_type="html"), gọi
+    `collect_with_diagnostics()` thay vì `collect()` để lấy thêm
+    used_default_spec/listing_fetch_ok/links_found — nguyên liệu cho
+    `_log_source_stats()` phân biệt "0 bài vì sao" (chống im lặng, xem
+    CollectDiagnostics). RSS/collector khác không có khái niệm spec-theo-url
+    này -> diag rỗng, giữ hành vi cũ nguyên vẹn."""
     try:
-        return collector.collect(s, limit=limit), None
+        if isinstance(collector, HttpFirstCollector) and s.fetch_type == "html":
+            docs, d = collector.collect_with_diagnostics(s, limit=limit)
+            diag = {
+                "used_default_spec": d.used_default_spec,
+                "listing_fetch_ok": d.listing_fetch_ok,
+                "links_found": d.links_found,
+            }
+            return docs, None, diag
+        return collector.collect(s, limit=limit), None, {}
     except Exception as e:   # noqa: BLE001 -- nguồn lỗi không được chặn nguồn khác
-        return [], f"{type(e).__name__}: {e}"
+        return [], f"{type(e).__name__}: {e}", {}
 
 
 def _log_source_stats(board, per_source: list[dict]) -> None:
@@ -207,12 +223,38 @@ def _log_source_stats(board, per_source: list[dict]) -> None:
     hash, không liên quan watchlist/macro, quá hạn ngày đăng, full-fetch RSS
     lỗi) / thực sự vào CONTEXT. 5 tầng luôn cộng khớp `crawled` vì mỗi raw doc
     rơi vào ĐÚNG 1 tầng. Nguồn ném exception khi collect() vẫn có bản ghi
-    riêng ghi rõ lỗi (im lặng vì exception cũng là một câu trả lời)."""
+    riêng ghi rõ lỗi (im lặng vì exception cũng là một câu trả lời).
+
+    TASK-011 (chống "nguồn im lặng"): nguồn html crawled=0 trước đây KHÔNG có
+    bản ghi nào phân biệt được lý do (default_spec sai pattern trả [] giống
+    hệt lỗi mạng). Giờ WARN riêng theo ĐÚNG nguyên nhân, đọc từ diag do
+    `_collect_one` gắn vào per_source (used_default_spec/listing_fetch_ok/
+    links_found) — im lặng mới là bug, không phải 1 nguồn cụ thể sai URL."""
     for s in per_source:
         name, ft = s["name"], s["fetch_type"]
         if "error" in s:
             board.log("WARN", f"SOURCE {name} ({ft}): LỖI khi crawl — {s['error']} (crawled=0)")
             continue
+        if ft == "html" and s["crawled"] == 0:
+            if s.get("used_default_spec"):
+                board.log("WARN",
+                    f"SOURCE {name} ({ft}): KHÔNG có spec riêng theo URL — rơi về default_spec "
+                    "(pattern CafeF), gần như chắc chắn 0 bài. Khai article_url_pattern/"
+                    "title_selector/body_selector cho URL này trong config/settings.yaml sources[].")
+            elif not s.get("listing_fetch_ok", True):
+                board.log("WARN",
+                    f"SOURCE {name} ({ft}): không tải được trang mục (robots.txt chặn hoặc lỗi "
+                    "mạng) — crawled=0. KHÔNG phải lỗi spec.")
+            elif s.get("links_found", 0) == 0:
+                board.log("WARN",
+                    f"SOURCE {name} ({ft}): có spec riêng, tải được trang mục, nhưng 0 link bài "
+                    "khớp article_url_pattern — spec có thể sai hoặc site đã đổi giao diện "
+                    "(KHÔNG phải lỗi mạng).")
+            else:
+                board.log("WARN",
+                    f"SOURCE {name} ({ft}): tìm thấy {s.get('links_found', 0)} link bài nhưng "
+                    "fetch/trích xuất từng bài đều thất bại (0 bài) — kiểm tra title_selector/"
+                    "body_selector hoặc lỗi mạng khi tải từng bài.")
         board.log("INFO",
             f"SOURCE {name} ({ft}): crawled={s['crawled']} "
             f"dedup_dropped={s.get('dedup_dropped', 0)} "
@@ -310,14 +352,15 @@ def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False
         collector = factory.build_collector_for_source(
             s, settings, html_collector=html_collector, rss_collector=rss_collector)
         print(f"[{s.fetch_type}] {s.name} ({s.url}) — limit {limit}...")
-        docs, error = _collect_one(collector, s, limit)
+        docs, error, diag = _collect_one(collector, s, limit)
         if error is not None:   # TASK-009: ghi lại lỗi thay vì crash im lặng cả run()
             print(f"  !! lỗi: {error}")
             per_source.append({"name": s.name, "fetch_type": s.fetch_type, "crawled": 0,
                                 "error": error})
             continue
         raw_docs.extend(docs)
-        per_source.append({"name": s.name, "fetch_type": s.fetch_type, "crawled": len(docs)})
+        per_source.append({"name": s.name, "fetch_type": s.fetch_type, "crawled": len(docs),
+                            **diag})
 
     # TASK-009: bài bị loại vì TRÙNG content-hash, theo từng nguồn (quan sát
     # raw_docs TRƯỚC khi normalize() dedup — xem _dedup_dropped_by_source()).
