@@ -50,7 +50,7 @@ Crawl tin tài chính (CafeF, ...)
 
 **Ranh giới hai repo:** `CONTENT.Output` (dict Python dựng tay trong `production.py`). Bên aigen, `production-spec/` là cây cầu thật: `scene-builder → guardrail-2 → voice → alias-guardrail → adapter → TemplateScript`. Điểm vào: `index.ts::buildTemplateScriptFromContentOutput()`.
 
-⚠️ **`media_factory/spec.py::ProductionSpec` (dataclass Python) là DEAD CODE.** Docstring của nó mô tả một kiến trúc chưa bao giờ được hiện thực ở phía Python. Đã làm cả Lead lẫn user hiểu sai suốt nhiều lượt. Không xây gì lên trên nó.
+⚠️ **`media_factory/spec.py::ProductionSpec` (dataclass Python) ĐÃ BỊ XOÁ HẲN 2026-07-29** (commit `68fc2bf`, `spec.py` 345→50 dòng, chỉ còn `VISUAL_KINDS`/`DEFERRED_VISUAL_KINDS`). Trước khi xoá, docstring của nó mô tả một kiến trúc chưa bao giờ được hiện thực ở phía Python — đã làm cả Lead lẫn user hiểu sai suốt nhiều lượt. Không còn tồn tại để hiểu nhầm; không xây gì lên trên nó.
 
 **MVP đã đóng** ngày 29/07/2026 — tag `MVP-29-07-2026` và `MVP-thong-luong-29-07-2026`. Bằng chứng: một video MP4 H.264 1080×1920 + AAC, 30,5s, đi trọn từ tin thô tới Drive không thao tác tay.
 
@@ -117,7 +117,7 @@ Việc an toàn cho Codex: hình học Pillow, gọi API sinh ảnh, đọc code
 | 3 | **Disclaimer thuộc CODE**, chuỗi nằm `config/brand.yaml`. Composer KHÔNG viết | `production.py:490/522/756` |
 | 4 | Chuỗi disclaimer chuẩn: `Nội dung mang tính tham khảo, không phải khuyến nghị đầu tư.` (CÓ dấu chấm) | Lead chốt 30/07 |
 | 5 | `TopicKey = sha256("url:" + canonical_url)[:16]` — hash, **không phải URL** | `curation/keys.py:184-188` |
-| 6 | Cây cầu vendor-neutral ở **aigen**; `ProductionSpec` dataclass Python là dead code | agent-B grep xác minh |
+| 6 | Cây cầu vendor-neutral ở **aigen**; `ProductionSpec` dataclass Python đã bị xoá hẳn (2026-07-29, commit `68fc2bf`) | agent-B grep xác minh |
 | 7 | Adapter aigen **ĐÃ KHOÁ** (79/79 test, PR #1) — không sửa | `disclaimer-slot.ts` |
 | 8 | Đặt tên **đơn nghĩa**: `source_name`="CafeF", `article_url`=địa chỉ. Cấm tên ghép `source_url` | Xem mục 9.1 |
 | 9 | Band đáy infographic hiển thị **tên nguồn** ("CafeF"), không dùng domain | Lead chốt |
@@ -528,10 +528,10 @@ target riêng cạnh aigen**, dùng chung cây cầu:
 Tách cả tầng guardrail sẽ **nhân đôi toàn bộ luật an toàn nội dung tài chính** và
 buộc phải giữ đồng bộ mãi mãi — đúng loại lỗi liên tầng mà dự án đã trả giá.
 
-**Rủi ro cần chặn:** khi thiết kế đầu vào đa định dạng, ai đó sẽ tìm một schema
-để nhận input và có thể nhặt nhầm `media_factory/spec.py::ProductionSpec` —
-dataclass đã chết. **Phải xoá nó trước khi bắt đầu NV4**, không thì nó thành móng
-cho nhánh mới.
+**Rủi ro (ĐÃ HẾT):** khi thiết kế đầu vào đa định dạng, từng lo ai đó sẽ tìm một
+schema để nhận input và nhặt nhầm `media_factory/spec.py::ProductionSpec` —
+dataclass đã chết. Rủi ro này không còn: dataclass đã bị xoá hẳn 2026-07-29
+(commit `68fc2bf`), không còn tồn tại để nhặt nhầm.
 
 **Nhiều định dạng đầu vào** nghĩa là cần một lớp chuẩn hoá: mọi loại input đều
 quy về `CONTENT.Output` trước khi vào scene-builder. Đừng cho mỗi loại input một
@@ -547,10 +547,11 @@ quy về `CONTENT.Output` trước khi vào scene-builder. Đừng cho mỗi lo�
 | NV2 Video | Chủ dự án quyết 10 ô chrome · khảo sát rules video (Việc 6 câu 2) |
 | NV3.1 Báo cáo tổng hợp | Chốt 4 câu thiết kế (khoá, truy nguồn, Router, Gate) |
 | NV3.2 Brand-kit | Chủ dự án cung cấp tài sản thương hiệu |
-| NV4 aigen đa chức năng | Xoá `ProductionSpec` dataclass · NV2 xong (video tin tức phải ổn trước khi nhân bản) |
+| NV4 aigen đa chức năng | ~~Xoá `ProductionSpec` dataclass~~ ĐÃ XONG (2026-07-29, commit `68fc2bf`) · NV2 xong (video tin tức phải ổn trước khi nhân bản) |
 
-**Việc làm được ngay, không chờ ai:** khảo sát Việc 6 (§6) · xoá `ProductionSpec`
-dead code · thiết kế lại DB (§7.5).
+**Việc làm được ngay, không chờ ai:** khảo sát Việc 6 (§6) · thiết kế lại DB
+(§7.5). (Xoá `ProductionSpec` dead code đã xong 2026-07-29, commit `68fc2bf` —
+không còn nằm trong danh sách chờ.)
 
 
 ---
