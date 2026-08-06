@@ -95,7 +95,9 @@ def test_load_settings_reads_keys():
     assert s.get("crawl.limit_per_source") == 12
     assert s.get("knowledge.chunk_size") == 500
     assert s.get("gates.research.type") == "console"
-    assert len(s.enabled_sources()) == 9        # 3 CafeF html + 6 nguồn rss (CafeF/CafeBiz/Vietstock)
+    # 3 CafeF html + 6 nguồn rss (CafeF/CafeBiz/Vietstock) + 6 nguồn html TASK-011
+    # (Baochinhphu x3 + Nguoiquansat + VietnamBiz + Vietstock-doanh-nghiep)
+    assert len(s.enabled_sources()) == 15
     # whitelist trỏ sang danh sách mã đầy đủ (VN30 giữ cho test)
     assert s.get("curation.tickers_file") == "data/tickers_full.txt"
 
@@ -11290,9 +11292,10 @@ def test_collect_one_catches_exception_returns_error_string_not_crash():
         def collect(self, s, limit):
             raise ConnectionError("timeout sau 10s")
 
-    docs, error = mod._collect_one(_RaisingCollector(), Source("BaoLoi", "http://loi"), 3)
+    docs, error, diag = mod._collect_one(_RaisingCollector(), Source("BaoLoi", "http://loi"), 3)
     assert docs == []
     assert error == "ConnectionError: timeout sau 10s"
+    assert diag == {}
 
 
 def test_collect_one_returns_docs_and_no_error_on_success():
@@ -11303,8 +11306,31 @@ def test_collect_one_returns_docs_and_no_error_on_success():
         def collect(self, s, limit):
             return ["doc1", "doc2"]
 
-    docs, error = mod._collect_one(_OkCollector(), Source("OK", "http://ok"), 3)
-    assert docs == ["doc1", "doc2"] and error is None
+    docs, error, diag = mod._collect_one(_OkCollector(), Source("OK", "http://ok"), 3)
+    assert docs == ["doc1", "doc2"] and error is None and diag == {}
+
+
+def test_collect_one_uses_diagnostics_for_http_first_collector_html_source():
+    """TASK-011: khi collector là HttpFirstCollector và nguồn fetch_type="html",
+    _collect_one() phải gọi collect_with_diagnostics() (không phải collect())
+    để lấy used_default_spec/listing_fetch_ok/links_found -- nếu không, WARN
+    chống-im-lặng ở _log_source_stats() không bao giờ có dữ liệu để bật lên."""
+    mod = _rpa_review_module()
+    from twmkt.collectors.http_collector import CollectDiagnostics, HttpFirstCollector
+    from twmkt.models import Source
+
+    class _FakeHttpFirstCollector(HttpFirstCollector):
+        def __init__(self):
+            pass   # bỏ qua __init__ thật (không cần specs/robots/httpx)
+
+        def collect_with_diagnostics(self, s, *, limit=10):
+            return ["doc1"], CollectDiagnostics(
+                used_default_spec=True, listing_fetch_ok=True, links_found=0)
+
+    docs, error, diag = mod._collect_one(
+        _FakeHttpFirstCollector(), Source("X", "http://x", fetch_type="html"), 3)
+    assert docs == ["doc1"] and error is None
+    assert diag == {"used_default_spec": True, "listing_fetch_ok": True, "links_found": 0}
 
 
 def test_log_source_stats_persists_one_record_per_source_with_full_breakdown():
@@ -11370,6 +11396,107 @@ def test_log_source_stats_mixed_batch_persists_record_for_every_source():
     # kết nối, đúng mục tiêu gốc của TASK-009.
     im_lang_msg = next(msg for _, msg in board.calls if "NguonImLangDoLoc" in msg)
     assert "context=0" in im_lang_msg and "relevance_dropped=4" in im_lang_msg
+
+
+# --- TASK-011: chống "nguồn html rơi về default_spec" im lặng ---------------
+# Trước bản này, nguồn fetch_type="html" không có SourceSpec riêng (khoá theo
+# URL) rơi về default_spec (pattern CafeF) -- article_url_pattern không khớp
+# domain khác -> 0 link bài -> crawled=0, giống HỆT lỗi mạng, không WARN nào
+# phân biệt được. 4 test dưới đây phủ 3 nguyên nhân "0 bài" + 1 case OK.
+def test_log_source_stats_warns_when_html_source_falls_back_to_default_spec():
+    """crawled=0 -- WARN CHỐNG-IM-LẶNG đi TRƯỚC, cộng thêm bản ghi INFO breakdown
+    như mọi nguồn khác (không continue) -- 2 bản ghi/nguồn cho case này."""
+    mod = _rpa_review_module()
+    board = _FakeLogBoard()
+    per_source = [
+        {"name": "BaoMoi", "fetch_type": "html", "crawled": 0, "dedup_dropped": 0,
+         "relevance_dropped": 0, "freshness_dropped": 0, "full_fetch_dropped": 0, "context": 0,
+         "used_default_spec": True, "listing_fetch_ok": True, "links_found": 0},
+    ]
+    mod._log_source_stats(board, per_source)
+
+    assert len(board.calls) == 2
+    level, msg = board.calls[0]
+    assert level == "WARN"
+    assert "BaoMoi" in msg and "default_spec" in msg
+    assert board.calls[1][0] == "INFO"
+
+
+def test_log_source_stats_warns_listing_fetch_failed_not_spec_issue():
+    """crawled=0 vì KHÔNG tải được trang mục (robots/mạng) -- có spec riêng,
+    KHÔNG phải lỗi spec -- WARN phải phân biệt rõ, không đổ oan cho spec."""
+    mod = _rpa_review_module()
+    board = _FakeLogBoard()
+    per_source = [
+        {"name": "Vietstock", "fetch_type": "html", "crawled": 0, "dedup_dropped": 0,
+         "relevance_dropped": 0, "freshness_dropped": 0, "full_fetch_dropped": 0, "context": 0,
+         "used_default_spec": False, "listing_fetch_ok": False, "links_found": 0},
+    ]
+    mod._log_source_stats(board, per_source)
+
+    assert len(board.calls) == 2
+    level, msg = board.calls[0]
+    assert level == "WARN"
+    assert "Vietstock" in msg and "trang mục" in msg
+    assert "default_spec" not in msg
+    assert board.calls[1][0] == "INFO"
+
+
+def test_log_source_stats_warns_own_spec_zero_links_found():
+    """Có spec riêng, tải được trang mục, nhưng article_url_pattern khớp 0
+    link -- khác 2 case trên, phải WARN riêng (site đổi giao diện/spec sai)."""
+    mod = _rpa_review_module()
+    board = _FakeLogBoard()
+    per_source = [
+        {"name": "VietnamBiz", "fetch_type": "html", "crawled": 0, "dedup_dropped": 0,
+         "relevance_dropped": 0, "freshness_dropped": 0, "full_fetch_dropped": 0, "context": 0,
+         "used_default_spec": False, "listing_fetch_ok": True, "links_found": 0},
+    ]
+    mod._log_source_stats(board, per_source)
+
+    assert len(board.calls) == 2
+    level, msg = board.calls[0]
+    assert level == "WARN"
+    assert "VietnamBiz" in msg and "0 link bài" in msg
+    assert "default_spec" not in msg
+    assert board.calls[1][0] == "INFO"
+
+
+def test_log_source_stats_warns_links_found_but_all_article_fetches_failed():
+    """Có spec riêng, tải được trang mục, TÌM THẤY link bài (links_found > 0)
+    nhưng crawled=0 -- fetch/trích từng bài đều fail (khác cả 3 case trên)."""
+    mod = _rpa_review_module()
+    board = _FakeLogBoard()
+    per_source = [
+        {"name": "Nguoiquansat", "fetch_type": "html", "crawled": 0, "dedup_dropped": 0,
+         "relevance_dropped": 0, "freshness_dropped": 0, "full_fetch_dropped": 0, "context": 0,
+         "used_default_spec": False, "listing_fetch_ok": True, "links_found": 5},
+    ]
+    mod._log_source_stats(board, per_source)
+
+    assert len(board.calls) == 2
+    level, msg = board.calls[0]
+    assert level == "WARN"
+    assert "Nguoiquansat" in msg and "5 link bài" in msg
+    assert "default_spec" not in msg and "0 link bài" not in msg
+    assert board.calls[1][0] == "INFO"
+
+
+def test_log_source_stats_no_warn_when_html_source_has_docs():
+    """Nguồn html crawled > 0 -- KHÔNG WARN dù có mặt used_default_spec=False
+    trong diag (chỉ nhánh crawled==0 mới xét WARN chống-im-lặng)."""
+    mod = _rpa_review_module()
+    board = _FakeLogBoard()
+    per_source = [
+        {"name": "Baochinhphu", "fetch_type": "html", "crawled": 3, "dedup_dropped": 0,
+         "relevance_dropped": 0, "freshness_dropped": 0, "full_fetch_dropped": 0, "context": 3,
+         "used_default_spec": False, "listing_fetch_ok": True, "links_found": 3},
+    ]
+    mod._log_source_stats(board, per_source)
+
+    assert len(board.calls) == 1
+    level, msg = board.calls[0]
+    assert level == "INFO" and "crawled=3" in msg
 
 
 # --- Drive adapter (2026-07-28) ----------------------------------------------

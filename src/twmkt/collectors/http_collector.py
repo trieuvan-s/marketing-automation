@@ -65,6 +65,19 @@ class SourceSpec:
     ticker_box_selector: str = _DEFAULT_TICKER_BOX_SELECTOR
 
 
+@dataclass(frozen=True)
+class CollectDiagnostics:
+    """Chẩn đoán 1 lượt `collect_with_diagnostics()` — TASK-011: cho phép caller
+    (review_to_sheet._log_source_stats) phân biệt "0 bài vì sao": rơi về
+    default_spec (chưa khai riêng), lỗi tải trang mục (mạng/robots), hay khai
+    spec riêng mà article_url_pattern không khớp gì (0 link bài) — 3 nguyên
+    nhân khác nhau, trước đây đều trả `[]` giống hệt nhau, không phân biệt được."""
+
+    used_default_spec: bool
+    listing_fetch_ok: bool
+    links_found: int
+
+
 # =====================================================================
 # Hàm bóc tách THUẦN (không mạng) — dễ test bằng HTML giả.
 # =====================================================================
@@ -325,8 +338,26 @@ class HttpFirstCollector(Collector):
         )
 
     def collect(self, source: Source, *, limit: int = 10) -> list[RawDocument]:
+        docs, _diag = self.collect_with_diagnostics(source, limit=limit)
+        return docs
+
+    def has_own_spec(self, url: str) -> bool:
+        """True nếu `url` có `SourceSpec` KHAI RIÊNG (settings.sources[]); False
+        -> `collect()`/`collect_with_diagnostics()` sẽ rơi về `default_spec`
+        (pattern CafeF) — TASK-011: đây là điều kiện KÊU LÊN thay vì im lặng
+        (xem review_to_sheet._log_source_stats). Hàm THUẦN (không mạng)."""
+        return url in self.specs
+
+    def collect_with_diagnostics(
+        self, source: Source, *, limit: int = 10
+    ) -> tuple[list[RawDocument], "CollectDiagnostics"]:
+        """Như `collect()` nhưng kèm chẩn đoán TẠI SAO 0 bài (TASK-011: chống
+        "nguồn im lặng" — trước đây `default_spec` áp sai pattern vẫn trả []
+        y hệt lỗi mạng, không cách nào phân biệt từ ngoài). `collect()` gọi
+        thẳng hàm này rồi bỏ chẩn đoán — MỘT đường logic, không lặp code."""
         import httpx
 
+        used_default_spec = not self.has_own_spec(source.url)
         spec = self.specs.get(source.url, self.default_spec)
         headers = {"User-Agent": self.user_agent}
         with httpx.Client(
@@ -334,11 +365,13 @@ class HttpFirstCollector(Collector):
         ) as client:
             if not self._allowed(client, source.url):
                 print(f"[CẢNH BÁO] robots.txt chặn trang mục: {source.url}")
-                return []
+                return [], CollectDiagnostics(
+                    used_default_spec=used_default_spec, listing_fetch_ok=False, links_found=0)
             fetched = self._fetch(client, source.url)
             if fetched is None:
                 print(f"[CẢNH BÁO] Không tải được trang mục: {source.url}")
-                return []
+                return [], CollectDiagnostics(
+                    used_default_spec=used_default_spec, listing_fetch_ok=False, links_found=0)
             listing, _ = fetched
 
             urls = extract_links(listing, source.url, spec.article_url_re)[:limit]
@@ -349,7 +382,9 @@ class HttpFirstCollector(Collector):
                 doc = self._fetch_and_extract(client, source, spec, url)
                 if doc is not None:
                     docs.append(doc)
-        return docs
+        diag = CollectDiagnostics(
+            used_default_spec=used_default_spec, listing_fetch_ok=True, links_found=len(urls))
+        return docs, diag
 
     def fetch_one(self, source: Source, url: str) -> RawDocument | None:
         """Fetch + trích 1 bài (TẦNG 3 của mô hình 3 lớp thu thập: full-fetch CHỈ

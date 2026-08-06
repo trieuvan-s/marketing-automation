@@ -323,6 +323,107 @@ sources:
     body_selector: "#vst_detail"                 # sạch hơn .article-content (bỏ chrome thời gian)
     noise_selectors: ["script", "style"]
 
+  # --- Baochinhphu (html — baochinhphu.vn; TASK-011 2026-08-06, soi DOM thật
+  # cả 3 mục: cùng template cho Tổng hợp/Vĩ mô/Ngân hàng, class
+  # "detail-content afcbc-body" TRÙNG CafeF vì cùng nhà cung cấp CMS (đã xác
+  # nhận qua fetch thật, không phải copy-paste). ".kbwscwl-relatedbox" = box
+  # "Tham khảo thêm" (tin liên quan) nhúng trong thân bài, phải loại riêng —
+  # CafeF không có box này.) ---
+  - key: "baochinhphu-tong-hop"
+    name: "Baochinhphu - Tổng hợp"
+    url: "https://baochinhphu.vn/"
+    type: "news"
+    fetch_type: "html"
+    field: "NganHang"
+    priority: 5
+    interval_minutes: 240
+    enabled: true
+    article_url_pattern: "-\\d{10,}\\.htm$"      # link bài: <slug>-<id 15-18 số>.htm; mục ("chu-de/x-295.htm") tối đa 3 số
+    title_selector: "h1.detail-title"
+    body_selector: "div.detail-content.afcbc-body"
+    noise_selectors: ["#listNewsInContent", ".VCSortableInPreviewMode", ".kbwscwl-relatedbox", "script", "style"]
+  - key: "baochinhphu-vi-mo"
+    name: "Baochinhphu - Vĩ mô"
+    url: "https://baochinhphu.vn/kinh-te.htm"
+    type: "news"
+    fetch_type: "html"
+    field: "KinhTe, TaiChinh"
+    priority: 4
+    interval_minutes: 240
+    enabled: true
+    article_url_pattern: "-\\d{10,}\\.htm$"
+    title_selector: "h1.detail-title"
+    body_selector: "div.detail-content.afcbc-body"
+    noise_selectors: ["#listNewsInContent", ".VCSortableInPreviewMode", ".kbwscwl-relatedbox", "script", "style"]
+  - key: "baochinhphu-ngan-hang"
+    name: "Baochinhphu - Ngân hàng"
+    url: "https://baochinhphu.vn/kinh-te/ngan-hang.htm"
+    type: "news"
+    fetch_type: "html"
+    field: "NganHang"
+    priority: 4
+    interval_minutes: 240
+    enabled: true
+    article_url_pattern: "-\\d{10,}\\.htm$"
+    title_selector: "h1.detail-title"
+    body_selector: "div.detail-content.afcbc-body"
+    noise_selectors: ["#listNewsInContent", ".VCSortableInPreviewMode", ".kbwscwl-relatedbox", "script", "style"]
+
+  # --- Nguoiquansat (html — nguoiquansat.vn; TASK-011 2026-08-06, soi DOM
+  # thật. Thân bài "b-maincontent normal-article-content" bọc CẢ header
+  # (tiêu đề+ngày) lẫn ads rỗng (JS bơm, không có text tĩnh) — loại riêng
+  # ".sc-longform-header" để khỏi lặp tiêu đề trong thân bài. ---
+  - key: "nguoiquansat-tai-chinh-ngan-hang"
+    name: "Nguoiquansat - Tài chính Ngân hàng"
+    url: "https://nguoiquansat.vn/tai-chinh-ngan-hang/ngan-hang"
+    type: "news"
+    fetch_type: "html"
+    field: "TaiChinh, NganHang"
+    priority: 4
+    interval_minutes: 240
+    enabled: true
+    article_url_pattern: "-\\d{6,}\\.html$"      # link bài: <slug>-<id>.html — đuôi ".html" ĐẦY ĐỦ, khác ".htm" các nguồn khác
+    title_selector: "h1.sc-longform-header-title"
+    body_selector: "div.b-maincontent.normal-article-content"
+    noise_selectors: [".sc-longform-header", "script", "style"]
+
+  # --- VietnamBiz (html — vietnambiz.vn; TASK-011 2026-08-06, soi DOM thật.
+  # Thân bài sạch sẵn — ảnh có box ".VnBizPreviewMode" nhưng là chú thích ảnh
+  # HỢP LỆ (kiểm tra nội dung thật, không phải box nhiễu), KHÔNG loại.) ---
+  - key: "vietnambiz-tai-chinh-ngan-hang"
+    name: "VietnamBiz-Tài Chính Ngân Hàng"
+    url: "https://vietnambiz.vn/tai-chinh/ngan-hang.htm"
+    type: "news"
+    fetch_type: "html"
+    field: "TaiChinh, NganHang"
+    priority: 4
+    interval_minutes: 240
+    enabled: true
+    article_url_pattern: "-\\d{10,}\\.htm$"      # link bài: <slug>-<id 15-16 số>.htm; mục ("chu-de/x-471.htm") tối đa 3 số
+    title_selector: "h1.vnbcb-title"
+    body_selector: "div.vnbcbc-body.vceditor-content"
+    noise_selectors: ["script", "style"]
+
+  # --- Vietstock (html — vietstock.vn/doanh-nghiep.htm; TASK-011 2026-08-06.
+  # URL/template KHÁC vietstock-rss-co-phieu ở trên (trang mục html, không
+  # phải feed rss) dù cùng domain — khoá dict specs theo url nên không đụng
+  # nhau. "#vst_detail" xác nhận CÓ MẶT trên trang này qua fetch thật, sạch
+  # hơn ".article-content" (bỏ tiêu đề lặp + box "popular_items" tin liên
+  # quan) — cùng selector spec RSS đã dùng, không phải suy đoán.) ---
+  - key: "vietstock-doanh-nghiep"
+    name: "Vietstock - Doanh Nghiệp"
+    url: "https://vietstock.vn/doanh-nghiep.htm"
+    type: "news"
+    fetch_type: "html"
+    field: "ChungKhoan"
+    priority: 3
+    interval_minutes: 240
+    enabled: true
+    article_url_pattern: "-\\d{6,}\\.htm$"       # link bài: /2026/08/<slug>-<catid>-<id 7 số>.htm
+    title_selector: "h1.article-title"
+    body_selector: "#vst_detail"
+    noise_selectors: ["script", "style"]
+
 # --- Tầng crawl (robustness) ----------------------------------------
 crawl:
   engine: "http"                  # http (httpx+bs4, $0) | crawl4ai (fallback JS)
