@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 
@@ -60,7 +61,7 @@ from twmkt.curation.keys import assign_topic_key  # noqa: E402
 from twmkt.curation.enrich import (  # noqa: E402
     classify, cluster_by_event, groups_from_settings, hotness_pct, marketing_score,
 )
-from twmkt.models import CleanDocument, ResearchBrief, Source  # noqa: E402
+from twmkt.models import CleanDocument, RawDocument, ResearchBrief, Source  # noqa: E402
 
 
 def _ddmmyyyy(dt) -> str | None:
@@ -159,6 +160,68 @@ def _score_weights(settings) -> dict:
     }
 
 
+# --- TASK-009: log per-nguồn PERSIST — mở khoá chẩn đoán "nguồn im lặng vì
+# sao" (trước đây per_source chỉ đi vào print(), mất sau khi tiến trình kết
+# thúc). 3 hàm dưới đây THUẦN quan sát dữ liệu ĐÃ CÓ SẴN trong run() (content_
+# hash, CleanDocument.source, cluster url) — KHÔNG sửa normalize()/cluster_
+# by_event()/sheets_board.py, KHÔNG đổi hành vi crawl. ------------------------
+def _dedup_dropped_by_source(raw_docs: list[RawDocument]) -> dict[str, int]:
+    """Đếm bài bị loại vì TRÙNG content-hash, theo từng nguồn — lặp lại ĐÚNG
+    luật seen_hashes của curation.normalize.normalize() trên CÙNG raw_docs/
+    thứ tự (content_hash là property công khai sẵn có trên RawDocument nên
+    quan sát được từ NGOÀI normalize.py mà không phải đục kiến trúc)."""
+    seen: set[str] = set()
+    dropped: dict[str, int] = {}
+    for d in raw_docs:
+        h = d.content_hash
+        if h in seen:
+            dropped[d.source] = dropped.get(d.source, 0) + 1
+        else:
+            seen.add(h)
+    return dropped
+
+
+def _bump_by_source(counts: dict[str, int], urls: list[str], by_url: dict[str, CleanDocument]) -> None:
+    """Cộng dồn 1 lượt/nguồn cho MỖI url trong danh sách — dùng để quy 1 cụm
+    sự kiện (cluster_by_event, có thể gộp nhiều nguồn) về từng nguồn gốc."""
+    for u in urls:
+        doc = by_url.get(u)
+        if doc is not None:
+            counts[doc.source] = counts.get(doc.source, 0) + 1
+
+
+def _collect_one(collector, s: Source, limit: int) -> tuple[list, str | None]:
+    """collector.collect() cho 1 nguồn, bắt exception NGAY TẠI ĐÂY để nguồn
+    lỗi (mạng/parse) không chặn các nguồn khác — trả (docs, None) khi OK,
+    ([], "Loại: thông điệp") khi lỗi. Tách riêng để unit-test đường lỗi mà
+    không cần dựng toàn bộ run() (Sheet/LLM thật)."""
+    try:
+        return collector.collect(s, limit=limit), None
+    except Exception as e:   # noqa: BLE001 -- nguồn lỗi không được chặn nguồn khác
+        return [], f"{type(e).__name__}: {e}"
+
+
+def _log_source_stats(board, per_source: list[dict]) -> None:
+    """Persist 1 dòng LOG/nguồn (board.log() có sẵn, KHÔNG dựng cơ chế log
+    mới) — đủ tách: collector trả về bao nhiêu / mất ở tầng nào (trùng content-
+    hash, không liên quan watchlist/macro, quá hạn ngày đăng, full-fetch RSS
+    lỗi) / thực sự vào CONTEXT. 5 tầng luôn cộng khớp `crawled` vì mỗi raw doc
+    rơi vào ĐÚNG 1 tầng. Nguồn ném exception khi collect() vẫn có bản ghi
+    riêng ghi rõ lỗi (im lặng vì exception cũng là một câu trả lời)."""
+    for s in per_source:
+        name, ft = s["name"], s["fetch_type"]
+        if "error" in s:
+            board.log("WARN", f"SOURCE {name} ({ft}): LỖI khi crawl — {s['error']} (crawled=0)")
+            continue
+        board.log("INFO",
+            f"SOURCE {name} ({ft}): crawled={s['crawled']} "
+            f"dedup_dropped={s.get('dedup_dropped', 0)} "
+            f"relevance_dropped={s.get('relevance_dropped', 0)} "
+            f"freshness_dropped={s.get('freshness_dropped', 0)} "
+            f"full_fetch_dropped={s.get('full_fetch_dropped', 0)} "
+            f"context={s.get('context', 0)}")
+
+
 def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False,
         debug: bool = False, offline: bool = False, setup: bool = False) -> dict:
     settings = load_settings()
@@ -247,15 +310,31 @@ def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False
         collector = factory.build_collector_for_source(
             s, settings, html_collector=html_collector, rss_collector=rss_collector)
         print(f"[{s.fetch_type}] {s.name} ({s.url}) — limit {limit}...")
-        docs = collector.collect(s, limit=limit)
+        docs, error = _collect_one(collector, s, limit)
+        if error is not None:   # TASK-009: ghi lại lỗi thay vì crash im lặng cả run()
+            print(f"  !! lỗi: {error}")
+            per_source.append({"name": s.name, "fetch_type": s.fetch_type, "crawled": 0,
+                                "error": error})
+            continue
         raw_docs.extend(docs)
         per_source.append({"name": s.name, "fetch_type": s.fetch_type, "crawled": len(docs)})
+
+    # TASK-009: bài bị loại vì TRÙNG content-hash, theo từng nguồn (quan sát
+    # raw_docs TRƯỚC khi normalize() dedup — xem _dedup_dropped_by_source()).
+    dedup_dropped = _dedup_dropped_by_source(raw_docs)
 
     # --- TẦNG 2: chuẩn hóa (dedup content-hash + whitelist + relevance) MỘT
     # LƯỢT trên TOÀN BỘ ứng viên, rồi gộp SỰ KIỆN chéo nguồn — GIỮ báo Priority
     # cao (cluster_by_event, item = dict), url báo khác gộp vào ô Source. --
     clean = normalize(raw_docs, curation)
+    # TASK-009: số bài còn lại/nguồn NGAY SAU normalize (trước lọc ngày đăng)
+    # — hiệu số với (crawled - dedup_dropped) là số bị normalize() loại vì
+    # KHÔNG liên quan (is_relevant: 0 mã CK và không đủ từ khóa vĩ mô).
+    post_normalize_counts = Counter(c.source for c in clean)
     clean, freshness = filter_by_freshness(clean, settings=settings)
+    post_freshness_counts = Counter(c.source for c in clean)
+    freshness_dropped = {name: n - post_freshness_counts.get(name, 0)
+                         for name, n in post_normalize_counts.items()}
     by_url = {c.url: c for c in clean}
     items = [
         {"title": c.title, "url": c.url, "publisher": c.source,   # publisher/priority nội bộ
@@ -267,20 +346,29 @@ def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False
     # --- TẦNG 3: full-fetch CHỈ cho đại diện gốc RSS (chưa có full bài) ------
     final: list[dict] = []
     full_fetch_failed = 0
+    into_context_counts: dict[str, int] = {}
+    full_fetch_dropped_counts: dict[str, int] = {}
     for cl in clusters:
+        # TASK-009: quy CẢ CỤM (rep + nguồn phụ đã gộp sự kiện) về nguồn gốc
+        # từng url, để biết url của nguồn nào cuối cùng vào CONTEXT hay bị
+        # rớt vì full-fetch RSS lỗi (continue phía dưới rớt NGUYÊN CỤM).
+        cluster_urls = [cl["rep"]["url"], *cl["sources"]]
         c = by_url[cl["rep"]["url"]]
         src = sources_by_name.get(c.source)
         if src is not None and src.fetch_type == "rss":
             full_raw = html_collector.fetch_one(src, c.url)
             if full_raw is None:
                 full_fetch_failed += 1
+                _bump_by_source(full_fetch_dropped_counts, cluster_urls, by_url)
                 continue
             full_clean = normalize([full_raw], curation)
             if not full_clean:
                 full_fetch_failed += 1
+                _bump_by_source(full_fetch_dropped_counts, cluster_urls, by_url)
                 continue
             c = full_clean[0]
         final.append({"doc": c, "other_urls": cl["sources"]})
+        _bump_by_source(into_context_counts, cluster_urls, by_url)
 
     # --- Persist + dựng hàng CONTEXT (Hook qua Haiku/fallback), sắp Hot% giảm dần
     stored = store.upsert([f["doc"] for f in final])
@@ -344,6 +432,22 @@ def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False
         "stored": stored, "written": written, "full_fetch_failed": full_fetch_failed,
         "llm": usage, "use_llm": use_llm, "freshness": freshness,
     }
+    # TASK-009: gộp mọi tầng số liệu quan sát được Ở TRÊN vào per_source rồi
+    # PERSIST — mỗi nguồn 1 dòng LOG (xem _log_source_stats). 5 tầng cộng lại
+    # LUÔN khớp crawled (mỗi raw doc rơi vào ĐÚNG 1 tầng: dedup_dropped |
+    # relevance_dropped | freshness_dropped | full_fetch_dropped | context).
+    for s in per_source:
+        if "error" in s:
+            continue
+        name = s["name"]
+        s["dedup_dropped"] = dedup_dropped.get(name, 0)
+        s["relevance_dropped"] = max(0, s["crawled"] - s["dedup_dropped"]
+                                     - post_normalize_counts.get(name, 0))
+        s["freshness_dropped"] = freshness_dropped.get(name, 0)
+        s["full_fetch_dropped"] = full_fetch_dropped_counts.get(name, 0)
+        s["context"] = into_context_counts.get(name, 0)
+    _log_source_stats(board, per_source)
+
     board.log("INFO", f"TỔNG: crawled {totals['crawled']} / kept {totals['kept']} / "
                       f"cụm(gộp sự kiện chéo nguồn) {totals['clusters']} / stored {totals['stored']} / "
                       f"CONTEXT +{totals['written']} dòng mới (TopicKey trùng đã bỏ qua) / "
