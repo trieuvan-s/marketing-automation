@@ -33,13 +33,22 @@ brand:
   # overlay_brand_full_canvas(), nhánh `theme in ("bright","light")`), phần
   # vàng đồng (chroma cao) giữ nguyên mọi theme — KHÔNG cần bản "white-gold"
   # riêng cho theme tối (vẫn giữ file đó trong assets/ làm bản tham chiếu).
+  # TASK-017 (2026-08-07, quy định MỚI chủ dự án — "logo LUÔN phải có, đổi
+  # biến thể theo nền sáng/tối") — mỗi asset family giờ có THÊM
+  # `white_gold_path` cạnh `path` (navy-gold, vẫn là mặc định/lùi mượt khi
+  # không cấu hình bản trắng-vàng). `overlay_brand_full_canvas()` tự chọn
+  # ĐỘNG giữa 2 file theo độ sáng ĐÚNG vùng bbox sẽ dán logo (không phải cả
+  # ảnh, xem brand_stamp.py::_select_logo_variant) — KHÔNG còn tô lại
+  # (recolor) pixel logo như bản 2026-08-04.
   active_asset: "brand_kit"
   assets:
     brand_kit:
       path: "assets/fva-brand-kit-navy-gold-transparent.png"
+      white_gold_path: "assets/fva-brand-kit-white-gold-transparent.png"
       width_ratio: 0.178
     standard_icon:
       path: "assets/fva-icon-navy-gold-transparent.png"
+      white_gold_path: "assets/fva-icon-white-gold-transparent.png"
       width_ratio: 0.148
 
   # Màu ước theo logo đã nhận (nền navy đậm, chữ trắng bạc, nhấn vàng đồng) —
@@ -86,6 +95,40 @@ brand:
       right_ratio: 0.035
       top_ratio: 0.025
       height_ratio: 0.055
+      # TASK-017 Phase 1 — "bận chữ thật" đo trên ĐÚNG bbox logo (không mở
+      # rộng — bản đầu dùng scan mở rộng 20% đã PHA LOÃNG tín hiệu thật với
+      # khoảng đệm RỖNG phía trên logo, xem ghi chú SỬA LỖI THẬT ở
+      # `select_logo_corner`). Đã thử kết hợp thêm tín hiệu cấu trúc
+      # (aligned_component_count, đếm cụm nét cùng hàng/cỡ giống glyph) --
+      # BỎ vì không bền: chữ đậm/kerning sát nhau bị dilation (MaxFilter
+      # trong `_contrast_mask`) NỐI LIỀN các glyph thành 1 khối lớn, bị bộ
+      # lọc bề rộng (<=70% bbox) loại khỏi component_count -- bằng chứng
+      # thật (ảnh Bách Hóa Xanh × WinCommerce, TASK-017 Phase 3): chữ "XANH"
+      # bị logo đè rõ ràng nhưng component_count đo được = 0.
+      #
+      # Ngưỡng dark_pixel_ratio ĐƠN, hiệu chỉnh lại trên 16 mẫu góc thật (8
+      # ảnh × 2 góc, gồm CẢ 2 case đè chữ thật phát hiện ở Phase 3) sau khi
+      # sửa bằng bbox KHÍT: mọi góc chỉ có hoạ tiết ảnh (mây, kim loại, biểu
+      # đồ) đo được <= 0.038; mọi góc CÓ CHỮ THẬT (kể cả chỉ đè MỘT PHẦN bbox)
+      # đo được >= 0.125. Đặt giữa khoảng hở đó.
+      text_dark_pixel_floor: 0.08
+      # TASK-017 Phase 1 — tỷ lệ chiều cao TÍNH TỪ ĐỈNH ảnh dùng để đo nửa
+      # trái/phải khi xác định bên nào là ảnh minh hoạ (`_measure_illustration_
+      # half`). CHỈ đo dải trên cùng (nơi logo thật sự có thể đặt), KHÔNG đo
+      # cả chiều cao ảnh -- bằng chứng thật (ảnh POM, TASK-017 Phase 3): tính
+      # cả chiều cao khiến khối thẻ số liệu ở NỬA DƯỚI (không liên quan gì
+      # tới góc đặt logo) áp đảo phép đo, xác định SAI nửa chứa tiêu đề. Hiệu
+      # chỉnh thêm trên đúng 8 ảnh thật: dải càng cao càng dễ ăn luôn phần
+      # TỐI của chính ảnh minh hoạ (vd ảnh POM — cuộn thép có vùng bóng đổ
+      # tối ngay dưới dải mở đầu) khiến dark_pixel_ratio bên minh hoạ vượt cả
+      # bên chữ; 0.08-0.12 cho kết quả ĐÚNG trên cả 8/8 ảnh, 0.15 sai 1/8
+      # (POM). Đặt 0.10 (giữa khoảng an toàn).
+      half_scan_top_fraction: 0.10
+      # TASK-017 Phase 2 — ngưỡng điểm tương phản (0..1, xem
+      # brand_stamp._select_logo_variant) DƯỚI mức này thì coi CẢ HAI biến
+      # thể đều tương phản kém — vẫn chọn biến thể điểm cao hơn (không được
+      # bỏ logo) nhưng ghi log rõ để Lead xem lại tài sản logo nếu lặp lại.
+      low_contrast_floor: 0.6
     metadata:
       side_ratio: 0.035
       bottom_ratio: 0.012

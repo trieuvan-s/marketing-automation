@@ -567,50 +567,106 @@ def test_full_canvas_overlay_uses_real_brand_kit_asset_across_all_ratios():
         assert image.size[0] > 0 and image.size[1] > 0
 
 
-def test_full_canvas_overlay_skips_logo_when_all_corners_occupied_instead_of_pasting_over_text():
-    """TASK-013 Phần B (2026-08-07, ADR-002) -- SỬA HÀNH VI CÓ CHỦ ĐÍCH,
-    KHÔNG PHẢI làm test dễ đi. Bản test cũ ở đây (tên cũ
-    `test_full_canvas_overlay_never_draws_scrim_or_recolors_logo`) khoá lại
-    ĐÚNG hành vi bug đang sửa: "va chạm cả 2 góc -> vẫn phải chọn top_left".
-    Đó chính là nguyên nhân ảnh `khoảnh-khắc-mở-van-công-trình-khổng-lồ-n_4x5.png`
-    (05/08) bị logo đè thẳng lên chữ "BSR" -- Lead xem ảnh thật, truy tới
-    brand_stamp.py:961-999 (xem TASK-013 contract). Hành vi ĐÚNG bây giờ: khi
-    KHÔNG ứng viên góc nào sạch, `overlay_brand_full_canvas` KHÔNG dán logo
-    (thà thiếu logo còn hơn đè lên chữ) -- caller (`ai_full.render_ai_full`,
-    Phần C) mới là nơi quyết định sinh lại ảnh dựa trên
-    `logo_all_corners_occupied`. Test này ép va chạm phát hiện ở CẢ HAI góc
-    (mock scan_text_collision) rồi khoá lại: logo bị bỏ qua, không có
-    scrim/nền nào được vẽ, và pixel ở CẢ HAI vị trí ứng viên vẫn giữ nguyên
-    màu nền gốc (không bị vẽ đè bởi logo lẫn bởi khung nền)."""
+def test_full_canvas_overlay_raises_when_illustration_half_has_no_clean_logo_spot():
+    """TASK-017 (2026-08-07, quy định MỚI chủ dự án) -- ĐẢO NGƯỢC hành vi
+    TASK-013 (chưa merge, bị BÁC). Bản test cũ ở đây (tên cũ
+    `test_full_canvas_overlay_skips_logo_when_all_corners_occupied_instead_of_pasting_over_text`)
+    khoá hành vi "va chạm -> bỏ qua logo, vẫn xuất ảnh". Chủ dự án xem đúng
+    ảnh Phase D đó (BSR, TASK-017 contract) và BÁC: "LOGO LUÔN PHẢI CÓ, KHÔNG
+    ĐƯỢC BỎ". Hành vi ĐÚNG bây giờ: không vị trí nào trong nửa chứa ảnh minh
+    hoạ sạch chữ -> `overlay_brand_full_canvas` phải RAISE
+    (LOGO_GUARDRAIL_FAIL), KHÔNG được lặng lẽ hoàn thành ảnh thiếu logo --
+    caller (`ai_full.render_ai_full`) bắt lỗi này để sinh lại ảnh / NEEDS_HUMAN.
+    Mock `scan_text_collision` trả dark_pixel_ratio cao (bận chữ thật theo
+    ngưỡng mới, xem `select_logo_corner`) cho MỌI vùng quét -- kể cả 2 nửa
+    tie nên nửa ảnh minh hoạ mặc định là PHẢI (quy ước prompt), ứng viên
+    top_right cũng bị mock trả occupied."""
     from unittest.mock import patch
 
     raw = _real_png_bytes(1280, 1600, color=(245, 248, 252))
     with patch("twmkt.render.postflight.scan_text_collision",
-              return_value={"detected": True, "component_count": 5}):
-        rendered, log = bs.overlay_brand_full_canvas(
-            raw, ratio="4:5", theme="bright", source="CafeF",
-            disclaimer="Nội dung mang tính tham khảo, không phải khuyến nghị đầu tư.",
-        )
-    assert log["logo_position"] == "skipped_all_corners_occupied", (
-        "va chạm cả 2 góc -> KHÔNG được dán đè lên chữ, phải bỏ qua logo (TASK-013)"
-    )
-    assert log["logo_all_corners_occupied"] is True
-    assert log["logo_bbox"] is None
-    assert log["logo_in_bounds"] is False
-    assert log["logo_scrim_applied"] is False, "KHÔNG được còn cờ scrim nào bật"
-    assert len(log["logo_corner_candidates"]) == 2
-    assert all(c["detected"] for c in log["logo_corner_candidates"])
+              return_value={"detected": True, "component_count": 5, "dark_pixel_ratio": 0.9}):
+        with pytest.raises(ValueError, match="LOGO_GUARDRAIL_FAIL"):
+            bs.overlay_brand_full_canvas(
+                raw, ratio="4:5", theme="bright", source="CafeF",
+                disclaimer="Nội dung mang tính tham khảo, không phải khuyến nghị đầu tư.",
+            )
 
-    image = Image.open(io.BytesIO(rendered)).convert("RGB")
-    for candidate in log["logo_corner_candidates"]:
-        x0, y0, x1, y1 = candidate["bbox"]
-        # Nếu logo hoặc khung nền còn bị vẽ đè, pixel ở góc dưới-phải bbox
-        # (vẫn trong vùng scan, ngoài rìa logo thật) sẽ khác màu nền gốc.
-        probe_x, probe_y = min(x1 - 2, image.width - 1), min(y1 - 2, image.height - 1)
-        pixel = image.getpixel((probe_x, probe_y))
-        assert pixel == (245, 248, 252), (
-            f"logo bị bỏ qua nhưng pixel ở góc {candidate['corner']} vẫn bị vẽ đè: {pixel}"
-        )
+
+# =====================================================================
+# TASK-017 Phase 2 (2026-08-07) -- chọn biến thể logo theo tương phản.
+#
+# Không ảnh THẬT nào trong bộ 8 ảnh chấm ở Phase 3 có nền vùng logo TỐI (cả
+# 8 đều theme "bright", góc trên-phải luôn nền sáng/trời) -- nên nhánh
+# white_gold trong `overlay_brand_full_canvas` KHÔNG được thực thi bởi ảnh
+# thật ở task này (ghi rõ trong OPS_LOG, KHÔNG giả vờ đã kiểm bằng ảnh thật).
+# Test dưới đây khoá đúng LOGIC của `_select_logo_variant` một cách CÔ LẬP
+# (không đi qua toàn bộ select_logo_corner/_measure_illustration_half) để
+# không lẫn với ngưỡng "occupied" của Phase 1 (dark_pixel_ratio floor 0.13
+# thấp hơn hẳn điểm giữa 0.5 dùng để so 2 biến thể -- một góc ĐÃ được chọn
+# nghĩa là dark_pixel_ratio < 0.13, luôn nghiêng về navy; nhánh white_gold
+# chỉ thật sự cần khi có ảnh nền tối bẩm sinh, vd theme "dark" tương lai).
+# =====================================================================
+
+
+def test_select_logo_variant_picks_white_gold_on_dark_background(tmp_path):
+    navy_path = tmp_path / "navy.png"
+    white_path = tmp_path / "white.png"
+    Image.new("RGBA", (10, 10), (0, 0, 0, 255)).save(navy_path)
+    Image.new("RGBA", (10, 10), (255, 255, 255, 255)).save(white_path)
+    canvas = Image.new("RGB", (200, 200), (5, 5, 10))
+    result = bs._select_logo_variant(
+        canvas, (0, 0, 200, 200), navy_path=navy_path, white_path=white_path,
+        low_contrast_floor=0.6,
+    )
+    assert result["variant"] == "white_gold"
+    assert result["reason"] == "dark_background"
+    assert result["bg_dark_pixel_ratio"] > 0.9
+    assert result["both_variants_low_contrast"] is False
+
+
+def test_select_logo_variant_picks_navy_gold_on_light_background(tmp_path):
+    navy_path = tmp_path / "navy.png"
+    white_path = tmp_path / "white.png"
+    Image.new("RGBA", (10, 10), (0, 0, 0, 255)).save(navy_path)
+    Image.new("RGBA", (10, 10), (255, 255, 255, 255)).save(white_path)
+    canvas = Image.new("RGB", (200, 200), (250, 250, 250))
+    result = bs._select_logo_variant(
+        canvas, (0, 0, 200, 200), navy_path=navy_path, white_path=white_path,
+        low_contrast_floor=0.6,
+    )
+    assert result["variant"] == "navy_gold"
+    assert result["reason"] == "light_background"
+
+
+def test_select_logo_variant_falls_back_to_navy_without_white_asset_configured(tmp_path):
+    navy_path = tmp_path / "navy.png"
+    Image.new("RGBA", (10, 10), (0, 0, 0, 255)).save(navy_path)
+    canvas = Image.new("RGB", (200, 200), (5, 5, 10))
+    result = bs._select_logo_variant(
+        canvas, (0, 0, 200, 200), navy_path=navy_path, white_path=None,
+        low_contrast_floor=0.6,
+    )
+    assert result["variant"] == "navy_gold"
+    assert result["reason"] == "white_gold_asset_not_configured"
+
+
+def test_select_logo_variant_logs_when_both_variants_have_low_contrast(tmp_path):
+    """Yêu cầu chủ dự án TASK-017: "nếu đo thấy cả 2 biến thể đều tương phản
+    kém ở vùng đó, ưu tiên chọn biến thể tương phản CAO HƠN và ghi log" --
+    vùng nửa tối nửa sáng (dark_pixel_ratio ~0.5) không biến thể nào áp đảo."""
+    navy_path = tmp_path / "navy.png"
+    white_path = tmp_path / "white.png"
+    Image.new("RGBA", (10, 10), (0, 0, 0, 255)).save(navy_path)
+    Image.new("RGBA", (10, 10), (255, 255, 255, 255)).save(white_path)
+    canvas = Image.new("RGB", (200, 200), (250, 250, 250))
+    ImageDraw.Draw(canvas).rectangle([0, 0, 200, 100], fill=(5, 5, 10))
+    result = bs._select_logo_variant(
+        canvas, (0, 0, 200, 200), navy_path=navy_path, white_path=white_path,
+        low_contrast_floor=0.6,
+    )
+    assert result["both_variants_low_contrast"] is True
+    assert result["reason"] == "both_variants_low_contrast_picked_higher"
 
 
 def test_full_canvas_overlay_rejects_wrong_real_image_ratio():
