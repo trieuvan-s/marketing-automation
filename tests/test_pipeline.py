@@ -4594,6 +4594,53 @@ def test_run_output_type_long_article_reuses_article_writer_writes_long_article_
     assert board.execute_updates.get(2) not in ("FAILED", "NEEDS_HUMAN")
 
 
+def test_run_output_type_unrecognized_value_never_marks_done_without_content():
+    """TASK-016 — bug thật topic_key=91d09f039226343c lô 03/08/2026: gate_status
+    đạt Execute=DONE HAI LẦN (04:26->05:15 và 08:51->08:54) dù content_output/
+    infographic/video/content_status = 0 bản ghi TUYỆT ĐỐI cho chủ đề (xem
+    reports/CODEBASE_SURVEY_2026-08-03.md mục 2.4). Nguyên nhân xác nhận qua
+    `git log`: commit 15187ad1 (VIỆC 1, 2026-08-03 16:29) mới nối "Long-Article"
+    vào `_OUTPUT_TYPE_TO_CONTENT_TYPE` (produce_from_sheet.py:152) — TRƯỚC đó
+    dict chỉ có {"Article","Infographic","Video"}, và CẢ 2 lần DONE xảy ra
+    TRƯỚC 16:29 cùng ngày, tức dưới bản code CHƯA nối kênh này.
+
+    `_allowed_output_types()` (dòng 156-164) trả `set()` RỖNG (KHÔNG PHẢI
+    None) khi output_type có giá trị nhưng KHÔNG khớp map — vòng lặp output_
+    type_excluded (dòng ~607-610) vì vậy loại SẠCH cả 3 kênh (article/
+    infographic/video), rơi vào các nhánh "người không chọn -> KHÔNG ghi dòng
+    nào cả" (dòng ~634-641 cho article, ~699-703 cho video/infographic) —
+    content_output KHÔNG BAO GIỜ nhận 1 write nào. `_is_fully_produced_
+    channels()` (dòng 243-262) khi đó thấy channels toàn False, vòng for
+    không bao giờ chạm `return False`, rơi thẳng xuống `return True` cuối hàm
+    (vacuously true) — Execute=DONE dù 0 nội dung.
+
+    Test dùng giá trị Output Type KHÔNG khớp kênh nào (mô phỏng TỔNG QUÁT —
+    bất kỳ giá trị tương lai nào lọt vào cột Output Type trước khi được nối
+    kênh sẽ tái lập NGUYÊN VĂN lỗi này; "Long-Article" cụ thể đã được nối nên
+    không còn tái lập được bằng chính giá trị đó nữa)."""
+    from store import pipeline_store as ps
+
+    class _PoisonWriterLLM:
+        def complete(self, *a, **kw):
+            raise AssertionError("KHÔNG được gọi writer khi Output Type không khớp kênh nào")
+
+    row = _approved_row("Bài test TASK-016 output_type lạ", row=16,
+                        output_type=["Podcast-Chua-Co-Kenh"])
+    result, board, notifier = _run_produce_scenario(_PoisonWriterLLM(), row)
+
+    # NGUYÊN TẮC CỨNG (TASK-016): topic không sinh được nội dung TUYỆT ĐỐI
+    # không được ghi execute=DONE.
+    assert board.execute_updates.get(16) != "DONE", (
+        f"Execute không được DONE khi 0 nội dung sinh ra, thực tế: {board.execute_updates}")
+    assert board.execute_updates.get(16) == "NEEDS_HUMAN", (
+        f"phải là FAILED/NEEDS_HUMAN kèm lý do đọc được, thực tế: {board.execute_updates}")
+
+    out = ps.read_content_output(row["topic_key"], "article", db_path=board.db_path)
+    assert out is not None, "phải có ÍT NHẤT 1 dòng CONTENT giải thích lý do, không được im lặng"
+    assert out["status"] == "NEEDS_HUMAN"
+    assert out["notes"], "Notes phải có lý do đọc được cho biên tập viên"
+
+
 def test_long_article_prompt_contains_both_rule_files_article_only_daily():
     """VIỆC 1.5/1.6 — content_type="long_article" nạp NGUYÊN VĂN CẢ 2 file
     (nền daily-v3.4 + bổ sung deep-v3.0), không mất mục nào; content_type=
