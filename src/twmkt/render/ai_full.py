@@ -247,129 +247,48 @@ def _qualitative_visual_direction(spec: dict) -> str:
 
 
 def _photo_subject_direction(spec: dict) -> str:
-    """Select a concrete, non-evidentiary photo context from supplied text."""
-    fragments: list[str] = []
-    primary_fragments: list[str] = []
+    """ADR-002 (2026-08-07, chủ dự án) + TASK-013 Phần A: ra lệnh dùng CHỦ THỂ
+    THẬT lấy từ spec (tên doanh nghiệp/tổ chức/sự kiện trong title/subtitle/
+    hero) thay cho bảng 10 category cứng khớp-keyword từng dùng ở đây.
+
+    Root cause đã xác minh (xem ADR-002 + TASK-013 contract): bảng cũ khớp
+    keyword ngành ("thị trường", "cổ phiếu"...) vào MỘT category chung
+    ("a real securities trading workstation... generic price chart") bất kể
+    bài viết thật sự nói về gì -- bài "FPT bắt tay OpenAI, khai phá THỊ
+    TRƯỜNG 240 tỷ USD" (hợp tác công nghệ) bị ép ra ảnh bàn giao dịch chứng
+    khoán chỉ vì trùng từ "thị trường". Đây KHÔNG phải chỗ để CODE tự đoán
+    ngành nghề bằng keyword nữa -- hàm chỉ trích xuất TẤT ĐỊNH các đoạn text
+    định danh chủ thể rồi giao cho model đọc JSON để tự nhận diện, cấm quy
+    về category chung chung do trùng từ khoá ngành."""
+    subject_fragments: list[str] = []
     for key in ("title", "subtitle"):
         value = spec.get(key)
         if value:
-            fragments.append(str(value))
-            if key == "title":
-                primary_fragments.append(str(value))
-    for key in ("hero", "main", "market", "highlights", "related"):
-        value = spec.get(key)
-        if not isinstance(value, list):
-            continue
-        for item in value:
-            if isinstance(item, dict):
-                fragments.extend(
-                    str(item[field])
-                    for field in ("label", "value", "text")
-                    if item.get(field)
-                )
-            elif item:
-                fragments.append(str(item))
-    priority = spec.get("priority")
-    if isinstance(priority, dict):
-        for level in ("primary", "secondary", "minor"):
-            values = priority.get(level)
-            if isinstance(values, list):
-                fragments.extend(str(item) for item in values if item)
-                if level == "primary":
-                    primary_fragments.extend(str(item) for item in values if item)
-    text = " ".join(fragments).casefold()
-    primary_text = " ".join(primary_fragments).casefold()
+            subject_fragments.append(str(value).strip())
+    for item in spec.get("hero") or []:
+        if isinstance(item, dict):
+            label = item.get("label")
+            if label:
+                subject_fragments.append(str(label).strip())
+        elif item:
+            subject_fragments.append(str(item).strip())
+    subject_text = " | ".join(fragment for fragment in subject_fragments if fragment)
+    if not subject_text:
+        subject_text = "chủ thể chính nêu trong dữ liệu JSON bên dưới"
 
-    categories = (
-        (
-            ("msr", "masan high-tech", "khai khoáng", "khoáng sản", "vật liệu"),
-            "a real industrial materials or mineral-processing environment "
-            "(machinery, processing equipment, raw materials), without any "
-            "company logo or claim that it is the named company's facility",
-        ),
-        (
-            ("cảng", "port", "logistics", "container", "vận tải biển"),
-            "a real port and logistics environment with cranes, containers or "
-            "cargo operations, without identifiable company branding",
-        ),
-        (
-            ("viễn thông", "telecom", "cáp quang", "data center", "dữ liệu"),
-            "a real telecommunications or data-center environment with fiber "
-            "and network equipment, without identifiable company branding",
-        ),
-        (
-            ("fed", "ngân hàng trung ương", "chính sách tiền tệ", "lạm phát"),
-            "a real macroeconomic-analysis workspace focused on interest-rate "
-            "policy documents and a generic rates chart, without official "
-            "seals, identifiable people or invented numeric chart labels",
-        ),
-        (
-            ("điện", "năng lượng", "power", "điện lực", "thủy điện"),
-            "a real power-generation or energy-operations environment, without "
-            "identifiable company branding or a claimed event location",
-        ),
-        (
-            (
-                "cổ phiếu",
-                "chứng khoán",
-                "ptkt",
-                "hỗ trợ",
-                "kháng cự",
-                "thị trường",
-            ),
-            "a real securities trading workstation or market-analysis desk "
-            "with a generic price chart, without invented ticker data",
-        ),
-        (
-            ("ngân hàng", "bank", "tín dụng", "lãi suất"),
-            "a real banking or financial-operations environment, without "
-            "identifiable company branding",
-        ),
-        (
-            ("bất động sản", "vinhomes", "đô thị", "chung cư"),
-            "a real contemporary urban-development or residential construction "
-            "environment, without identifiable project branding",
-        ),
-        (
-            ("trang sức", "pnj", "vàng bạc", "kim hoàn"),
-            "a real jewelry craftsmanship or retail-display environment, "
-            "without identifiable company branding",
-        ),
-        (
-            ("thực phẩm", "meatlife", "nông nghiệp", "chăn nuôi"),
-            "a real food-production or agricultural environment, without "
-            "identifiable company branding",
-        ),
-    )
-    selected = next(
-        (
-            direction
-            for keywords, direction in categories
-            if any(keyword in primary_text for keyword in keywords)
-        ),
-        None,
-    )
-    if selected is None:
-        selected = next(
-            (
-                direction
-                for keywords, direction in categories
-                if any(keyword in text for keyword in keywords)
-            ),
-            None,
-        )
-    if selected is None:
-        selected = (
-            "a concrete real-world environment directly represented by the "
-            "primary labels in the JSON; do not fall back to business people, "
-            "an office lobby or a city skyline merely to signal 'business'"
-        )
     return (
-        "PHOTO SUBJECT ANCHOR: use "
-        + selected
-        + ". The photograph must explain the subject at first glance, not just "
-        "match its general business mood. Treat it as generic contextual "
-        "imagery, never as evidence of the named event, company or location."
+        "PHOTO SUBJECT ANCHOR: xác định CHỦ THỂ THẬT (tên doanh nghiệp, tổ "
+        f'chức, sản phẩm hoặc sự kiện) được nêu trong: "{subject_text}". '
+        "Dựng bối cảnh ảnh chụp thật thể hiện ĐÚNG chủ thể đó -- đúng ngành "
+        "nghề, sản phẩm, trụ sở hoặc hoạt động thật của chủ thể -- được phép "
+        "hiển thị logo, biển hiệu hoặc thương hiệu thật của đúng chủ thể đó "
+        "nếu tự nhiên xuất hiện trong khung hình (ADR-002, chủ dự án 2026-"
+        "08-07). TUYỆT ĐỐI KHÔNG quy về một category chung chung chỉ vì "
+        "trùng từ khoá ngành -- ví dụ: không tự động vẽ bàn giao dịch chứng "
+        "khoán hay biểu đồ giá chỉ vì tiêu đề có chữ 'thị trường' hoặc 'cổ "
+        "phiếu' nếu bài không thực sự nói về giao dịch chứng khoán. Ảnh phải "
+        "giải thích được chủ thể ngay từ cái nhìn đầu tiên, không chỉ gợi "
+        "không khí 'kinh doanh' chung chung."
     )
 
 
@@ -456,24 +375,34 @@ YÊU CẦU BẮT BUỘC (không thoả hiệp):
    thiết kế liền mạch phủ toàn kích thước đầu ra. Full-bleed full-canvas:
    no border around the entire canvas, no letterbox, no cream or beige band.
 2. {visual_direction}
-3. Góc trên-phải giữ thị giác nhẹ, không đặt chữ hoặc số cốt lõi tại đó để lớp
-   deterministic đặt logo. Mép dưới dùng nền ít chi tiết; không đặt dữ kiện
-   cốt lõi ở dòng cuối vì lớp deterministic đặt nguồn và disclaimer tại đó.
-   Đây không phải dải trống hay khung riêng: nền và hình ảnh vẫn tiếp tục tự
-   nhiên đến đủ bốn mép canvas.
-4. KHÔNG vẽ logo, thương hiệu, watermark, chữ "FVA Capital", nguồn, tác giả,
-   ngày đăng hoặc disclaimer. Field "source" chỉ cung cấp bối cảnh, không được
-   biến thành chữ trên ảnh.
+3. BỐ CỤC CỨNG (yêu cầu trực tiếp của chủ dự án): khối tiêu đề/chữ chính đặt
+   bên TRÁI canvas, hình minh hoạ chủ thể (mục 8) chiếm phần bên PHẢI. Góc
+   trên-phải LUÔN giữ thị giác nhẹ, không đặt chữ, số hay chi tiết cốt lõi
+   tại đó -- đây là nơi DUY NHẤT lớp deterministic dán logo brand sau cùng.
+   Mép dưới dùng nền ít chi tiết; không đặt dữ kiện cốt lõi ở dòng cuối vì
+   lớp deterministic đặt nguồn và disclaimer tại đó. Đây không phải dải
+   trống hay khung riêng: nền và hình ảnh vẫn tiếp tục tự nhiên đến đủ bốn
+   mép canvas.
+4. KHÔNG tự vẽ watermark, chữ "FVA Capital", nguồn, tác giả, ngày đăng hoặc
+   disclaimer của trang này -- các thành phần đó do lớp deterministic dán
+   riêng ở góc trên-phải và dải đáy (mục 3). Field "source" chỉ cung cấp bối
+   cảnh, không được biến thành chữ trên ảnh. Logo, biển hiệu hoặc thương hiệu
+   THẬT của đúng doanh nghiệp hay sự kiện được nêu tên trong JSON ĐƯỢC PHÉP
+   xuất hiện tự nhiên trong khung hình (ADR-002, chủ dự án 2026-08-07) --
+   KHÔNG đặt vào góc trên-phải để tránh chồng lấn logo FVA.
 5. KHÔNG vẽ bản đồ, biên giới hoặc hình lãnh thổ. ƯU TIÊN HÌNH ẢNH THẬT:
    dùng ngôn ngữ ảnh chụp báo chí/doanh nghiệp tự nhiên làm minh hoạ chính,
    với ánh sáng, vật liệu, tỷ lệ, phối cảnh và môi trường giống ảnh máy ảnh.
    Ít nhất một vùng ảnh quang thực đủ lớn để làm neo thị giác; không biến ảnh
-   chụp thành thumbnail nhỏ giữa các icon. Vì đầu vào không cung cấp tài sản
-   ảnh đã xác minh, đây phải là AI photorealistic mô tả BỐI CẢNH CHUNG, không
-   được giả làm ảnh bằng chứng của đúng sự kiện, nhân vật hay địa điểm cụ thể.
-   Không dựng gương mặt người thật, logo doanh nghiệp, biển hiệu có thương
-   hiệu hoặc công trình nhận diện cụ thể. Không cartoon, vector, flat
-   illustration, clip-art, icon-led composition hay 3D-render.
+   chụp thành thumbnail nhỏ giữa các icon. Đây phải là AI photorealistic mô
+   tả bối cảnh liên quan trực tiếp đến chủ thể được nêu tên (mục 8) -- ĐƯỢC
+   PHÉP hiển thị logo doanh nghiệp, biển hiệu có thương hiệu hoặc công trình
+   nhận diện cụ thể của ĐÚNG chủ thể đó (ADR-002, chủ dự án 2026-08-07).
+   KHÔNG dựng thành ảnh tài liệu/bằng chứng giả: không chú thích như ảnh
+   chụp đúng thời điểm/địa điểm sự kiện, không bịa số liệu, văn bản hay biểu
+   đồ trông như tài liệu chính thức. Không dựng gương mặt người thật. Không
+   cartoon, vector, flat illustration, clip-art, icon-led composition hay
+   3D-render.
 6. Chỉ dùng ĐÚNG số liệu có trong JSON. KHÔNG tự cộng tổng, tính trung bình,
    tỷ lệ, chênh lệch, xếp hạng hoặc sinh thêm bất kỳ con số nào. Nếu một phân
    khu không có fact hỗ trợ thì bỏ phân khu, không điền số trang trí.
@@ -825,7 +754,7 @@ def render_ai_full(
         sách block đã cắt nếu có, rỗng nếu không cắt gì) -- ai_full.py KHÔNG
         tự ghi file, CALLER (vd render_production_assets.py) ghi JSON cạnh
         ảnh để Lead kiểm không cần mở ảnh."""
-    from .brand_stamp import overlay_brand_full_canvas
+    from .brand_stamp import overlay_brand_full_canvas, precheck_logo_corner
     from .postflight import content_has_explicit_ranking, detect_ordinal_markers
     from ..config import load_brand
 
@@ -920,6 +849,67 @@ def render_ai_full(
             ranking_scan = retry_scan
         else:
             ranking_scan_attempt_1 = ranking_scan
+
+        # TASK-013 Phần C (2026-08-07, ADR-002) -- pre-check góc logo TRƯỚC
+        # khi đóng dấu, dùng ĐÚNG khuôn retry ranking ở trên
+        # (detect_ordinal_markers -> get_or_generate_raw_image với
+        # postflight_instruction). Root cause đã xác minh: brand_stamp.py cũ
+        # dán logo đè lên chữ khi CẢ 2 góc bận thay vì sinh lại ảnh (ảnh BSR
+        # 05/08, logo đè thẳng lên chữ "BSR" -- xem TASK-013 contract). Tối
+        # đa 1 lần sinh lại/ảnh; hết lượt vẫn bận -> NEEDS_HUMAN, KHÔNG dán
+        # bừa (brand_stamp.overlay_brand_full_canvas() tự bỏ qua logo trong
+        # trường hợp đó, nhưng ta chặn TỪ ĐÂY để không xuất ảnh thiếu logo
+        # ra ngoài mà không ai biết).
+        logo_precheck = precheck_logo_corner(raw_bytes, ratio=ratio, settings=settings)
+        logo_attempts = 1
+        if logo_precheck["all_occupied"]:
+            logo_retry_instruction = (
+                "Ảnh trước đặt chữ hoặc chi tiết chính chạm cả góc trên-phải "
+                "và góc trên-trái, không còn chỗ trống cho logo. Bố cục PHẢI "
+                "đặt khối tiêu đề/chữ bên TRÁI, hình minh hoạ chủ thể bên "
+                "PHẢI, và giữ góc trên-phải HOÀN TOÀN không chữ/số/chi tiết "
+                "chính để lớp deterministic dán logo."
+            )
+            retry_path, retry_warning = get_or_generate_raw_image(
+                capped_spec,
+                theme=theme,
+                ratio=ratio,
+                regenerate=True,
+                assets_dir=assets_dir,
+                settings=settings,
+                postflight_instruction=logo_retry_instruction,
+            )
+            logo_attempts = 2
+            if retry_path is None:
+                results[ratio] = (
+                    None,
+                    retry_warning
+                    or "NEEDS_HUMAN: hậu kiểm góc logo yêu cầu retry nhưng không sinh được ảnh.",
+                )
+                logs[ratio] = {
+                    "postflight_status": "NEEDS_HUMAN",
+                    "logo_attempts": logo_attempts,
+                    "logo_precheck_attempt_1": logo_precheck,
+                    "logo_precheck_attempt_2": None,
+                }
+                continue
+            png_path = retry_path
+            raw_bytes = Path(png_path).read_bytes()
+            logo_precheck_retry = precheck_logo_corner(raw_bytes, ratio=ratio, settings=settings)
+            if logo_precheck_retry["all_occupied"]:
+                results[ratio] = (
+                    None,
+                    "NEEDS_HUMAN: ảnh vẫn không có góc trống cho logo sau 2 lần "
+                    "render; không xuất ảnh.",
+                )
+                logs[ratio] = {
+                    "postflight_status": "NEEDS_HUMAN",
+                    "logo_attempts": logo_attempts,
+                    "logo_precheck_attempt_1": logo_precheck,
+                    "logo_precheck_attempt_2": logo_precheck_retry,
+                }
+                continue
+            logo_precheck = logo_precheck_retry
         try:
             stamped, stamp_log = overlay_brand_full_canvas(
                 raw_bytes,
@@ -940,6 +930,8 @@ def render_ai_full(
                 "ranking_attempts": ranking_attempts,
                 "ranking_scan_attempt_1": ranking_scan_attempt_1,
                 "ranking_scan_final": ranking_scan,
+                "logo_attempts": logo_attempts,
+                "logo_precheck_final": logo_precheck,
             }
             continue
         stamp_log["truncated"] = truncated   # C4 -- cảnh báo cắt mật độ CẠNH ảnh, KHÔNG lên Sheet
@@ -951,6 +943,8 @@ def render_ai_full(
         stamp_log["ranking_attempts"] = ranking_attempts
         stamp_log["ranking_scan_attempt_1"] = ranking_scan_attempt_1
         stamp_log["ranking_scan_final"] = ranking_scan
+        stamp_log["logo_attempts"] = logo_attempts
+        stamp_log["logo_precheck_final"] = logo_precheck
         _, omitted_empty_blocks = _spec_for_image_prompt(capped_spec)
         stamp_log["prompt_omitted_empty_blocks"] = omitted_empty_blocks
         results[ratio] = (stamped, "")

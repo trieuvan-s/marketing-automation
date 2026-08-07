@@ -852,6 +852,122 @@ def _paste_logo(overlay: Image.Image, *, logo_path: Path, top_pad_px: int, pad: 
     return True
 
 
+# =====================================================================
+# TASK-013 Phần B (2026-08-07, ADR-002) -- chọn góc logo CÓ CẤU TRÚC.
+#
+# Bug cũ (brand_stamp.py:961-999 trước sửa, xem TASK-013 contract): chỉ thử
+# ĐÚNG 2 ứng viên top_right -> top_left; nếu CẢ HAI đều va chạm chữ, code vẫn
+# dán logo đè lên top_left và chỉ ghi một chuỗi `logo_collision_warning`
+# KHÔNG AI ĐỌC (trả ra log dict nhưng không caller nào kiểm tra). Ảnh BSR
+# (05/08) bị logo đè thẳng lên chữ "BSR" vì đúng nhánh này.
+#
+# `_LOGO_CORNER_PRIORITY` là danh sách (không còn if/else lồng nhau) -- mở
+# rộng thêm ứng viên sau này chỉ cần thêm tên vào đây + 1 nhánh toạ độ trong
+# `_logo_corner_xy`, không phải viết lại thuật toán chọn. `select_logo_corner`
+# trả kết quả CÓ CẤU TRÚC (chosen/all_occupied/candidates với component_count
+# của TỪNG ứng viên, dữ liệu `scan_text_collision` đã tính sẵn) để caller
+# (overlay_brand_full_canvas, hoặc ai_full.render_ai_full ở bước pre-check)
+# tự quyết định -- KHÔNG còn trường hợp "hết ứng viên -> dán bừa".
+# =====================================================================
+
+_LOGO_CORNER_PRIORITY: tuple[str, ...] = ("top_right", "top_left")
+
+
+def _logo_corner_xy(
+    corner: str, *, logo_margin: int, logo_w: int, logo_y: int, final_w: int
+) -> tuple[int, int]:
+    if corner == "top_right":
+        return final_w - logo_margin - logo_w, logo_y
+    if corner == "top_left":
+        return logo_margin, logo_y
+    raise ValueError(f"brand_stamp: logo corner candidate không hỗ trợ: {corner!r}")
+
+
+def select_logo_corner(
+    content_canvas: Image.Image,
+    *,
+    logo_w: int,
+    logo_h: int,
+    logo_margin: int,
+    logo_y: int,
+    final_w: int,
+    final_h: int,
+    corners: tuple[str, ...] = _LOGO_CORNER_PRIORITY,
+) -> dict:
+    """Quét từng ứng viên góc (đúng thứ tự ưu tiên, top-right trước -- yêu
+    cầu trực tiếp của chủ dự án) bằng `scan_text_collision` và trả kết quả
+    CÓ CẤU TRÚC: `{"chosen": <corner|None>, "all_occupied": bool,
+    "candidates": [{"corner", "x", "y", "bbox", "detected", "component_count",
+    ...}, ...]}`. `chosen=None` khi KHÔNG ứng viên nào sạch -- caller quyết
+    định (sinh lại ảnh hoặc bỏ qua logo), hàm này KHÔNG BAO GIỜ tự dán đè lên
+    chữ."""
+    from .postflight import expand_bbox, scan_text_collision
+
+    candidates: list[dict] = []
+    chosen: str | None = None
+    for corner in corners:
+        x, y = _logo_corner_xy(
+            corner, logo_margin=logo_margin, logo_w=logo_w, logo_y=logo_y, final_w=final_w
+        )
+        bbox = (x, y, x + logo_w, y + logo_h)
+        scan_bbox = expand_bbox(bbox, image_size=(final_w, final_h), ratio=0.20)
+        scan = scan_text_collision(content_canvas, scan_bbox, min_aligned=2)
+        candidates.append({"corner": corner, "x": x, "y": y, "bbox": list(bbox), **scan})
+        if chosen is None and not scan["detected"]:
+            chosen = corner
+    return {"chosen": chosen, "all_occupied": chosen is None, "candidates": candidates}
+
+
+def _full_canvas_logo_geometry(
+    logo: Image.Image, *, final_w: int, final_h: int, style: dict
+) -> tuple[int, int, int, int]:
+    """logo_w, logo_h, logo_margin, logo_y dùng chung giữa `overlay_brand_full_canvas`
+    và `precheck_logo_corner` -- MỘT nguồn hình học, tránh lệch nhau khi sửa."""
+    logo_w = max(round(final_w * style["logo_width_ratio"]), 24)
+    logo_h = max(round(logo.height * logo_w / max(logo.width, 1)), 1)
+    logo_margin = max(round(final_w * style["logo_right_ratio"]), 16)
+    logo_y = max(round(final_h * style["logo_top_ratio"]), 12)
+    return logo_w, logo_h, logo_margin, logo_y
+
+
+def precheck_logo_corner(
+    png_bytes: bytes,
+    *,
+    ratio: str,
+    settings=None,
+    logo_path: str | Path | None = None,
+) -> dict:
+    """TASK-013 Phần C: quét ảnh AI THÔ (chưa đóng dấu brand) để biết TRƯỚC
+    có góc trống cho logo hay không -- dùng ở `ai_full.render_ai_full` để
+    quyết định sinh lại ảnh (giống khuôn retry ranking đã có,
+    `detect_ordinal_markers` ở `ai_full.py`) TRƯỚC KHI tốn công đóng dấu.
+    Dùng ĐÚNG hình học `overlay_brand_full_canvas` sẽ dùng cho lượt đóng dấu
+    thật (qua `_full_canvas_logo_geometry` + `select_logo_corner` dùng
+    chung) -- không có rủi ro lệch kết quả giữa 2 lượt quét."""
+    style = _resolve_overlay_style()
+    final_w, final_h = _resolve_final_size(ratio, settings)
+    source_image = Image.open(io.BytesIO(png_bytes)).convert("RGB")
+    content_canvas = source_image.resize((final_w, final_h), Image.LANCZOS).convert("RGBA")
+    resolved_logo_path = Path(logo_path) if logo_path else _default_logo_path()
+    if not resolved_logo_path.is_file():
+        return {"chosen": None, "all_occupied": False, "candidates": []}
+    logo = Image.open(resolved_logo_path).convert("RGBA")
+    logo_w, logo_h, logo_margin, logo_y = _full_canvas_logo_geometry(
+        logo, final_w=final_w, final_h=final_h, style=style
+    )
+    if logo_margin + logo_w > final_w or logo_y + logo_h > final_h:
+        return {"chosen": None, "all_occupied": False, "candidates": []}
+    return select_logo_corner(
+        content_canvas,
+        logo_w=logo_w,
+        logo_h=logo_h,
+        logo_margin=logo_margin,
+        logo_y=logo_y,
+        final_w=final_w,
+        final_h=final_h,
+    )
+
+
 def overlay_brand_full_canvas(
     png_bytes: bytes,
     *,
@@ -951,67 +1067,53 @@ def overlay_brand_full_canvas(
         # SỬA LỖI THẬT (2026-08-04) — neo theo BỀ RỘNG (logo_width_ratio, xem
         # docstring _resolve_overlay_style), bề cao suy theo tỷ lệ khung ảnh
         # gốc (ĐẢO chiều tính so với bản height-anchored cũ).
-        logo_w = max(round(final_w * style["logo_width_ratio"]), 24)
-        logo_h = max(round(logo.height * logo_w / max(logo.width, 1)), 1)
-        logo_margin = max(round(final_w * style["logo_right_ratio"]), 16)
-        logo_x = final_w - logo_margin - logo_w
-        logo_y = max(round(final_h * style["logo_top_ratio"]), 12)
-        if logo_x < 0 or logo_y + logo_h > final_h:
+        logo_w, logo_h, logo_margin, logo_y = _full_canvas_logo_geometry(
+            logo, final_w=final_w, final_h=final_h, style=style
+        )
+        if logo_margin + logo_w > final_w or logo_y + logo_h > final_h:
             raise ValueError("Logo full-canvas vượt biên ảnh; kiểm tra config infographic_overlay")
-        right_bbox = (logo_x, logo_y, logo_x + logo_w, logo_y + logo_h)
-        right_scan_bbox = expand_bbox(
-            right_bbox, image_size=(final_w, final_h), ratio=0.20
+        # TASK-013 Phần B (2026-08-07, ADR-002) — trước đây chỉ thử ĐÚNG 2
+        # ứng viên top_right/top_left rồi DÁN BỪA lên top_left nếu cả hai va
+        # chạm chữ (ảnh BSR 05/08, logo đè "BSR"). `select_logo_corner` trả
+        # kết quả CÓ CẤU TRÚC; KHÔNG ứng viên nào sạch -> logo bị BỎ QUA
+        # (không dán đè lên chữ) thay vì ép chọn góc bận nhất — xem
+        # `select_logo_corner` docstring cho danh sách ứng viên đầy đủ.
+        corner_result = select_logo_corner(
+            content_canvas,
+            logo_w=logo_w,
+            logo_h=logo_h,
+            logo_margin=logo_margin,
+            logo_y=logo_y,
+            final_w=final_w,
+            final_h=final_h,
         )
-        right_scan = scan_text_collision(
-            content_canvas, right_scan_bbox, min_aligned=2
-        )
-        left_scan = {"detected": False, "component_count": 0}
-        logo_position = "top_right"
         logo_scrim_applied = False
-        logo_collision_warning = ""
-        if right_scan["detected"]:
-            logo_x = logo_margin
-            left_bbox = (logo_x, logo_y, logo_x + logo_w, logo_y + logo_h)
-            left_scan_bbox = expand_bbox(
-                left_bbox, image_size=(final_w, final_h), ratio=0.20
+        if corner_result["chosen"] is not None:
+            chosen_candidate = next(
+                c for c in corner_result["candidates"] if c["corner"] == corner_result["chosen"]
             )
-            left_scan = scan_text_collision(
-                content_canvas, left_scan_bbox, min_aligned=2
-            )
-            logo_position = "top_left"
-            if left_scan["detected"]:
-                # SỬA LỖI THẬT (2026-08-04, Lead: "tất cả ảnh Infographic đều
-                # có khung chữ nhật xung quanh brand-kit") — TRƯỚC ĐÂY khi
-                # phát hiện va chạm chữ ở CẢ HAI góc, code vẽ 1 khung nền bo
-                # góc (scrim) phía sau logo để giữ độ đọc được. Trên thực tế
-                # ảnh AI full-canvas hầu như LUÔN "bận" (ảnh chụp/biểu đồ phủ
-                # kín), nên nhánh này kích hoạt ở HẦU HẾT mọi ảnh, biến thành
-                # 1 khung hình chữ nhật cố định — đúng Lead phản ánh, không
-                # phải hiệu ứng tránh va chạm có chủ đích nữa. YÊU CẦU LEAD:
-                # "Không scrim, không nền, không recolor" — bỏ hẳn nhánh vẽ
-                # nền này (logo dán TRỰC TIẾP lên ảnh, không có gì phía sau
-                # ngoài chính ảnh AI). VỊ TRÍ logo (top_right/top_left theo
-                # va chạm) VẪN giữ nguyên — đó là quyết định layout, không
-                # phải hiệu ứng thị giác thêm vào logo.
-                logo_collision_warning = (
-                    "Chữ được phát hiện ở cả góc trên phải và trên trái; "
-                    "logo dùng góc trên trái (không còn vẽ nền/scrim)."
-                )
-        logo = logo.resize((logo_w, logo_h), Image.LANCZOS)
-        # SỬA LỖI THẬT (2026-08-04, Lead: "không recolor") — TRƯỚC ĐÂY theme
-        # sáng ("bright"/"light") tự tô lại pixel gần trung tính (chroma
-        # thấp) của logo sang màu chủ đạo theme, GIỮ NGUYÊN phần vàng đồng
-        # (chroma cao). Bỏ hẳn — logo LUÔN giữ ĐÚNG màu gốc trong file asset
-        # (navy/gold), không phụ thuộc theme ảnh.
-        overlay.alpha_composite(logo, (logo_x, logo_y))
-        logo_bbox = [logo_x, logo_y, logo_x + logo_w, logo_y + logo_h]
-        logo_in_bounds = True
+            logo_x, logo_y = chosen_candidate["x"], chosen_candidate["y"]
+            logo_position = corner_result["chosen"]
+            logo = logo.resize((logo_w, logo_h), Image.LANCZOS)
+            # SỬA LỖI THẬT (2026-08-04, Lead: "không recolor") — TRƯỚC ĐÂY
+            # theme sáng ("bright"/"light") tự tô lại pixel gần trung tính
+            # (chroma thấp) của logo sang màu chủ đạo theme, GIỮ NGUYÊN phần
+            # vàng đồng (chroma cao). Bỏ hẳn — logo LUÔN giữ ĐÚNG màu gốc
+            # trong file asset (navy/gold), không phụ thuộc theme ảnh.
+            #
+            # SỬA LỖI THẬT (2026-08-04, Lead: "tất cả ảnh Infographic đều có
+            # khung chữ nhật xung quanh brand-kit") — không vẽ scrim/nền
+            # phía sau logo dù va chạm chữ ở ứng viên khác; logo dán TRỰC
+            # TIẾP lên ảnh, không có gì phía sau ngoài chính ảnh AI.
+            overlay.alpha_composite(logo, (logo_x, logo_y))
+            logo_bbox = [logo_x, logo_y, logo_x + logo_w, logo_y + logo_h]
+            logo_in_bounds = True
+        else:
+            logo_position = "skipped_all_corners_occupied"
     else:
         logo_position = "none"
         logo_scrim_applied = False
-        logo_collision_warning = ""
-        right_scan = {"detected": False, "component_count": 0}
-        left_scan = {"detected": False, "component_count": 0}
+        corner_result = {"chosen": None, "all_occupied": False, "candidates": []}
 
     line_bottom = output_h - bottom
     text_y = line_bottom - line_h - text_bbox[1]
@@ -1048,10 +1150,9 @@ def overlay_brand_full_canvas(
         "logo_position": logo_position,
         "logo_bbox": logo_bbox,
         "logo_in_bounds": logo_in_bounds,
-        "logo_right_text_scan": right_scan,
-        "logo_left_text_scan": left_scan,
+        "logo_corner_candidates": corner_result["candidates"],
+        "logo_all_corners_occupied": corner_result["all_occupied"],
         "logo_scrim_applied": logo_scrim_applied,
-        "logo_collision_warning": logo_collision_warning,
         "metadata_font_px": metadata_font_px,
         "image_body_font_px": body_font_px,
         "metadata_font_scale": style["metadata_font_scale"],

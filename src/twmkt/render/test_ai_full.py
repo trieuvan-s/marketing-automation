@@ -17,8 +17,13 @@ from twmkt.config import Settings
 from twmkt.render import ai_full as af
 from twmkt.render import brand_stamp as bs
 
+# TASK-013 (2026-08-07): pixel giả 1x1 phải SÁNG, không phải đen tuyệt đối --
+# brand_stamp.select_logo_corner() (Phần B) giờ soi dark_pixel_ratio để phát
+# hiện va chạm chữ THẬT ở góc logo; 1 pixel đen tuyệt đối phóng to phủ kín
+# canvas trông giống "toàn khung là khối tối" -> false positive "hết góc
+# trống" -> NEEDS_HUMAN oan cho các test không liên quan tới logo.
 _TINY_PNG_B64 = (
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4+uMPAAXPAureeOIRAAAAAElFTkSuQmCC"
 )
 
 
@@ -184,61 +189,79 @@ def test_bright_prompt_requires_full_canvas_and_forbids_calculated_numbers():
     lower = prompt.lower()
     assert "toàn bộ canvas" in lower
     assert "không tự cộng tổng" in lower
-    assert "không vẽ logo" in lower
     assert "góc trên-phải" in lower
 
 
+def test_bright_prompt_permits_named_subject_logo_per_adr002():
+    """TASK-013 Phần A (2026-08-07, ADR-002) -- SỬA HÀNH VI CÓ CHỦ ĐÍCH: bản
+    cũ (test_bright_prompt_requires_full_canvas_and_forbids_calculated_numbers)
+    khoá lại câu cấm cứng "không vẽ logo" — ADR-002 (chủ dự án) đảo ngược
+    đúng ràng buộc này: ảnh ĐƯỢC nêu đích danh chủ thể và dùng logo doanh
+    nghiệp thật, miễn không đặt vào góc trên-phải (chỗ dành cho logo FVA)."""
+    prompt = af.build_ai_full_prompt(_SPEC, theme="bright", ratio="4:5")
+    lower = prompt.lower()
+    assert "không vẽ logo" not in lower
+    assert "được phép" in lower
+    assert "logo" in lower and "biển hiệu" in lower
+
+
 def test_bright_prompt_is_photo_first_without_claiming_verified_event_photo():
+    """TASK-013 Phần A (2026-08-07, ADR-002) -- SỬA HÀNH VI CÓ CHỦ ĐÍCH: bản
+    cũ khoá lại "bối cảnh chung"/"được giả làm ảnh bằng chứng" -- ADR-002 cho
+    phép ảnh liên quan trực tiếp chủ thể thật (không còn "bối cảnh chung
+    chung" mơ hồ); sàn giữ lại chuyển từ "không giả làm ảnh bằng chứng của
+    đúng sự kiện" sang phạm vi hẹp hơn: không dựng THÀNH tài liệu/bằng chứng
+    giả (số liệu/văn bản/biểu đồ bịa), không dựng gương mặt người thật."""
     prompt = af.build_ai_full_prompt(_SPEC, theme="bright", ratio="4:5")
     lower = prompt.lower()
     assert "ưu tiên hình ảnh thật" in lower
     assert "ảnh chụp báo chí/doanh nghiệp" in lower
     assert "ai photorealistic" in lower
-    assert "bối cảnh chung" in lower
-    assert "được giả làm ảnh bằng chứng" in lower
+    assert "liên quan trực tiếp đến chủ thể" in lower
+    assert "ảnh tài liệu/bằng chứng giả" in lower
     assert "không dựng gương mặt người thật" in lower
     assert "icon-led composition" in lower
 
 
-def test_photo_subject_anchor_uses_industrial_context_for_msr():
-    spec = dict(
-        _SPEC,
-        title="MSR tăng trưởng lợi nhuận",
-        related=["Masan High-Tech Materials", "Ngân hàng VIB"],
-    )
-    direction = af._photo_subject_direction(spec).lower()
-    assert "industrial materials or mineral-processing" in direction
-    assert "named company's facility" in direction
-    assert "general business mood" in direction
+def test_photo_subject_anchor_uses_real_named_subject_not_generic_category():
+    """TASK-013 Phần A (2026-08-07, ADR-002) -- SỬA HÀNH VI CÓ CHỦ ĐÍCH: bản
+    cũ khớp keyword ngành vào bảng 10 category cứng (test tên cũ
+    `test_photo_subject_anchor_uses_industrial_context_for_msr`). Root cause
+    xác minh trong ADR-002: category "thị trường"/"cổ phiếu" từng ép MỌI bài
+    có từ khoá đó ra CÙNG một bàn giao dịch chứng khoán generic bất kể chủ đề
+    thật -- ảnh FPT x OpenAI (hợp tác công nghệ) bị ép ra ảnh sàn chứng
+    khoán. Hành vi ĐÚNG: direction phải chứa NGUYÊN VĂN tên chủ thể thật từ
+    title, không phải một category cố định."""
+    spec = dict(_SPEC, title="MSR tăng trưởng lợi nhuận", subtitle="")
+    direction = af._photo_subject_direction(spec)
+    assert "MSR tăng trưởng lợi nhuận" in direction
+    assert "industrial materials or mineral-processing" not in direction.lower()
 
 
-def test_photo_subject_anchor_uses_trading_context_for_stock_analysis():
+def test_photo_subject_anchor_does_not_force_trading_desk_for_market_keywords():
+    """TASK-013 / ADR-002 -- đúng ca lỗi Lead xác minh (contract
+    `root_cause_verified_by_lead.anh_khong_lien_quan`): tiêu đề có từ khoá
+    'thị trường'/'cổ phiếu' KHÔNG còn tự động ép ra bàn giao dịch chứng
+    khoán generic; direction phải chứa chính tiêu đề thật VÀ câu cấm quy về
+    category chung do trùng từ khoá ngành."""
     spec = dict(
         _SPEC,
-        title="Phân tích kỹ thuật cổ phiếu",
+        title="FPT bắt tay OpenAI, khai phá thị trường 240 tỷ USD",
+        subtitle="",
         highlights=["Vùng hỗ trợ và kháng cự"],
     )
-    direction = af._photo_subject_direction(spec).lower()
-    assert "securities trading workstation" in direction
-    assert "without invented ticker data" in direction
-
-
-def test_photo_subject_anchor_prefers_monetary_policy_over_generic_market():
-    spec = dict(
-        _SPEC,
-        title="Fed và phản ứng của thị trường với chính sách tiền tệ",
-        subtitle="Giá năng lượng tác động đến triển vọng lạm phát",
-    )
-    direction = af._photo_subject_direction(spec).lower()
-    assert "macroeconomic-analysis workspace" in direction
-    assert "official seals" in direction
+    direction = af._photo_subject_direction(spec)
+    lower = direction.lower()
+    assert "fpt bắt tay openai" in lower
+    assert "securities trading workstation" not in lower
+    assert "không tự động vẽ bàn giao dịch chứng khoán" in lower
 
 
 def test_prompt_embeds_concrete_photo_subject_anchor():
-    spec = dict(_SPEC, title="Hoạt động cảng và logistics")
+    spec = dict(_SPEC, title="Hoạt động cảng và logistics", subtitle="")
     prompt = af.build_ai_full_prompt(spec, theme="bright", ratio="9:16")
     assert "PHOTO SUBJECT ANCHOR" in prompt
-    assert "real port and logistics environment" in prompt
+    assert "Hoạt động cảng và logistics" in prompt
 
 
 def test_prompt_rejects_unsupported_ratio_gracefully():
@@ -544,16 +567,21 @@ def test_full_canvas_overlay_uses_real_brand_kit_asset_across_all_ratios():
         assert image.size[0] > 0 and image.size[1] > 0
 
 
-def test_full_canvas_overlay_never_draws_scrim_or_recolors_logo():
-    """SỬA LỖI THẬT (2026-08-04, Lead: "tất cả ảnh Infographic đều có khung
-    chữ nhật xung quanh brand-kit") — TRƯỚC ĐÂY khi phát hiện va chạm chữ ở
-    CẢ HAI góc trên, code vẽ 1 khung nền bo góc (scrim) phía sau logo; ảnh AI
-    full-canvas hầu như LUÔN "bận" nên nhánh này kích hoạt ở HẦU HẾT mọi ảnh
-    -> đúng "khung chữ nhật cố định" Lead phản ánh. Yêu cầu Lead: "Không
-    scrim, không nền, không recolor". Test này ép va chạm phát hiện ở CẢ HAI
-    góc (mock scan_text_collision) rồi khoá lại: log không còn báo scrim,
-    VÀ pixel ngay dưới logo (vùng logo trong suốt alpha=0) vẫn giữ ĐÚNG màu
-    nền gốc -- không bị vẽ đè bởi hình chữ nhật nào."""
+def test_full_canvas_overlay_skips_logo_when_all_corners_occupied_instead_of_pasting_over_text():
+    """TASK-013 Phần B (2026-08-07, ADR-002) -- SỬA HÀNH VI CÓ CHỦ ĐÍCH,
+    KHÔNG PHẢI làm test dễ đi. Bản test cũ ở đây (tên cũ
+    `test_full_canvas_overlay_never_draws_scrim_or_recolors_logo`) khoá lại
+    ĐÚNG hành vi bug đang sửa: "va chạm cả 2 góc -> vẫn phải chọn top_left".
+    Đó chính là nguyên nhân ảnh `khoảnh-khắc-mở-van-công-trình-khổng-lồ-n_4x5.png`
+    (05/08) bị logo đè thẳng lên chữ "BSR" -- Lead xem ảnh thật, truy tới
+    brand_stamp.py:961-999 (xem TASK-013 contract). Hành vi ĐÚNG bây giờ: khi
+    KHÔNG ứng viên góc nào sạch, `overlay_brand_full_canvas` KHÔNG dán logo
+    (thà thiếu logo còn hơn đè lên chữ) -- caller (`ai_full.render_ai_full`,
+    Phần C) mới là nơi quyết định sinh lại ảnh dựa trên
+    `logo_all_corners_occupied`. Test này ép va chạm phát hiện ở CẢ HAI góc
+    (mock scan_text_collision) rồi khoá lại: logo bị bỏ qua, không có
+    scrim/nền nào được vẽ, và pixel ở CẢ HAI vị trí ứng viên vẫn giữ nguyên
+    màu nền gốc (không bị vẽ đè bởi logo lẫn bởi khung nền)."""
     from unittest.mock import patch
 
     raw = _real_png_bytes(1280, 1600, color=(245, 248, 252))
@@ -563,18 +591,26 @@ def test_full_canvas_overlay_never_draws_scrim_or_recolors_logo():
             raw, ratio="4:5", theme="bright", source="CafeF",
             disclaimer="Nội dung mang tính tham khảo, không phải khuyến nghị đầu tư.",
         )
-    assert log["logo_position"] == "top_left", "va chạm cả 2 góc -> vẫn phải chọn top_left"
+    assert log["logo_position"] == "skipped_all_corners_occupied", (
+        "va chạm cả 2 góc -> KHÔNG được dán đè lên chữ, phải bỏ qua logo (TASK-013)"
+    )
+    assert log["logo_all_corners_occupied"] is True
+    assert log["logo_bbox"] is None
+    assert log["logo_in_bounds"] is False
     assert log["logo_scrim_applied"] is False, "KHÔNG được còn cờ scrim nào bật"
+    assert len(log["logo_corner_candidates"]) == 2
+    assert all(c["detected"] for c in log["logo_corner_candidates"])
 
     image = Image.open(io.BytesIO(rendered)).convert("RGB")
-    x0, y0, x1, y1 = log["logo_bbox"]
-    # Góc dưới-phải bbox logo (ngoài rìa hình chữ nhật thật của logo, vẫn
-    # trong bbox) -- nếu còn khung nền, pixel ở đây sẽ là màu nền phẳng
-    # (colors["background"]); nếu KHÔNG, pixel phải khớp nền GỐC đã tô sẵn
-    # (245, 248, 252) vì đây là ảnh nền phẳng 1 màu.
-    probe_x, probe_y = min(x1 - 2, image.width - 1), min(y1 - 2, image.height - 1)
-    pixel = image.getpixel((probe_x, probe_y))
-    assert pixel == (245, 248, 252), f"vẫn còn hình chữ nhật vẽ đè phía sau logo: {pixel}"
+    for candidate in log["logo_corner_candidates"]:
+        x0, y0, x1, y1 = candidate["bbox"]
+        # Nếu logo hoặc khung nền còn bị vẽ đè, pixel ở góc dưới-phải bbox
+        # (vẫn trong vùng scan, ngoài rìa logo thật) sẽ khác màu nền gốc.
+        probe_x, probe_y = min(x1 - 2, image.width - 1), min(y1 - 2, image.height - 1)
+        pixel = image.getpixel((probe_x, probe_y))
+        assert pixel == (245, 248, 252), (
+            f"logo bị bỏ qua nhưng pixel ở góc {candidate['corner']} vẫn bị vẽ đè: {pixel}"
+        )
 
 
 def test_full_canvas_overlay_rejects_wrong_real_image_ratio():
