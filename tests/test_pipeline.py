@@ -11473,6 +11473,69 @@ def test_log_source_stats_mixed_batch_persists_record_for_every_source():
     assert "context=0" in im_lang_msg and "relevance_dropped=4" in im_lang_msg
 
 
+# --- TASK-014: rào chắn chống ghi nhầm Sheet production trong review_to_sheet.py
+# Trước bản này, run() đọc THẲNG TWMKT_SHEET_ID/sheets.spreadsheet_id (production),
+# KHÔNG đi qua config.resolve_sheet_id() -- rào chắn đó CÓ TỒN TẠI (dùng cho
+# benchmark/A-B) nhưng script crawl thật không dùng, nên người chạy thử phải tự
+# set ENV mỗi lần, quên 1 lần là ghi vào Sheet sản xuất. _resolve_target_sheet()
+# thêm cờ --test đi qua resolve_sheet_id() TRONG KHI GIỮ NGUYÊN mặc định = production
+# (lịch chạy nền phụ thuộc điều đó).
+def test_resolve_target_sheet_default_is_production_unchanged(monkeypatch):
+    monkeypatch.delenv("TWMKT_SHEET_ID", raising=False)
+    monkeypatch.delenv("TWMKT_TEST_SHEET_ID", raising=False)
+    monkeypatch.delenv("TWMKT_SHEETS_CREDS", raising=False)
+    mod = _rpa_review_module()
+
+    s = Settings({"sheets": {"spreadsheet_id": "PROD-ID", "test_spreadsheet_id": "TEST-ID",
+                             "creds_path": "secrets/sa.json"}})
+    sheet_id, creds, label = mod._resolve_target_sheet(s, test=False)
+    assert (sheet_id, creds, label) == ("PROD-ID", "secrets/sa.json", "PRODUCTION")
+
+
+def test_resolve_target_sheet_test_flag_uses_resolve_sheet_id(monkeypatch):
+    monkeypatch.delenv("TWMKT_SHEET_ID", raising=False)
+    monkeypatch.delenv("TWMKT_TEST_SHEET_ID", raising=False)
+    monkeypatch.delenv("TWMKT_SHEETS_CREDS", raising=False)
+    mod = _rpa_review_module()
+
+    s = Settings({"sheets": {"spreadsheet_id": "PROD-ID-THAT-MUST-NOT-LEAK",
+                             "test_spreadsheet_id": "TEST-ID", "creds_path": "secrets/sa.json"}})
+    sheet_id, creds, label = mod._resolve_target_sheet(s, test=True)
+    assert (sheet_id, creds, label) == ("TEST-ID", "secrets/sa.json", "TEST")
+
+
+def test_resolve_target_sheet_test_flag_blocks_when_no_test_sheet_configured(monkeypatch):
+    """`--test` PHẢI đi qua rào chắn resolve_sheet_id() thật -- thiếu sheet TEST
+    thì raise, KHÔNG BAO GIỜ tự ý lùi về production dù production có cấu hình sẵn."""
+    monkeypatch.delenv("TWMKT_SHEET_ID", raising=False)
+    monkeypatch.delenv("TWMKT_TEST_SHEET_ID", raising=False)
+    monkeypatch.delenv("TWMKT_SHEETS_CREDS", raising=False)
+    mod = _rpa_review_module()
+    from twmkt.config import ProductionSheetBlocked
+
+    s = Settings({"sheets": {"spreadsheet_id": "PROD-ID-THAT-MUST-NOT-LEAK",
+                             "test_spreadsheet_id": "", "creds_path": "secrets/sa.json"}})
+    try:
+        mod._resolve_target_sheet(s, test=True)
+    except ProductionSheetBlocked:
+        pass
+    else:
+        raise AssertionError("--test PHẢI raise khi thiếu sheet TEST, không được lùi về production.")
+
+
+def test_resolve_target_sheet_default_ignores_test_sheet_env(monkeypatch):
+    """Mặc định (test=False) KHÔNG được đọc TWMKT_TEST_SHEET_ID -- chỉ --test mới
+    chạm biến đó, đúng thiết kế "mặc định = production, không đổi"."""
+    monkeypatch.delenv("TWMKT_SHEET_ID", raising=False)
+    monkeypatch.setenv("TWMKT_TEST_SHEET_ID", "TEST-FROM-ENV-PHAI-BI-BO-QUA")
+    monkeypatch.delenv("TWMKT_SHEETS_CREDS", raising=False)
+    mod = _rpa_review_module()
+
+    s = Settings({"sheets": {"spreadsheet_id": "PROD-ID", "creds_path": "secrets/sa.json"}})
+    sheet_id, _creds, label = mod._resolve_target_sheet(s, test=False)
+    assert (sheet_id, label) == ("PROD-ID", "PRODUCTION")
+
+
 # --- TASK-011: chống "nguồn html rơi về default_spec" im lặng ---------------
 # Trước bản này, nguồn fetch_type="html" không có SourceSpec riêng (khoá theo
 # URL) rơi về default_spec (pattern CafeF) -- article_url_pattern không khớp

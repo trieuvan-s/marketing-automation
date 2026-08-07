@@ -5,6 +5,11 @@ pyyaml>=6.0          # đọc config/settings.yaml
 gspread>=6.0
 google-auth>=2.0
 
+# publishers/drive_store.py:98,202 import googleapiclient.discovery.build và
+# googleapiclient.http.MediaFileUpload (upload media lên Drive). Thiếu gói này
+# -> 3 test Drive fail ModuleNotFoundError (phát hiện khi dựng venv mới, TASK-014).
+google-api-python-client>=2.100
+
 # LLM thật cho Researcher + Hook (llm.provider = anthropic). Cần ANTHROPIC_API_KEY.
 anthropic>=0.40
 

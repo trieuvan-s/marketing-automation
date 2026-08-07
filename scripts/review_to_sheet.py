@@ -27,10 +27,15 @@ KHÔNG scale: bản nếm thử. Không gọi LLM đắt (MockLLM), không sinh 
 Chạy:
     python scripts/review_to_sheet.py
     python scripts/review_to_sheet.py --limit 3
+    python scripts/review_to_sheet.py --test     # TASK-014: ghi sheet TEST, không đụng production
 
-spreadsheet_id/creds_path đọc theo thứ tự: biến môi trường (TWMKT_SHEET_ID /
-TWMKT_SHEETS_CREDS) NẾU đặt, ngược lại lấy từ config/settings.yaml (mục sheets).
-Không bắt buộc đặt ENV. Xem docs/google_sheets_setup.md để tạo service account.
+MẶC ĐỊNH (không truyền --test) ghi PRODUCTION: spreadsheet_id/creds_path đọc
+theo thứ tự biến môi trường (TWMKT_SHEET_ID / TWMKT_SHEETS_CREDS) NẾU đặt,
+ngược lại lấy từ config/settings.yaml (mục sheets). Không bắt buộc đặt ENV.
+--test ép đi qua config.resolve_sheet_id() (sheets.test_spreadsheet_id / ENV
+TWMKT_TEST_SHEET_ID) — KHÔNG BAO GIỜ tự ý lùi về production. Sheet đang nhắm
+(PRODUCTION/TEST) luôn được in ra console + ghi vào tab LOG trước dòng CONTEXT
+đầu tiên. Xem docs/google_sheets_setup.md để tạo service account.
 """
 from __future__ import annotations
 
@@ -55,7 +60,7 @@ from datetime import datetime, timedelta, timezone  # noqa: E402
 
 from twmkt.agents.hook import HookAgent, _try_json  # noqa: E402
 from twmkt.collectors.http_collector import HttpFirstCollector  # noqa: E402
-from twmkt.config import load_settings  # noqa: E402
+from twmkt.config import load_settings, resolve_sheet_id  # noqa: E402
 from twmkt.curation import normalize  # noqa: E402
 from twmkt.curation.config import CurationConfig, _load_lines  # noqa: E402
 from twmkt.curation.keys import assign_topic_key  # noqa: E402
@@ -128,6 +133,28 @@ _I_SOURCE = [h.strip().lower() for h in CONTEXT_HEADER].index("source")
 # Mặc định nhóm ưu tiên khi tab SETTINGS chưa có/thiếu khóa PriorityGroups
 # (khớp seed row do SheetsBoard.ensure_tabs() ghi lần đầu).
 _DEFAULT_PRIORITY_GROUPS = ["ChinhSach", "ViMoVN"]
+
+
+def _resolve_target_sheet(settings, *, test: bool) -> tuple[str, str, str]:
+    """Chọn spreadsheet_id + nhãn PRODUCTION/TEST cho lượt chạy (TASK-014).
+
+    MẶC ĐỊNH (`test=False`) GIỮ NGUYÊN hành vi cũ TỪ TRƯỚC ĐẾN NAY: đọc THẲNG
+    `TWMKT_SHEET_ID` / `sheets.spreadsheet_id` -- PRODUCTION. Lịch chạy nền
+    (queue_worker/scheduler) phụ thuộc điều này; KHÔNG được đổi mặc định, xem
+    `config.resolve_sheet_id()` (`src/twmkt/config.py:92`) -- docstring ở đó
+    nói rõ "NHỮNG NƠI ĐÓ [script sản xuất] cố ý trỏ production, KHÔNG đổi".
+
+    `test=True` (cờ CLI `--test`) mới ép đi qua `resolve_sheet_id(settings,
+    allow_production=False)` -- LUÔN trả sheet TEST (`sheets.test_spreadsheet_
+    id` / ENV `TWMKT_TEST_SHEET_ID`), raise `ProductionSheetBlocked` nếu chưa
+    cấu hình sheet TEST (thà dừng hẳn còn hơn lỡ ghi nhầm). Trước bản này,
+    người chạy thử phải TỰ set ENV `TWMKT_SHEET_ID` tạm thời mỗi lần -- quên 1
+    lần là ghi thẳng vào Sheet sản xuất."""
+    creds = (os.environ.get("TWMKT_SHEETS_CREDS") or settings.get("sheets.creds_path") or "").strip()
+    if test:
+        return resolve_sheet_id(settings, allow_production=False), creds, "TEST"
+    sheet_id = (os.environ.get("TWMKT_SHEET_ID") or settings.get("sheets.spreadsheet_id") or "").strip()
+    return sheet_id, creds, "PRODUCTION"
 
 
 def _watchlist_curation(settings) -> CurationConfig:
@@ -265,21 +292,28 @@ def _log_source_stats(board, per_source: list[dict]) -> None:
 
 
 def run(*, limit: int = 3, sync_sources: bool = False, from_config: bool = False,
-        debug: bool = False, offline: bool = False, setup: bool = False) -> dict:
+        debug: bool = False, offline: bool = False, setup: bool = False,
+        test: bool = False) -> dict:
     settings = load_settings()
     notifier = make_notifier(settings)   # PHASE TELE — no-op êm nếu chưa cấu hình
 
-    # Ưu tiên ENV (ghi đè tạm) -> settings.yaml (mục sheets). ENV không bắt buộc.
-    sheet_id = (os.environ.get("TWMKT_SHEET_ID") or settings.get("sheets.spreadsheet_id") or "").strip()
-    creds = (os.environ.get("TWMKT_SHEETS_CREDS") or settings.get("sheets.creds_path") or "").strip()
+    # TASK-014: sheet_label PRODUCTION/TEST theo _resolve_target_sheet() —
+    # test=False (mặc định) GIỮ NGUYÊN hành vi cũ (production), test=True (cờ
+    # --test) ép sheet TEST qua config.resolve_sheet_id(). In + persist NGAY,
+    # TRƯỚC bất kỳ lượt ghi nào (kể cả ensure_tabs) — người chạy phải thấy rõ
+    # đang ghi vào đâu trước khi dòng đầu tiên chạm Sheet.
+    sheet_id, creds, sheet_label = _resolve_target_sheet(settings, test=test)
     if not sheet_id or not creds:
         raise SystemExit(
             "Thiếu spreadsheet_id/creds_path. Đặt ở config/settings.yaml (mục sheets) "
             "hoặc biến môi trường TWMKT_SHEET_ID / TWMKT_SHEETS_CREDS. Xem "
             "docs/google_sheets_setup.md (tạo service account + chia sẻ Sheet)."
         )
+    target_msg = f"[TARGET] Ghi vào sheet {sheet_label} (id={sheet_id})"
+    print(target_msg)
 
     board = SheetsBoard(spreadsheet_id=sheet_id, creds_path=creds)
+    board.log("INFO", target_msg)   # persist nhãn PRODUCTION/TEST TRƯỚC dòng CONTEXT đầu tiên
     # ensure_tabs() mặc định RẺ (chỉ tạo/format khi phát hiện tab thiếu/header sai,
     # xem SheetsBoard._headers_need_setup) — giảm lượt gọi Sheets API mỗi lần chạy
     # lịch (né quota 429). --setup ép chạy đầy đủ (tạo tab/seed/format lại).
@@ -559,10 +593,15 @@ def _parse_args(argv: list[str]):
     ap.add_argument("--setup", action="store_true",
                     help="Ép chạy đầy đủ ensure_tabs (tạo/seed/format tab) dù header đã đúng "
                         "— mặc định BỎ QUA để giảm lượt gọi Sheets API (né quota 429).")
+    ap.add_argument("--test", action="store_true",
+                    help="TASK-014: ép ghi vào sheet TEST (config.resolve_sheet_id(), "
+                        "sheets.test_spreadsheet_id) thay vì PRODUCTION. KHÔNG truyền cờ này "
+                        "= mặc định vẫn ghi PRODUCTION (không đổi, lịch chạy nền phụ thuộc điều "
+                        "đó) — script LUÔN in + ghi LOG rõ đang nhắm sheet nào trước khi ghi.")
     return ap.parse_args(argv)
 
 
 if __name__ == "__main__":
     args = _parse_args(sys.argv[1:])
     run(limit=args.limit, sync_sources=args.sync_sources, from_config=args.from_config,
-        debug=args.debug, offline=args.offline, setup=args.setup)
+        debug=args.debug, offline=args.offline, setup=args.setup, test=args.test)
