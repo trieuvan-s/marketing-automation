@@ -920,20 +920,38 @@ def render_ai_full(
                 settings=settings,
             )
         except ValueError as exc:
-            if "METADATA_GUARDRAIL_FAIL" not in str(exc):
-                raise
-            results[ratio] = (None, str(exc))
-            logs[ratio] = {
-                "postflight_status": "FAIL",
-                "metadata_guardrail": "FAIL",
-                "ranking_allowed": ranking_allowed,
-                "ranking_attempts": ranking_attempts,
-                "ranking_scan_attempt_1": ranking_scan_attempt_1,
-                "ranking_scan_final": ranking_scan,
-                "logo_attempts": logo_attempts,
-                "logo_precheck_final": logo_precheck,
-            }
-            continue
+            msg = str(exc)
+            if "METADATA_GUARDRAIL_FAIL" in msg:
+                results[ratio] = (None, msg)
+                logs[ratio] = {
+                    "postflight_status": "FAIL",
+                    "metadata_guardrail": "FAIL",
+                    "ranking_allowed": ranking_allowed,
+                    "ranking_attempts": ranking_attempts,
+                    "ranking_scan_attempt_1": ranking_scan_attempt_1,
+                    "ranking_scan_final": ranking_scan,
+                    "logo_attempts": logo_attempts,
+                    "logo_precheck_final": logo_precheck,
+                }
+                continue
+            if "LOGO_GUARDRAIL_FAIL" in msg:
+                # TASK-017 (2026-08-07) -- phòng thủ thêm lớp: precheck ở
+                # trên đã lọc trước khi tới đây nên nhánh này HIẾM khi chạy,
+                # nhưng nếu 2 lượt quét (precheck vs overlay_brand_full_
+                # canvas) lệch nhau vì lý do bất kỳ, KHÔNG được để lọt ảnh
+                # thiếu logo ra ngoài -- coi như hết lượt retry, NEEDS_HUMAN.
+                results[ratio] = (None, "NEEDS_HUMAN: " + msg)
+                logs[ratio] = {
+                    "postflight_status": "NEEDS_HUMAN",
+                    "ranking_allowed": ranking_allowed,
+                    "ranking_attempts": ranking_attempts,
+                    "ranking_scan_attempt_1": ranking_scan_attempt_1,
+                    "ranking_scan_final": ranking_scan,
+                    "logo_attempts": logo_attempts,
+                    "logo_precheck_final": logo_precheck,
+                }
+                continue
+            raise
         stamp_log["truncated"] = truncated   # C4 -- cảnh báo cắt mật độ CẠNH ảnh, KHÔNG lên Sheet
         stamp_log["theme"] = theme
         stamp_log["theme_id"] = theme_id

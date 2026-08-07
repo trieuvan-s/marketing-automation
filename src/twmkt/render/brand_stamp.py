@@ -223,17 +223,27 @@ _LEGACY_DEFAULT_LOGO_PATH = Path(__file__).resolve().parents[3] / "assets" / "ic
 
 def _resolve_active_logo_asset() -> dict:
     """Đọc `brand.active_asset` + `brand.assets[active_asset]` từ brand.yaml
-    (VIỆC brand-kit mới 2026-08-04) -- trả {"path": Path, "width_ratio":
-    float}. Thiếu/hỏng config -> lùi về _LEGACY_DEFAULT_LOGO_PATH + tỷ lệ cũ
-    0.148 (KHÔNG raise -- lớp trình bày, hỏng cosmetic không đáng chặn render)."""
+    (VIỆC brand-kit mới 2026-08-04) -- trả {"path": Path, "white_gold_path":
+    Path|None, "width_ratio": float}. Thiếu/hỏng config -> lùi về
+    _LEGACY_DEFAULT_LOGO_PATH + tỷ lệ cũ 0.148 (KHÔNG raise -- lớp trình bày,
+    hỏng cosmetic không đáng chặn render). `white_gold_path` (TASK-017,
+    2026-08-07) là biến thể trắng-vàng CÙNG asset family, dùng khi nền vùng
+    dán logo đo được TỐI (xem `_select_logo_variant`) -- None nếu chưa cấu
+    hình (lùi mượt về hành vi cũ: luôn navy-gold)."""
     b = load_brand()
     active = b.get("active_asset") or "standard_icon"
     asset = (b.get("assets") or {}).get(active) or {}
     raw_path = asset.get("path")
+    raw_white_path = asset.get("white_gold_path")
     width_ratio = asset.get("width_ratio")
     repo_root = Path(__file__).resolve().parents[3]
     path = (repo_root / raw_path) if raw_path else _LEGACY_DEFAULT_LOGO_PATH
-    return {"path": path, "width_ratio": float(width_ratio) if width_ratio is not None else 0.148}
+    white_path = (repo_root / raw_white_path) if raw_white_path else None
+    return {
+        "path": path,
+        "white_gold_path": white_path,
+        "width_ratio": float(width_ratio) if width_ratio is not None else 0.148,
+    }
 
 
 def _default_logo_path() -> Path:
@@ -324,6 +334,10 @@ def _resolve_overlay_style() -> dict[str, float]:
         "logo_right_ratio": float(logo_cfg.get("right_ratio", 0.035)),
         "logo_top_ratio": float(logo_cfg.get("top_ratio", 0.025)),
         "logo_width_ratio": _resolve_active_logo_asset()["width_ratio"],
+        # TASK-017 Phase 1/2 -- xem ghi chú ngưỡng đầy đủ trong config/brand.yaml.
+        "logo_text_dark_pixel_floor": float(logo_cfg.get("text_dark_pixel_floor", 0.08)),
+        "logo_low_contrast_floor": float(logo_cfg.get("low_contrast_floor", 0.6)),
+        "logo_half_scan_top_fraction": float(logo_cfg.get("half_scan_top_fraction", 0.30)),
         "metadata_side_ratio": float(metadata_cfg.get("side_ratio", 0.035)),
         "metadata_bottom_ratio": float(metadata_cfg.get("bottom_ratio", 0.012)),
         "image_body_font_ratio": float(metadata_cfg.get("image_body_font_ratio", 0.028)),
@@ -338,6 +352,18 @@ def _resolve_overlay_style() -> dict[str, float]:
             raise ValueError(f"brand.infographic_overlay.{key} phải nằm trong [0, 0.20]")
     if not 0.02 <= style["logo_width_ratio"] <= 0.30:
         raise ValueError("brand.assets.<active_asset>.width_ratio phải nằm trong [0.02, 0.30]")
+    if not 0.0 <= style["logo_text_dark_pixel_floor"] <= 1.0:
+        raise ValueError(
+            "brand.infographic_overlay.logo.text_dark_pixel_floor phải nằm trong [0, 1]"
+        )
+    if not 0.0 <= style["logo_low_contrast_floor"] <= 1.0:
+        raise ValueError(
+            "brand.infographic_overlay.logo.low_contrast_floor phải nằm trong [0, 1]"
+        )
+    if not 0.05 <= style["logo_half_scan_top_fraction"] <= 1.0:
+        raise ValueError(
+            "brand.infographic_overlay.logo.half_scan_top_fraction phải nằm trong [0.05, 1]"
+        )
     if not 0.01 <= style["image_body_font_ratio"] <= 0.08:
         raise ValueError(
             "brand.infographic_overlay.metadata.image_body_font_ratio phải nằm trong [0.01, 0.08]"
@@ -854,23 +880,81 @@ def _paste_logo(overlay: Image.Image, *, logo_path: Path, top_pad_px: int, pad: 
 
 # =====================================================================
 # TASK-013 Phần B (2026-08-07, ADR-002) -- chọn góc logo CÓ CẤU TRÚC.
+# TASK-017 (2026-08-07, quy định MỚI chủ dự án) -- ĐẢO HƯỚNG tiếp: chủ dự án
+# BÁC bản TASK-013 (chưa merge) vì nó BỎ HẲN logo khi cả 2 góc "va chạm" --
+# bằng chứng thật (Phase D ảnh BSR): top-right chỉ là MÂY TRỜI (dark_pixel_
+# ratio=0.0) nhưng vẫn bị `scan["detected"]=True` vì hoạ tiết mây tạo nhiều
+# cạnh tương phản giống chữ (`aligned_component_count=8`). Quy định mới: (1)
+# logo LUÔN phải có, không được bỏ; (2) LUÔN đóng ở NỬA chứa ảnh minh hoạ,
+# không còn thử cả 2 nửa như TASK-013; (3) đè lên hoạ tiết ảnh minh hoạ CHẤP
+# NHẬN ĐƯỢC; (4) TUYỆT ĐỐI không đè phần chữ.
 #
-# Bug cũ (brand_stamp.py:961-999 trước sửa, xem TASK-013 contract): chỉ thử
-# ĐÚNG 2 ứng viên top_right -> top_left; nếu CẢ HAI đều va chạm chữ, code vẫn
-# dán logo đè lên top_left và chỉ ghi một chuỗi `logo_collision_warning`
-# KHÔNG AI ĐỌC (trả ra log dict nhưng không caller nào kiểm tra). Ảnh BSR
-# (05/08) bị logo đè thẳng lên chữ "BSR" vì đúng nhánh này.
+# Hai thay đổi cụ thể so với TASK-013:
+#   a) `_measure_illustration_half()` đo dark_pixel_ratio nửa TRÁI/PHẢI để
+#      XÁC NHẬN nửa nào là ảnh minh hoạ (không tin mù bố cục cứng trong
+#      prompt) -- `_corners_for_half()` chỉ trả về ứng viên trong ĐÚNG nửa đó.
+#   b) Quyết định "occupied" không còn dùng `scan["detected"]` (báo dương giả
+#      trên hoạ tiết ảnh, xem trên) mà dùng ngưỡng `dark_pixel_ratio` đo trên
+#      ĐÚNG bbox logo (config `infographic_overlay.logo.text_dark_pixel_floor`,
+#      xem brand.yaml + docstring `select_logo_corner` cho lịch sử hiệu
+#      chỉnh lại 2 lần sau khi Phase 3 bắt được 2 ca đè chữ thật bị lọt).
 #
-# `_LOGO_CORNER_PRIORITY` là danh sách (không còn if/else lồng nhau) -- mở
-# rộng thêm ứng viên sau này chỉ cần thêm tên vào đây + 1 nhánh toạ độ trong
-# `_logo_corner_xy`, không phải viết lại thuật toán chọn. `select_logo_corner`
-# trả kết quả CÓ CẤU TRÚC (chosen/all_occupied/candidates với component_count
-# của TỪNG ứng viên, dữ liệu `scan_text_collision` đã tính sẵn) để caller
-# (overlay_brand_full_canvas, hoặc ai_full.render_ai_full ở bước pre-check)
-# tự quyết định -- KHÔNG còn trường hợp "hết ứng viên -> dán bừa".
+# Không còn ứng viên sạch trong nửa ảnh minh hoạ -> `chosen=None` ->
+# `overlay_brand_full_canvas` RAISE (KHÔNG âm thầm bỏ logo) -- caller
+# (`ai_full.render_ai_full`) sinh lại ảnh / NEEDS_HUMAN, xem contract TASK-017.
 # =====================================================================
 
-_LOGO_CORNER_PRIORITY: tuple[str, ...] = ("top_right", "top_left")
+
+def _measure_illustration_half(
+    canvas: Image.Image, *, final_w: int, final_h: int, top_fraction: float = 0.10
+) -> dict:
+    """Đo nửa TRÁI/PHẢI ảnh chứa khối tiêu đề (chữ) vs. ảnh minh hoạ bằng
+    CHÍNH `dark_pixel_ratio` của `scan_text_collision` trên MỖI nửa -- không
+    tin bố cục cứng "tiêu đề trái/minh hoạ phải" ép trong prompt (TASK-013
+    Phần A); prompt là xác định, đo là tất định (yêu cầu chủ dự án TASK-017).
+    Chữ navy/gold đặc luôn tạo dark_pixel_ratio cao hơn hẳn hoạ tiết ảnh chụp
+    thuần -- xác nhận trên 8 ảnh thật (TASK-013 Phase D + TASK-017 Phase 3).
+
+    CHỈ đo dải TRÊN CÙNG (`top_fraction` * final_h, mặc định 10%, xem config
+    `infographic_overlay.logo.half_scan_top_fraction`) -- KHÔNG đo cả chiều
+    cao ảnh. Bằng chứng thật (ảnh POM, TASK-017 Phase 3): đo cả ảnh khiến
+    khối thẻ số liệu ở NỬA DƯỚI (không liên quan gì tới góc đặt logo, vốn chỉ
+    ở dải trên) áp đảo phép đo, xác định SAI nửa chứa tiêu đề. Dải càng cao
+    càng dễ ăn luôn phần TỐI của chính ảnh minh hoạ (vd vùng bóng đổ dưới
+    cuộn thép) khiến dark_pixel_ratio bên minh hoạ vượt cả bên chữ -- hiệu
+    chỉnh trên 8 ảnh thật cho thấy 0.08-0.12 đúng cả 8/8, 0.15 sai 1/8.
+
+    Hoà (vd ảnh nền phẳng 1 màu, không chữ) -> lùi về quy ước prompt (tiêu đề
+    TRÁI, xem `_corners_for_half`)."""
+    from .postflight import scan_text_collision
+
+    half_w = max(final_w // 2, 1)
+    band_h = max(round(final_h * top_fraction), 1)
+    left_scan = scan_text_collision(canvas, (0, 0, half_w, band_h))
+    right_scan = scan_text_collision(canvas, (half_w, 0, final_w, band_h))
+    left_ratio = left_scan.get("dark_pixel_ratio", 0.0)
+    right_ratio = right_scan.get("dark_pixel_ratio", 0.0)
+    text_half = "left" if left_ratio >= right_ratio else "right"
+    image_half = "right" if text_half == "left" else "left"
+    return {
+        "text_half": text_half,
+        "image_half": image_half,
+        "left_dark_pixel_ratio": left_ratio,
+        "right_dark_pixel_ratio": right_ratio,
+        "scan_band_h": band_h,
+    }
+
+
+def _corners_for_half(image_half: str) -> tuple[str, ...]:
+    """Ứng viên góc CHỈ trong nửa chứa ảnh minh hoạ (TASK-017 quy định 2:
+    "LUÔN đóng logo ở PHÍA CÓ ẢNH MINH HOẠ") -- ưu tiên góc TRÊN (yêu cầu trực
+    tiếp chủ dự án). Mở rộng thêm ứng viên (vd góc dưới cùng nửa) sau này chỉ
+    cần thêm tên vào tuple + 1 nhánh toạ độ trong `_logo_corner_xy`."""
+    if image_half == "right":
+        return ("top_right",)
+    if image_half == "left":
+        return ("top_left",)
+    raise ValueError(f"brand_stamp: image_half không hợp lệ: {image_half!r}")
 
 
 def _logo_corner_xy(
@@ -892,16 +976,39 @@ def select_logo_corner(
     logo_y: int,
     final_w: int,
     final_h: int,
-    corners: tuple[str, ...] = _LOGO_CORNER_PRIORITY,
+    corners: tuple[str, ...],
+    dark_pixel_floor: float,
 ) -> dict:
-    """Quét từng ứng viên góc (đúng thứ tự ưu tiên, top-right trước -- yêu
-    cầu trực tiếp của chủ dự án) bằng `scan_text_collision` và trả kết quả
-    CÓ CẤU TRÚC: `{"chosen": <corner|None>, "all_occupied": bool,
-    "candidates": [{"corner", "x", "y", "bbox", "detected", "component_count",
-    ...}, ...]}`. `chosen=None` khi KHÔNG ứng viên nào sạch -- caller quyết
-    định (sinh lại ảnh hoặc bỏ qua logo), hàm này KHÔNG BAO GIỜ tự dán đè lên
-    chữ."""
-    from .postflight import expand_bbox, scan_text_collision
+    """Quét từng ứng viên góc (đúng thứ tự ưu tiên, đã giới hạn về ĐÚNG nửa
+    chứa ảnh minh hoạ bởi caller qua `_corners_for_half`) và trả kết quả CÓ
+    CẤU TRÚC: `{"chosen": <corner|None>, "all_occupied": bool, "candidates":
+    [{"corner", "x", "y", "bbox", "occupied", "dark_pixel_ratio", ...}, ...]}`.
+
+    SỬA LỖI THẬT #1 (TASK-017 Phase 3, ảnh Bách Hóa Xanh mở rộng miền Bắc)
+    -- quét ĐÚNG bbox logo (KHÔNG mở rộng 20% như bản đầu): bản mở rộng cộng
+    thêm khoảng đệm RỖNG phía trên logo vào phép tính trung bình, PHA LOÃNG
+    tín hiệu chữ thật ở phần DƯỚI bbox trong khi logo thật sự đè lên nửa
+    dưới chữ "Xanh" (nhìn thấy khi mở ảnh) -- xem `_full_canvas_logo_geometry`.
+
+    SỬA LỖI THẬT #2 (TASK-017 Phase 3, ảnh Bách Hóa Xanh × WinCommerce) --
+    ĐÃ THỬ kết hợp thêm tín hiệu cấu trúc (aligned_component_count, đếm cụm
+    nét cùng hàng/cỡ giống glyph) để tách "chữ thật" khỏi "hoạ tiết/biểu đồ
+    dày đặc" cùng mức dark_pixel_ratio -- BỎ vì không bền: chữ đậm/kerning
+    sát nhau bị dilation (`MaxFilter` trong `_contrast_mask`) NỐI LIỀN các
+    glyph thành 1 khối lớn, bị chính bộ lọc bề rộng (loại component rộng hơn
+    70% bbox, coi là "không phải glyph đơn lẻ") loại khỏi component_count --
+    bằng chứng thật: chữ "XANH" bị logo đè rõ ràng nhưng component_count đo
+    được = 0. "occupied" (TASK-017, thay `scan["detected"]` cũ -- báo dương
+    giả trên hoạ tiết ảnh chụp như mây/kim loại) giờ CHỈ dùng MỘT ngưỡng
+    dark_pixel_ratio, hiệu chỉnh lại trên 16 mẫu góc thật (8 ảnh x 2 góc,
+    TASK-013 Phase D + TASK-017 Phase 3) SAU KHI sửa #1: mọi góc chỉ có hoạ
+    tiết ảnh (mây, kim loại, biểu đồ) đo được <= 0.038; mọi góc CÓ CHỮ THẬT
+    (kể cả chỉ đè MỘT PHẦN bbox) đo được >= 0.125 -- đặt giữa khoảng hở đó
+    (xem config `infographic_overlay.logo.text_dark_pixel_floor`).
+
+    `chosen=None` khi KHÔNG ứng viên nào sạch -- caller quyết định (sinh lại
+    ảnh), hàm này KHÔNG BAO GIỜ tự dán đè lên chữ."""
+    from .postflight import scan_text_collision
 
     candidates: list[dict] = []
     chosen: str | None = None
@@ -910,10 +1017,12 @@ def select_logo_corner(
             corner, logo_margin=logo_margin, logo_w=logo_w, logo_y=logo_y, final_w=final_w
         )
         bbox = (x, y, x + logo_w, y + logo_h)
-        scan_bbox = expand_bbox(bbox, image_size=(final_w, final_h), ratio=0.20)
-        scan = scan_text_collision(content_canvas, scan_bbox, min_aligned=2)
-        candidates.append({"corner": corner, "x": x, "y": y, "bbox": list(bbox), **scan})
-        if chosen is None and not scan["detected"]:
+        scan = scan_text_collision(content_canvas, bbox)
+        occupied = scan.get("dark_pixel_ratio", 0.0) >= dark_pixel_floor
+        candidates.append(
+            {"corner": corner, "x": x, "y": y, "bbox": list(bbox), "occupied": occupied, **scan}
+        )
+        if chosen is None and not occupied:
             chosen = corner
     return {"chosen": chosen, "all_occupied": chosen is None, "candidates": candidates}
 
@@ -943,21 +1052,33 @@ def precheck_logo_corner(
     `detect_ordinal_markers` ở `ai_full.py`) TRƯỚC KHI tốn công đóng dấu.
     Dùng ĐÚNG hình học `overlay_brand_full_canvas` sẽ dùng cho lượt đóng dấu
     thật (qua `_full_canvas_logo_geometry` + `select_logo_corner` dùng
-    chung) -- không có rủi ro lệch kết quả giữa 2 lượt quét."""
+    chung) -- không có rủi ro lệch kết quả giữa 2 lượt quét.
+
+    TASK-017 (2026-08-07): giờ CŨNG đo nửa chứa ảnh minh hoạ trước
+    (`_measure_illustration_half`) và chỉ quét ứng viên trong ĐÚNG nửa đó
+    (`_corners_for_half`) -- trả thêm `image_half`/`half_measurement` để
+    caller/log đối chiếu được. `chosen=None` ở mọi nhánh sớm (thiếu file/vượt
+    biên) giờ đi kèm `all_occupied=True` (trước đây `False`, KHÔNG NHẤT QUÁN
+    với `chosen is None` -- sửa luôn, bug có sẵn không liên quan trực tiếp
+    logic va chạm chữ)."""
     style = _resolve_overlay_style()
     final_w, final_h = _resolve_final_size(ratio, settings)
     source_image = Image.open(io.BytesIO(png_bytes)).convert("RGB")
     content_canvas = source_image.resize((final_w, final_h), Image.LANCZOS).convert("RGBA")
     resolved_logo_path = Path(logo_path) if logo_path else _default_logo_path()
     if not resolved_logo_path.is_file():
-        return {"chosen": None, "all_occupied": False, "candidates": []}
+        return {"chosen": None, "all_occupied": True, "candidates": [], "image_half": None}
     logo = Image.open(resolved_logo_path).convert("RGBA")
     logo_w, logo_h, logo_margin, logo_y = _full_canvas_logo_geometry(
         logo, final_w=final_w, final_h=final_h, style=style
     )
     if logo_margin + logo_w > final_w or logo_y + logo_h > final_h:
-        return {"chosen": None, "all_occupied": False, "candidates": []}
-    return select_logo_corner(
+        return {"chosen": None, "all_occupied": True, "candidates": [], "image_half": None}
+    half = _measure_illustration_half(
+        content_canvas, final_w=final_w, final_h=final_h,
+        top_fraction=style["logo_half_scan_top_fraction"],
+    )
+    result = select_logo_corner(
         content_canvas,
         logo_w=logo_w,
         logo_h=logo_h,
@@ -965,7 +1086,65 @@ def precheck_logo_corner(
         logo_y=logo_y,
         final_w=final_w,
         final_h=final_h,
+        corners=_corners_for_half(half["image_half"]),
+        dark_pixel_floor=style["logo_text_dark_pixel_floor"],
     )
+    result["image_half"] = half["image_half"]
+    result["half_measurement"] = half
+    return result
+
+
+def _select_logo_variant(
+    canvas: Image.Image,
+    bbox: tuple[int, int, int, int],
+    *,
+    navy_path: Path,
+    white_path: Path | None,
+    low_contrast_floor: float,
+) -> dict:
+    """TASK-017 Phase 2 -- chọn biến thể logo (navy-gold/white-gold) theo ĐỘ
+    TƯƠNG PHẢN ĐỌC ĐƯỢC tại ĐÚNG vùng bbox sẽ dán logo (không phải cả ảnh).
+    Dùng lại `dark_pixel_ratio` đã có sẵn trong `scan_text_collision` (KHÔNG
+    viết bộ đo mới, xem contract) làm điểm tương phản của mỗi biến thể: nền
+    càng TỐI thì mực TRẮNG (white-gold) càng dễ đọc (điểm = dark_pixel_ratio),
+    nền càng SÁNG thì mực TỐI (navy-gold) càng dễ đọc (điểm = 1 -
+    dark_pixel_ratio). Không cấu hình file white-gold -> luôn navy (hành vi
+    cũ, lùi mượt). Cả 2 điểm đều dưới `low_contrast_floor` -- yêu cầu chủ dự
+    án (2026-08-07): VẪN chọn biến thể điểm cao hơn (không được bỏ logo),
+    chỉ ghi log rõ để xem lại tài sản logo nếu lặp lại nhiều."""
+    from .postflight import scan_text_collision
+
+    scan = scan_text_collision(canvas, bbox)
+    bg_dark_pixel_ratio = scan.get("dark_pixel_ratio", 0.0)
+    if white_path is None or not Path(white_path).is_file():
+        return {
+            "path": navy_path,
+            "variant": "navy_gold",
+            "bg_dark_pixel_ratio": bg_dark_pixel_ratio,
+            "navy_contrast_score": round(1.0 - bg_dark_pixel_ratio, 4),
+            "white_contrast_score": None,
+            "both_variants_low_contrast": False,
+            "reason": "white_gold_asset_not_configured",
+        }
+    navy_score = 1.0 - bg_dark_pixel_ratio
+    white_score = bg_dark_pixel_ratio
+    if white_score > navy_score:
+        path, variant, winning_score = white_path, "white_gold", white_score
+    else:
+        path, variant, winning_score = navy_path, "navy_gold", navy_score
+    both_poor = winning_score < low_contrast_floor
+    return {
+        "path": path,
+        "variant": variant,
+        "bg_dark_pixel_ratio": bg_dark_pixel_ratio,
+        "navy_contrast_score": round(navy_score, 4),
+        "white_contrast_score": round(white_score, 4),
+        "both_variants_low_contrast": both_poor,
+        "reason": (
+            "both_variants_low_contrast_picked_higher" if both_poor
+            else ("dark_background" if variant == "white_gold" else "light_background")
+        ),
+    }
 
 
 def overlay_brand_full_canvas(
@@ -1003,7 +1182,7 @@ def overlay_brand_full_canvas(
             f"Ảnh GPT {source_w}x{source_h} lệch tỷ lệ {ratio} "
             f"(delta={ratio_delta:.4f}); không crop hoặc ép méo để cứu."
         )
-    from .postflight import expand_bbox, scan_text_collision
+    from .postflight import scan_text_collision
 
     content_canvas = source_image.resize((final_w, final_h), Image.LANCZOS).convert("RGBA")
 
@@ -1059,61 +1238,93 @@ def overlay_brand_full_canvas(
     overlay = Image.new("RGBA", (final_w, output_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
-    resolved_logo_path = Path(logo_path) if logo_path else _default_logo_path()
-    logo_in_bounds = False
-    logo_bbox: list[int] | None = None
-    if resolved_logo_path.is_file():
-        logo = Image.open(resolved_logo_path).convert("RGBA")
-        # SỬA LỖI THẬT (2026-08-04) — neo theo BỀ RỘNG (logo_width_ratio, xem
-        # docstring _resolve_overlay_style), bề cao suy theo tỷ lệ khung ảnh
-        # gốc (ĐẢO chiều tính so với bản height-anchored cũ).
-        logo_w, logo_h, logo_margin, logo_y = _full_canvas_logo_geometry(
-            logo, final_w=final_w, final_h=final_h, style=style
-        )
-        if logo_margin + logo_w > final_w or logo_y + logo_h > final_h:
-            raise ValueError("Logo full-canvas vượt biên ảnh; kiểm tra config infographic_overlay")
-        # TASK-013 Phần B (2026-08-07, ADR-002) — trước đây chỉ thử ĐÚNG 2
-        # ứng viên top_right/top_left rồi DÁN BỪA lên top_left nếu cả hai va
-        # chạm chữ (ảnh BSR 05/08, logo đè "BSR"). `select_logo_corner` trả
-        # kết quả CÓ CẤU TRÚC; KHÔNG ứng viên nào sạch -> logo bị BỎ QUA
-        # (không dán đè lên chữ) thay vì ép chọn góc bận nhất — xem
-        # `select_logo_corner` docstring cho danh sách ứng viên đầy đủ.
-        corner_result = select_logo_corner(
-            content_canvas,
-            logo_w=logo_w,
-            logo_h=logo_h,
-            logo_margin=logo_margin,
-            logo_y=logo_y,
-            final_w=final_w,
-            final_h=final_h,
-        )
-        logo_scrim_applied = False
-        if corner_result["chosen"] is not None:
-            chosen_candidate = next(
-                c for c in corner_result["candidates"] if c["corner"] == corner_result["chosen"]
-            )
-            logo_x, logo_y = chosen_candidate["x"], chosen_candidate["y"]
-            logo_position = corner_result["chosen"]
-            logo = logo.resize((logo_w, logo_h), Image.LANCZOS)
-            # SỬA LỖI THẬT (2026-08-04, Lead: "không recolor") — TRƯỚC ĐÂY
-            # theme sáng ("bright"/"light") tự tô lại pixel gần trung tính
-            # (chroma thấp) của logo sang màu chủ đạo theme, GIỮ NGUYÊN phần
-            # vàng đồng (chroma cao). Bỏ hẳn — logo LUÔN giữ ĐÚNG màu gốc
-            # trong file asset (navy/gold), không phụ thuộc theme ảnh.
-            #
-            # SỬA LỖI THẬT (2026-08-04, Lead: "tất cả ảnh Infographic đều có
-            # khung chữ nhật xung quanh brand-kit") — không vẽ scrim/nền
-            # phía sau logo dù va chạm chữ ở ứng viên khác; logo dán TRỰC
-            # TIẾP lên ảnh, không có gì phía sau ngoài chính ảnh AI.
-            overlay.alpha_composite(logo, (logo_x, logo_y))
-            logo_bbox = [logo_x, logo_y, logo_x + logo_w, logo_y + logo_h]
-            logo_in_bounds = True
-        else:
-            logo_position = "skipped_all_corners_occupied"
+    # TASK-017 (2026-08-07, quy định MỚI chủ dự án) — logo LUÔN phải có,
+    # KHÔNG ĐƯỢC BỎ (thay ngược lại quyết định TASK-013 "va chạm cả 2 góc ->
+    # bỏ qua logo", bị chủ dự án bác vì logo là thương hiệu). Thiếu file logo
+    # hoặc không tìm được vị trí sạch chữ trong NỬA chứa ảnh minh hoạ đều
+    # RAISE (KHÔNG âm thầm hoàn thành ảnh thiếu logo) — caller
+    # (`ai_full.render_ai_full`) bắt lỗi này để sinh lại ảnh / NEEDS_HUMAN,
+    # xem contract TASK-017 + `select_logo_corner`/`_measure_illustration_half`
+    # docstring cho lý do đổi thuật toán chọn góc.
+    resolved_logo_asset = None
+    if logo_path is not None:
+        resolved_logo_path = Path(logo_path)
     else:
-        logo_position = "none"
-        logo_scrim_applied = False
-        corner_result = {"chosen": None, "all_occupied": False, "candidates": []}
+        resolved_logo_asset = _resolve_active_logo_asset()
+        resolved_logo_path = resolved_logo_asset["path"]
+    if not resolved_logo_path.is_file():
+        raise ValueError(
+            "LOGO_GUARDRAIL_FAIL: không tìm thấy file logo "
+            f"'{resolved_logo_path}' -- logo LUÔN phải có (quy định chủ dự "
+            "án, TASK-017), không được xuất ảnh thiếu logo."
+        )
+    logo = Image.open(resolved_logo_path).convert("RGBA")
+    # SỬA LỖI THẬT (2026-08-04) — neo theo BỀ RỘNG (logo_width_ratio, xem
+    # docstring _resolve_overlay_style), bề cao suy theo tỷ lệ khung ảnh
+    # gốc (ĐẢO chiều tính so với bản height-anchored cũ).
+    logo_w, logo_h, logo_margin, logo_y = _full_canvas_logo_geometry(
+        logo, final_w=final_w, final_h=final_h, style=style
+    )
+    if logo_margin + logo_w > final_w or logo_y + logo_h > final_h:
+        raise ValueError("Logo full-canvas vượt biên ảnh; kiểm tra config infographic_overlay")
+    half = _measure_illustration_half(
+        content_canvas, final_w=final_w, final_h=final_h,
+        top_fraction=style["logo_half_scan_top_fraction"],
+    )
+    corner_result = select_logo_corner(
+        content_canvas,
+        logo_w=logo_w,
+        logo_h=logo_h,
+        logo_margin=logo_margin,
+        logo_y=logo_y,
+        final_w=final_w,
+        final_h=final_h,
+        corners=_corners_for_half(half["image_half"]),
+        dark_pixel_floor=style["logo_text_dark_pixel_floor"],
+    )
+    logo_scrim_applied = False
+    if corner_result["chosen"] is None:
+        raise ValueError(
+            "LOGO_GUARDRAIL_FAIL: không có vị trí nào sạch chữ trong nửa "
+            f"chứa ảnh minh hoạ ({half['image_half']}) để đặt logo -- KHÔNG "
+            "được bỏ logo hay đè chữ (quy định chủ dự án, TASK-017); cần "
+            "sinh lại ảnh."
+        )
+    chosen_candidate = next(
+        c for c in corner_result["candidates"] if c["corner"] == corner_result["chosen"]
+    )
+    logo_x, logo_y = chosen_candidate["x"], chosen_candidate["y"]
+    logo_position = corner_result["chosen"]
+    tight_bbox = tuple(chosen_candidate["bbox"])
+    if logo_path is not None:
+        # Caller ép 1 file logo cụ thể (vd test) -- KHÔNG chuyển biến thể.
+        variant_result = {
+            "path": resolved_logo_path, "variant": "custom", "bg_dark_pixel_ratio": None,
+            "navy_contrast_score": None, "white_contrast_score": None,
+            "both_variants_low_contrast": False, "reason": "explicit_logo_path",
+        }
+    else:
+        variant_result = _select_logo_variant(
+            content_canvas, tight_bbox,
+            navy_path=resolved_logo_asset["path"],
+            white_path=resolved_logo_asset["white_gold_path"],
+            low_contrast_floor=style["logo_low_contrast_floor"],
+        )
+        logo = Image.open(variant_result["path"]).convert("RGBA")
+    logo = logo.resize((logo_w, logo_h), Image.LANCZOS)
+    # SỬA LỖI THẬT (2026-08-04, Lead: "không recolor") — TRƯỚC ĐÂY theme sáng
+    # ("bright"/"light") tự tô lại pixel gần trung tính (chroma thấp) của
+    # logo sang màu chủ đạo theme. Bỏ hẳn — TASK-017 thay bằng chọn NGUYÊN
+    # FILE biến thể navy-gold/white-gold có sẵn (xem `_select_logo_variant`),
+    # không tô lại pixel nào.
+    #
+    # SỬA LỖI THẬT (2026-08-04, Lead: "tất cả ảnh Infographic đều có khung
+    # chữ nhật xung quanh brand-kit") — không vẽ scrim/nền phía sau logo; logo
+    # dán TRỰC TIẾP lên ảnh, không có gì phía sau ngoài chính ảnh AI. TASK-017
+    # quy định 3 cho phép đè lên MỘT PHẦN ảnh minh hoạ (không phải chữ).
+    overlay.alpha_composite(logo, (logo_x, logo_y))
+    logo_bbox = [logo_x, logo_y, logo_x + logo_w, logo_y + logo_h]
+    logo_in_bounds = True
 
     line_bottom = output_h - bottom
     text_y = line_bottom - line_h - text_bbox[1]
@@ -1153,6 +1364,15 @@ def overlay_brand_full_canvas(
         "logo_corner_candidates": corner_result["candidates"],
         "logo_all_corners_occupied": corner_result["all_occupied"],
         "logo_scrim_applied": logo_scrim_applied,
+        "image_half": half["image_half"],
+        "text_half": half["text_half"],
+        "half_measurement": half,
+        "logo_variant": variant_result["variant"],
+        "logo_variant_reason": variant_result["reason"],
+        "logo_bg_dark_pixel_ratio": variant_result["bg_dark_pixel_ratio"],
+        "logo_navy_contrast_score": variant_result["navy_contrast_score"],
+        "logo_white_contrast_score": variant_result["white_contrast_score"],
+        "logo_both_variants_low_contrast": variant_result["both_variants_low_contrast"],
         "metadata_font_px": metadata_font_px,
         "image_body_font_px": body_font_px,
         "metadata_font_scale": style["metadata_font_scale"],
