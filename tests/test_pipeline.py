@@ -9134,8 +9134,15 @@ def test_render_one_clean_spec_returns_png_bytes(monkeypatch, tmp_path):
     from twmkt.config import Settings
 
     rpa = _render_prod_assets_module()
+    # TASK-013 (2026-08-07): pixel giả 1x1 phải là màu SÁNG, không phải đen
+    # tuyệt đối -- brand_stamp.select_logo_corner() (Phần B) giờ soi
+    # dark_pixel_ratio để phát hiện va chạm chữ THẬT ở góc logo; 1 pixel đen
+    # tuyệt đối phóng to phủ kín canvas trông giống "toàn bộ ảnh là chữ/khối
+    # tối" -> false positive "hết góc trống" -> NEEDS_HUMAN oan. Các test này
+    # không kiểm tra nội dung ảnh, chỉ cần placeholder hợp lệ không kích hoạt
+    # nhầm heuristic va chạm.
     tiny_png_b64 = (
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4+uMPAAXPAureeOIRAAAAAElFTkSuQmCC"
     )
 
     def _fake_success(*a, **kw):
@@ -9174,8 +9181,15 @@ def test_render_one_parses_full_json_over_1500_chars_from_store(monkeypatch, tmp
     from twmkt.config import Settings
 
     rpa = _render_prod_assets_module()
+    # TASK-013 (2026-08-07): pixel giả 1x1 phải là màu SÁNG, không phải đen
+    # tuyệt đối -- brand_stamp.select_logo_corner() (Phần B) giờ soi
+    # dark_pixel_ratio để phát hiện va chạm chữ THẬT ở góc logo; 1 pixel đen
+    # tuyệt đối phóng to phủ kín canvas trông giống "toàn bộ ảnh là chữ/khối
+    # tối" -> false positive "hết góc trống" -> NEEDS_HUMAN oan. Các test này
+    # không kiểm tra nội dung ảnh, chỉ cần placeholder hợp lệ không kích hoạt
+    # nhầm heuristic va chạm.
     tiny_png_b64 = (
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4+uMPAAXPAureeOIRAAAAAElFTkSuQmCC"
     )
 
     def _fake_success(*a, **kw):
@@ -9226,8 +9240,15 @@ def test_render_one_gate2_typo_flows_through_unchecked_known_risk(monkeypatch, t
     from twmkt.config import Settings
 
     rpa = _render_prod_assets_module()
+    # TASK-013 (2026-08-07): pixel giả 1x1 phải là màu SÁNG, không phải đen
+    # tuyệt đối -- brand_stamp.select_logo_corner() (Phần B) giờ soi
+    # dark_pixel_ratio để phát hiện va chạm chữ THẬT ở góc logo; 1 pixel đen
+    # tuyệt đối phóng to phủ kín canvas trông giống "toàn bộ ảnh là chữ/khối
+    # tối" -> false positive "hết góc trống" -> NEEDS_HUMAN oan. Các test này
+    # không kiểm tra nội dung ảnh, chỉ cần placeholder hợp lệ không kích hoạt
+    # nhầm heuristic va chạm.
     tiny_png_b64 = (
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4+uMPAAXPAureeOIRAAAAAElFTkSuQmCC"
     )
 
     def _fake_success(*a, **kw):
@@ -9311,8 +9332,15 @@ def test_render_production_assets_run_ranking_guard_notes_survive_resync(monkeyp
     from twmkt.sheets_board import CONTENT_HEADER, SheetsBoard, content_row
 
     rpa = _render_prod_assets_module()
+    # TASK-013 (2026-08-07): pixel giả 1x1 phải là màu SÁNG, không phải đen
+    # tuyệt đối -- brand_stamp.select_logo_corner() (Phần B) giờ soi
+    # dark_pixel_ratio để phát hiện va chạm chữ THẬT ở góc logo; 1 pixel đen
+    # tuyệt đối phóng to phủ kín canvas trông giống "toàn bộ ảnh là chữ/khối
+    # tối" -> false positive "hết góc trống" -> NEEDS_HUMAN oan. Các test này
+    # không kiểm tra nội dung ảnh, chỉ cần placeholder hợp lệ không kích hoạt
+    # nhầm heuristic va chạm.
     tiny_png_b64 = (
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4+uMPAAXPAureeOIRAAAAAElFTkSuQmCC"
     )
 
     def _fake_success(*a, **kw):

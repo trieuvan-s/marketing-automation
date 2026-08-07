@@ -259,7 +259,8 @@ def test_logo_moves_to_top_left_when_right_bbox_contains_text(tmp_path):
         logo_path=logo_path,
         settings=_small_settings(1080),
     )
-    assert log["logo_right_text_scan"]["detected"] is True
+    right_candidate = next(c for c in log["logo_corner_candidates"] if c["corner"] == "top_right")
+    assert right_candidate["detected"] is True
     assert log["logo_position"] == "top_left"
     assert log["logo_bbox"][0] < 400 / 2
 
