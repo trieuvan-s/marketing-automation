@@ -595,6 +595,40 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
         # docstring _allowed_output_types/_channel_skip_reason: output_type
         # rỗng/AUTO -> KHÔNG đổi channels (hành vi router-only như trước).
         allowed_types = _allowed_output_types(item.get("output_type") or [])
+        # SỬA LỖI THẬT (TASK-016, 2026-08-07, xác nhận qua store thật —
+        # topic_key=91d09f039226343c lô 03/08/2026, reports/CODEBASE_
+        # SURVEY_2026-08-03.md mục 2.4): `allowed_types` khác None NHƯNG RỖNG
+        # nghĩa là output_type có giá trị THẬT nhưng KHÔNG khớp bất kỳ khoá
+        # nào trong _OUTPUT_TYPE_TO_CONTENT_TYPE (ca thật: "Long-Article"
+        # trước khi VIỆC 1 nối kênh, commit 15187ad 2026-08-03 16:29 — dict
+        # lúc đó chỉ có Article/Infographic/Video). Để lọt xuống vòng dưới,
+        # allowed_types=set() khiến CẢ 3 kênh rơi vào output_type_excluded ->
+        # nhánh "người không chọn -> KHÔNG ghi dòng nào cả" áp cho ca này
+        # (SAI: đây KHÔNG PHẢI người chủ động không chọn, mà là hệ thống
+        # KHÔNG NHẬN RA lựa chọn) -> content_output KHÔNG BAO GIỜ có bản ghi
+        # nào -> _is_fully_produced_channels() thấy channels toàn False, vòng
+        # for không chạm nhánh return False nào, vacuously trả True ->
+        # Execute=DONE dù 0 nội dung. Chặn NGAY TẠI ĐÂY, KHÔNG để rơi vào
+        # nhánh im lặng: ghi rõ NEEDS_HUMAN kèm lý do đọc được cho biên tập
+        # viên (nguyên tắc cứng — topic không sinh được nội dung TUYỆT ĐỐI
+        # không được DONE), rồi bỏ qua Writer/Video/Infographic cho chủ đề
+        # này (không tuyến nào có thể chạy).
+        if allowed_types is not None and not allowed_types:
+            reason = (
+                "Output Type chọn giá trị hệ thống chưa biết sinh nội dung nào ("
+                f"{', '.join(item.get('output_type') or []) or '(rỗng)'}) — không khớp Article/"
+                "Long-Article/Infographic/Video, nên không có tuyến nào chạy được. Kiểm tra lại "
+                "lựa chọn Output Type trên Sheet, hoặc báo kỹ thuật nếu đây là giá trị hợp lệ mới "
+                "chưa được nối vào hệ thống."
+            )
+            _write_content(topic_key, article_content_type, status="NEEDS_HUMAN", output="",
+                          notes=reason, content_units_json=content_units_json)
+            written += 1
+            seen.add((topic_key, article_content_type))
+            flagged += 1
+            needs_human_topics.append(topic_key)
+            notifier.notify("needs_human", topic=item["context"], type=article_content_type, reason=reason)
+            continue
         output_type_excluded: set[str] = set()
         if allowed_types is not None:
             # KHÔNG lọc theo `enabled` (bug bắt được ở e2e 2026-07-28): bản cũ
