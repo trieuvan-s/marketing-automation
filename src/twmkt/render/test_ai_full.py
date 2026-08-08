@@ -17,8 +17,13 @@ from twmkt.config import Settings
 from twmkt.render import ai_full as af
 from twmkt.render import brand_stamp as bs
 
+# TASK-013 (2026-08-07): pixel giả 1x1 phải SÁNG, không phải đen tuyệt đối --
+# brand_stamp.select_logo_corner() (Phần B) giờ soi dark_pixel_ratio để phát
+# hiện va chạm chữ THẬT ở góc logo; 1 pixel đen tuyệt đối phóng to phủ kín
+# canvas trông giống "toàn khung là khối tối" -> false positive "hết góc
+# trống" -> NEEDS_HUMAN oan cho các test không liên quan tới logo.
 _TINY_PNG_B64 = (
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4+uMPAAXPAureeOIRAAAAAElFTkSuQmCC"
 )
 
 
@@ -184,61 +189,79 @@ def test_bright_prompt_requires_full_canvas_and_forbids_calculated_numbers():
     lower = prompt.lower()
     assert "toàn bộ canvas" in lower
     assert "không tự cộng tổng" in lower
-    assert "không vẽ logo" in lower
     assert "góc trên-phải" in lower
 
 
+def test_bright_prompt_permits_named_subject_logo_per_adr002():
+    """TASK-013 Phần A (2026-08-07, ADR-002) -- SỬA HÀNH VI CÓ CHỦ ĐÍCH: bản
+    cũ (test_bright_prompt_requires_full_canvas_and_forbids_calculated_numbers)
+    khoá lại câu cấm cứng "không vẽ logo" — ADR-002 (chủ dự án) đảo ngược
+    đúng ràng buộc này: ảnh ĐƯỢC nêu đích danh chủ thể và dùng logo doanh
+    nghiệp thật, miễn không đặt vào góc trên-phải (chỗ dành cho logo FVA)."""
+    prompt = af.build_ai_full_prompt(_SPEC, theme="bright", ratio="4:5")
+    lower = prompt.lower()
+    assert "không vẽ logo" not in lower
+    assert "được phép" in lower
+    assert "logo" in lower and "biển hiệu" in lower
+
+
 def test_bright_prompt_is_photo_first_without_claiming_verified_event_photo():
+    """TASK-013 Phần A (2026-08-07, ADR-002) -- SỬA HÀNH VI CÓ CHỦ ĐÍCH: bản
+    cũ khoá lại "bối cảnh chung"/"được giả làm ảnh bằng chứng" -- ADR-002 cho
+    phép ảnh liên quan trực tiếp chủ thể thật (không còn "bối cảnh chung
+    chung" mơ hồ); sàn giữ lại chuyển từ "không giả làm ảnh bằng chứng của
+    đúng sự kiện" sang phạm vi hẹp hơn: không dựng THÀNH tài liệu/bằng chứng
+    giả (số liệu/văn bản/biểu đồ bịa), không dựng gương mặt người thật."""
     prompt = af.build_ai_full_prompt(_SPEC, theme="bright", ratio="4:5")
     lower = prompt.lower()
     assert "ưu tiên hình ảnh thật" in lower
     assert "ảnh chụp báo chí/doanh nghiệp" in lower
     assert "ai photorealistic" in lower
-    assert "bối cảnh chung" in lower
-    assert "được giả làm ảnh bằng chứng" in lower
+    assert "liên quan trực tiếp đến chủ thể" in lower
+    assert "ảnh tài liệu/bằng chứng giả" in lower
     assert "không dựng gương mặt người thật" in lower
     assert "icon-led composition" in lower
 
 
-def test_photo_subject_anchor_uses_industrial_context_for_msr():
-    spec = dict(
-        _SPEC,
-        title="MSR tăng trưởng lợi nhuận",
-        related=["Masan High-Tech Materials", "Ngân hàng VIB"],
-    )
-    direction = af._photo_subject_direction(spec).lower()
-    assert "industrial materials or mineral-processing" in direction
-    assert "named company's facility" in direction
-    assert "general business mood" in direction
+def test_photo_subject_anchor_uses_real_named_subject_not_generic_category():
+    """TASK-013 Phần A (2026-08-07, ADR-002) -- SỬA HÀNH VI CÓ CHỦ ĐÍCH: bản
+    cũ khớp keyword ngành vào bảng 10 category cứng (test tên cũ
+    `test_photo_subject_anchor_uses_industrial_context_for_msr`). Root cause
+    xác minh trong ADR-002: category "thị trường"/"cổ phiếu" từng ép MỌI bài
+    có từ khoá đó ra CÙNG một bàn giao dịch chứng khoán generic bất kể chủ đề
+    thật -- ảnh FPT x OpenAI (hợp tác công nghệ) bị ép ra ảnh sàn chứng
+    khoán. Hành vi ĐÚNG: direction phải chứa NGUYÊN VĂN tên chủ thể thật từ
+    title, không phải một category cố định."""
+    spec = dict(_SPEC, title="MSR tăng trưởng lợi nhuận", subtitle="")
+    direction = af._photo_subject_direction(spec)
+    assert "MSR tăng trưởng lợi nhuận" in direction
+    assert "industrial materials or mineral-processing" not in direction.lower()
 
 
-def test_photo_subject_anchor_uses_trading_context_for_stock_analysis():
+def test_photo_subject_anchor_does_not_force_trading_desk_for_market_keywords():
+    """TASK-013 / ADR-002 -- đúng ca lỗi Lead xác minh (contract
+    `root_cause_verified_by_lead.anh_khong_lien_quan`): tiêu đề có từ khoá
+    'thị trường'/'cổ phiếu' KHÔNG còn tự động ép ra bàn giao dịch chứng
+    khoán generic; direction phải chứa chính tiêu đề thật VÀ câu cấm quy về
+    category chung do trùng từ khoá ngành."""
     spec = dict(
         _SPEC,
-        title="Phân tích kỹ thuật cổ phiếu",
+        title="FPT bắt tay OpenAI, khai phá thị trường 240 tỷ USD",
+        subtitle="",
         highlights=["Vùng hỗ trợ và kháng cự"],
     )
-    direction = af._photo_subject_direction(spec).lower()
-    assert "securities trading workstation" in direction
-    assert "without invented ticker data" in direction
-
-
-def test_photo_subject_anchor_prefers_monetary_policy_over_generic_market():
-    spec = dict(
-        _SPEC,
-        title="Fed và phản ứng của thị trường với chính sách tiền tệ",
-        subtitle="Giá năng lượng tác động đến triển vọng lạm phát",
-    )
-    direction = af._photo_subject_direction(spec).lower()
-    assert "macroeconomic-analysis workspace" in direction
-    assert "official seals" in direction
+    direction = af._photo_subject_direction(spec)
+    lower = direction.lower()
+    assert "fpt bắt tay openai" in lower
+    assert "securities trading workstation" not in lower
+    assert "không tự động vẽ bàn giao dịch chứng khoán" in lower
 
 
 def test_prompt_embeds_concrete_photo_subject_anchor():
-    spec = dict(_SPEC, title="Hoạt động cảng và logistics")
+    spec = dict(_SPEC, title="Hoạt động cảng và logistics", subtitle="")
     prompt = af.build_ai_full_prompt(spec, theme="bright", ratio="9:16")
     assert "PHOTO SUBJECT ANCHOR" in prompt
-    assert "real port and logistics environment" in prompt
+    assert "Hoạt động cảng và logistics" in prompt
 
 
 def test_prompt_rejects_unsupported_ratio_gracefully():
@@ -544,37 +567,244 @@ def test_full_canvas_overlay_uses_real_brand_kit_asset_across_all_ratios():
         assert image.size[0] > 0 and image.size[1] > 0
 
 
-def test_full_canvas_overlay_never_draws_scrim_or_recolors_logo():
-    """SỬA LỖI THẬT (2026-08-04, Lead: "tất cả ảnh Infographic đều có khung
-    chữ nhật xung quanh brand-kit") — TRƯỚC ĐÂY khi phát hiện va chạm chữ ở
-    CẢ HAI góc trên, code vẽ 1 khung nền bo góc (scrim) phía sau logo; ảnh AI
-    full-canvas hầu như LUÔN "bận" nên nhánh này kích hoạt ở HẦU HẾT mọi ảnh
-    -> đúng "khung chữ nhật cố định" Lead phản ánh. Yêu cầu Lead: "Không
-    scrim, không nền, không recolor". Test này ép va chạm phát hiện ở CẢ HAI
-    góc (mock scan_text_collision) rồi khoá lại: log không còn báo scrim,
-    VÀ pixel ngay dưới logo (vùng logo trong suốt alpha=0) vẫn giữ ĐÚNG màu
-    nền gốc -- không bị vẽ đè bởi hình chữ nhật nào."""
+def test_full_canvas_overlay_raises_when_illustration_half_has_no_clean_logo_spot():
+    """TASK-017 (2026-08-07, quy định MỚI chủ dự án) -- ĐẢO NGƯỢC hành vi
+    TASK-013 (chưa merge, bị BÁC). Bản test cũ ở đây (tên cũ
+    `test_full_canvas_overlay_skips_logo_when_all_corners_occupied_instead_of_pasting_over_text`)
+    khoá hành vi "va chạm -> bỏ qua logo, vẫn xuất ảnh". Chủ dự án xem đúng
+    ảnh Phase D đó (BSR, TASK-017 contract) và BÁC: "LOGO LUÔN PHẢI CÓ, KHÔNG
+    ĐƯỢC BỎ". Hành vi ĐÚNG bây giờ: không vị trí nào trong nửa chứa ảnh minh
+    hoạ sạch chữ -> `overlay_brand_full_canvas` phải RAISE
+    (LOGO_GUARDRAIL_FAIL), KHÔNG được lặng lẽ hoàn thành ảnh thiếu logo --
+    caller (`ai_full.render_ai_full`) bắt lỗi này để sinh lại ảnh / NEEDS_HUMAN.
+    Mock `scan_text_collision` trả dark_pixel_ratio cao (bận chữ thật theo
+    ngưỡng mới, xem `select_logo_corner`) cho MỌI vùng quét -- kể cả 2 nửa
+    tie nên nửa ảnh minh hoạ mặc định là PHẢI (quy ước prompt), ứng viên
+    top_right cũng bị mock trả occupied."""
     from unittest.mock import patch
 
     raw = _real_png_bytes(1280, 1600, color=(245, 248, 252))
     with patch("twmkt.render.postflight.scan_text_collision",
-              return_value={"detected": True, "component_count": 5}):
-        rendered, log = bs.overlay_brand_full_canvas(
-            raw, ratio="4:5", theme="bright", source="CafeF",
-            disclaimer="Nội dung mang tính tham khảo, không phải khuyến nghị đầu tư.",
-        )
-    assert log["logo_position"] == "top_left", "va chạm cả 2 góc -> vẫn phải chọn top_left"
-    assert log["logo_scrim_applied"] is False, "KHÔNG được còn cờ scrim nào bật"
+              return_value={"detected": True, "component_count": 5, "dark_pixel_ratio": 0.9}):
+        with pytest.raises(ValueError, match="LOGO_GUARDRAIL_FAIL"):
+            bs.overlay_brand_full_canvas(
+                raw, ratio="4:5", theme="bright", source="CafeF",
+                disclaimer="Nội dung mang tính tham khảo, không phải khuyến nghị đầu tư.",
+            )
 
-    image = Image.open(io.BytesIO(rendered)).convert("RGB")
-    x0, y0, x1, y1 = log["logo_bbox"]
-    # Góc dưới-phải bbox logo (ngoài rìa hình chữ nhật thật của logo, vẫn
-    # trong bbox) -- nếu còn khung nền, pixel ở đây sẽ là màu nền phẳng
-    # (colors["background"]); nếu KHÔNG, pixel phải khớp nền GỐC đã tô sẵn
-    # (245, 248, 252) vì đây là ảnh nền phẳng 1 màu.
-    probe_x, probe_y = min(x1 - 2, image.width - 1), min(y1 - 2, image.height - 1)
-    pixel = image.getpixel((probe_x, probe_y))
-    assert pixel == (245, 248, 252), f"vẫn còn hình chữ nhật vẽ đè phía sau logo: {pixel}"
+
+# =====================================================================
+# TASK-019 (2026-08-08, chủ dự án chỉ ra trực tiếp) -- `_measure_illustration_
+# half` bằng dark_pixel_ratio ĐƠN kết luận SAI trên ảnh có bố cục NGƯỢC (ảnh
+# minh hoạ TRÁI, tiêu đề PHẢI) khi ảnh minh hoạ là ẢNH CHỤP TỐI MÀU tự nhiên
+# (tối hơn khối tiêu đề) -- bằng chứng thật 2/8 ảnh Phase 3 (091d9428... Bách
+# Hóa Xanh mở rộng miền Bắc, bb8f9ddf... BHX × WinCommerce). Sửa bằng tín hiệu
+# `near_background_ratio` (tỷ lệ pixel gần màu NỀN THEME) làm quyết định
+# chính. CÙNG gốc rễ cũng làm SAI "occupied" ở `select_logo_corner` khi góc
+# logo rơi đúng vào ảnh minh hoạ tối màu (dark_pixel_ratio cao dù không có
+# chữ) -- sửa bằng ĐK kết hợp (dark_pixel_ratio VÀ near_background_ratio).
+# Test dưới đây dùng canvas TỔNG HỢP (không cần ảnh AI thật, đúng yêu cầu
+# contract TASK-019 "KHÔNG gọi API sinh ảnh ở task này").
+# =====================================================================
+
+
+def _reversed_layout_png_bytes(w: int, h: int, *, bg=(0xF6, 0xF0, 0xE5)) -> bytes:
+    """Ảnh tổng hợp bố cục NGƯỢC, dựng THẲNG ở kích thước final (không qua
+    resize trung gian, tránh lệch tỷ lệ khi tính near_background_ratio): NỬA
+    TRÁI = ảnh minh hoạ (hoạ tiết TỐI MÀU, dày đặc, phủ kín, KHÔNG dùng màu
+    gần nền theme -- mô phỏng ảnh chụp tối tự nhiên như đèn trần/màn hình
+    giao dịch, xem 2 ảnh lỗi thật TASK-019); NỬA PHẢI = khối tiêu đề (nền
+    theme PHẲNG + 2 thanh chữ tối MỎNG, còn NHIỀU khoảng nền lộ ra quanh chữ
+    -- đúng cấu trúc chữ tiêu đề pipeline sinh ra, near_background_ratio cao
+    như 16 mẫu góc thật đã đo, xem docstring `select_logo_corner`)."""
+    im = Image.new("RGB", (w, h), bg)
+    draw = ImageDraw.Draw(im)
+    half_w = w // 2
+    top_h = round(h * 0.20)  # phủ dải quét half (10%) lẫn bbox góc logo (~12%)
+    cell = max(top_h // 20, 4)
+    dark_palette = [(15, 20, 25), (40, 45, 40), (25, 30, 45), (55, 50, 35)]
+    i = 0
+    for y in range(0, top_h, cell):
+        for x in range(0, half_w, cell):
+            draw.rectangle([x, y, x + cell, y + cell], fill=dark_palette[i % len(dark_palette)])
+            i += 1
+    text_color = (10, 20, 60)
+    line_h = max(round(top_h * 0.10), 6)
+    for row in range(2):
+        y0 = round(top_h * 0.20) + row * line_h * 3
+        draw.rectangle([half_w + 40, y0, w - 60, y0 + line_h], fill=text_color)
+    return _to_png_bytes(im)
+
+
+def test_measure_illustration_half_detects_reversed_layout_illustration_left():
+    """TASK-019 -- bố cục NGƯỢC (ảnh minh hoạ TRÁI, tiêu đề PHẢI) phải được
+    nhận đúng nửa qua near_background_ratio dù ảnh minh hoạ TỐI hơn khối tiêu
+    đề (dark_pixel_ratio một mình sẽ kết luận NGƯỢC -- xem SỬA LỖI THẬT ở
+    docstring `_measure_illustration_half`)."""
+    final_w, final_h = 1080, 1350
+    raw = Image.open(io.BytesIO(_reversed_layout_png_bytes(final_w, final_h))).convert("RGB")
+    canvas = raw.convert("RGBA")
+    half = bs._measure_illustration_half(
+        canvas, final_w=final_w, final_h=final_h, background=(0xF6, 0xF0, 0xE5),
+        top_fraction=0.10, near_bg_tolerance=30, near_bg_floor=0.35, near_bg_ceiling=0.65,
+    )
+    assert half["left_dark_pixel_ratio"] > half["right_dark_pixel_ratio"], (
+        "canvas tổng hợp phải tái hiện đúng cái bẫy: ảnh minh hoạ trái TỐI hơn "
+        "khối tiêu đề phải (dark_pixel_ratio một mình sẽ đoán ngược)"
+    )
+    assert half["image_half"] == "left"
+    assert half["text_half"] == "right"
+    assert half["decision_method"] == "near_background_ratio"
+
+
+def test_full_canvas_overlay_places_logo_top_left_for_reversed_layout():
+    """TASK-019 end-to-end -- bố cục ảnh trái/tiêu đề phải phải ra logo góc
+    trên-TRÁI, KHÔNG RAISE, qua đúng `overlay_brand_full_canvas` (không mock
+    scan_text_collision, đo trên canvas tổng hợp thật)."""
+    raw = _reversed_layout_png_bytes(1080, 1350)
+    stamped, log = bs.overlay_brand_full_canvas(
+        raw, ratio="4:5", theme="bright", source="CafeF",
+        disclaimer="Nội dung mang tính tham khảo, không phải khuyến nghị đầu tư.",
+    )
+    assert log["image_half"] == "left"
+    assert log["logo_position"] == "top_left"
+    assert log["logo_bbox"][0] < 1080 // 2
+    image = Image.open(io.BytesIO(stamped))
+    assert image.size[0] == 1080
+
+
+def test_select_logo_corner_allows_dark_illustration_texture_not_real_text():
+    """TASK-019 SỬA LỖI THẬT #3 -- góc chỉ có hoạ tiết ảnh minh hoạ TỐI MÀU
+    (dark_pixel_ratio cao) nhưng KHÔNG có nền theme lộ ra (near_background_
+    ratio thấp) phải được coi là SẠCH, không phải chữ thật. Bằng chứng thật:
+    ảnh Bách Hóa Xanh mở rộng miền Bắc (091d9428...), góc đèn trần đo
+    dark_pixel_ratio=0.48 (gấp ~4 lần ngưỡng cũ) nhưng KHÔNG có chữ (xác nhận
+    bằng mắt, TASK-019)."""
+    final_w, final_h = 1080, 1350
+    logo_w, logo_h, logo_margin, logo_y = 192, 128, 38, 34
+    canvas = Image.new("RGBA", (final_w, final_h), (30, 30, 30, 255))
+    draw = ImageDraw.Draw(canvas)
+    cell = 8
+    dark_palette = [(15, 20, 25, 255), (45, 40, 35, 255), (25, 30, 45, 255)]
+    i = 0
+    for y in range(0, final_h, cell):
+        for x in range(0, final_w, cell):
+            draw.rectangle([x, y, x + cell, y + cell], fill=dark_palette[i % len(dark_palette)])
+            i += 1
+    result = bs.select_logo_corner(
+        canvas, logo_w=logo_w, logo_h=logo_h, logo_margin=logo_margin, logo_y=logo_y,
+        final_w=final_w, final_h=final_h, corners=("top_left",), dark_pixel_floor=0.08,
+        background=(0xF6, 0xF0, 0xE5), near_bg_tolerance=30, corner_near_bg_floor=0.40,
+    )
+    candidate = result["candidates"][0]
+    assert candidate["dark_pixel_ratio"] >= 0.08, "canvas phải tái hiện đúng 'tối' theo metric cũ"
+    assert candidate["near_background_ratio"] < 0.40
+    assert candidate["occupied"] is False
+    assert result["chosen"] == "top_left"
+
+
+def test_select_logo_corner_still_blocks_real_text_on_theme_background():
+    """TASK-019 -- ĐK MỚI (near_background_ratio) chỉ SIẾT THÊM (AND với
+    dark_pixel_ratio), không được làm mất khả năng chặn chữ tiêu đề thật:
+    chữ trên nền theme phẳng (near_background_ratio cao, đúng cấu trúc chữ
+    pipeline sinh ra) vẫn phải bị coi là "occupied" như hành vi TASK-017."""
+    final_w, final_h = 1080, 1350
+    logo_w, logo_h, logo_margin, logo_y = 192, 128, 38, 34
+    bg = (0xF6, 0xF0, 0xE5)
+    canvas = Image.new("RGBA", (final_w, final_h), (*bg, 255))
+    draw = ImageDraw.Draw(canvas)
+    text_color = (10, 20, 60, 255)
+    draw.rectangle(
+        [logo_margin + 10, logo_y + 10, logo_margin + logo_w - 10, logo_y + 40], fill=text_color
+    )
+    draw.rectangle(
+        [logo_margin + 10, logo_y + 60, logo_margin + logo_w - 10, logo_y + 90], fill=text_color
+    )
+    result = bs.select_logo_corner(
+        canvas, logo_w=logo_w, logo_h=logo_h, logo_margin=logo_margin, logo_y=logo_y,
+        final_w=final_w, final_h=final_h, corners=("top_left",), dark_pixel_floor=0.08,
+        background=bg, near_bg_tolerance=30, corner_near_bg_floor=0.40,
+    )
+    candidate = result["candidates"][0]
+    assert candidate["near_background_ratio"] >= 0.40
+    assert candidate["occupied"] is True
+    assert result["chosen"] is None
+
+
+# =====================================================================
+# TASK-017 Phase 2 (2026-08-07) -- chọn biến thể logo theo tương phản.
+#
+# Không ảnh THẬT nào trong bộ 8 ảnh chấm ở Phase 3 có nền vùng logo TỐI (cả
+# 8 đều theme "bright", góc trên-phải luôn nền sáng/trời) -- nên nhánh
+# white_gold trong `overlay_brand_full_canvas` KHÔNG được thực thi bởi ảnh
+# thật ở task này (ghi rõ trong OPS_LOG, KHÔNG giả vờ đã kiểm bằng ảnh thật).
+# Test dưới đây khoá đúng LOGIC của `_select_logo_variant` một cách CÔ LẬP
+# (không đi qua toàn bộ select_logo_corner/_measure_illustration_half) để
+# không lẫn với ngưỡng "occupied" của Phase 1 (dark_pixel_ratio floor 0.13
+# thấp hơn hẳn điểm giữa 0.5 dùng để so 2 biến thể -- một góc ĐÃ được chọn
+# nghĩa là dark_pixel_ratio < 0.13, luôn nghiêng về navy; nhánh white_gold
+# chỉ thật sự cần khi có ảnh nền tối bẩm sinh, vd theme "dark" tương lai).
+# =====================================================================
+
+
+def test_select_logo_variant_picks_white_gold_on_dark_background(tmp_path):
+    navy_path = tmp_path / "navy.png"
+    white_path = tmp_path / "white.png"
+    Image.new("RGBA", (10, 10), (0, 0, 0, 255)).save(navy_path)
+    Image.new("RGBA", (10, 10), (255, 255, 255, 255)).save(white_path)
+    canvas = Image.new("RGB", (200, 200), (5, 5, 10))
+    result = bs._select_logo_variant(
+        canvas, (0, 0, 200, 200), navy_path=navy_path, white_path=white_path,
+        low_contrast_floor=0.6,
+    )
+    assert result["variant"] == "white_gold"
+    assert result["reason"] == "dark_background"
+    assert result["bg_dark_pixel_ratio"] > 0.9
+    assert result["both_variants_low_contrast"] is False
+
+
+def test_select_logo_variant_picks_navy_gold_on_light_background(tmp_path):
+    navy_path = tmp_path / "navy.png"
+    white_path = tmp_path / "white.png"
+    Image.new("RGBA", (10, 10), (0, 0, 0, 255)).save(navy_path)
+    Image.new("RGBA", (10, 10), (255, 255, 255, 255)).save(white_path)
+    canvas = Image.new("RGB", (200, 200), (250, 250, 250))
+    result = bs._select_logo_variant(
+        canvas, (0, 0, 200, 200), navy_path=navy_path, white_path=white_path,
+        low_contrast_floor=0.6,
+    )
+    assert result["variant"] == "navy_gold"
+    assert result["reason"] == "light_background"
+
+
+def test_select_logo_variant_falls_back_to_navy_without_white_asset_configured(tmp_path):
+    navy_path = tmp_path / "navy.png"
+    Image.new("RGBA", (10, 10), (0, 0, 0, 255)).save(navy_path)
+    canvas = Image.new("RGB", (200, 200), (5, 5, 10))
+    result = bs._select_logo_variant(
+        canvas, (0, 0, 200, 200), navy_path=navy_path, white_path=None,
+        low_contrast_floor=0.6,
+    )
+    assert result["variant"] == "navy_gold"
+    assert result["reason"] == "white_gold_asset_not_configured"
+
+
+def test_select_logo_variant_logs_when_both_variants_have_low_contrast(tmp_path):
+    """Yêu cầu chủ dự án TASK-017: "nếu đo thấy cả 2 biến thể đều tương phản
+    kém ở vùng đó, ưu tiên chọn biến thể tương phản CAO HƠN và ghi log" --
+    vùng nửa tối nửa sáng (dark_pixel_ratio ~0.5) không biến thể nào áp đảo."""
+    navy_path = tmp_path / "navy.png"
+    white_path = tmp_path / "white.png"
+    Image.new("RGBA", (10, 10), (0, 0, 0, 255)).save(navy_path)
+    Image.new("RGBA", (10, 10), (255, 255, 255, 255)).save(white_path)
+    canvas = Image.new("RGB", (200, 200), (250, 250, 250))
+    ImageDraw.Draw(canvas).rectangle([0, 0, 200, 100], fill=(5, 5, 10))
+    result = bs._select_logo_variant(
+        canvas, (0, 0, 200, 200), navy_path=navy_path, white_path=white_path,
+        low_contrast_floor=0.6,
+    )
+    assert result["both_variants_low_contrast"] is True
+    assert result["reason"] == "both_variants_low_contrast_picked_higher"
 
 
 def test_full_canvas_overlay_rejects_wrong_real_image_ratio():

@@ -221,7 +221,7 @@ def test_content_has_explicit_ranking_only_for_rank_fields():
     )
 
 
-def test_metadata_collision_extends_canvas_instead_of_covering_text():
+def test_metadata_collision_extends_canvas_instead_of_covering_text(tmp_path):
     image = Image.new("RGB", (400, 400), "white")
     ImageDraw.Draw(image).text(
         (20, 360),
@@ -229,13 +229,20 @@ def test_metadata_collision_extends_canvas_instead_of_covering_text():
         font=bs._find_font(28, bold=True),
         fill="#09285B",
     )
+    # TASK-017 (2026-08-07): logo LUÔN phải có -- "missing-logo.png" (file
+    # không tồn tại) giờ khiến overlay_brand_full_canvas RAISE
+    # (LOGO_GUARDRAIL_FAIL), nên test này (chỉ quan tâm hành vi metadata band)
+    # phải trỏ tới 1 file logo THẬT, dù nhỏ.
+    logo = Image.new("RGBA", (80, 40), (10, 40, 90, 255))
+    logo_path = tmp_path / "logo.png"
+    logo.save(logo_path)
     stamped, log = bs.overlay_brand_full_canvas(
         _png_bytes(image),
         ratio="1:1",
         theme="bright",
         source="Test",
         disclaimer="Thong tin tham khao.",
-        logo_path="missing-logo.png",
+        logo_path=logo_path,
         settings=_small_settings(),
     )
     assert log["metadata_guardrail"] == "PASS_EXTENDED"
@@ -244,7 +251,12 @@ def test_metadata_collision_extends_canvas_instead_of_covering_text():
     assert Image.open(io.BytesIO(stamped)).height == log["final_wh"][1]
 
 
-def test_logo_moves_to_top_left_when_right_bbox_contains_text(tmp_path):
+def test_logo_lands_on_illustration_half_avoiding_real_text(tmp_path):
+    """TASK-017 (2026-08-07): chọn cạnh logo giờ theo NỬA đo được ít chữ hơn
+    (`_measure_illustration_half`), KHÔNG còn thử cố định top_right rồi rơi
+    xuống top_left như TASK-013 -- chữ thật nằm bên PHẢI ảnh này nên nửa
+    TRÁI (không chữ) phải được chọn làm nửa ảnh minh hoạ, và candidate duy
+    nhất được quét phải là top_left (không còn top_right trong danh sách)."""
     image = Image.new("RGB", (400, 400), "white")
     ImageDraw.Draw(image).text(
         (315, 20), "ABC", font=bs._find_font(34, bold=True), fill="#09285B"
@@ -259,9 +271,10 @@ def test_logo_moves_to_top_left_when_right_bbox_contains_text(tmp_path):
         logo_path=logo_path,
         settings=_small_settings(1080),
     )
-    assert log["logo_right_text_scan"]["detected"] is True
+    assert log["image_half"] == "left"
     assert log["logo_position"] == "top_left"
-    assert log["logo_bbox"][0] < 400 / 2
+    assert log["logo_bbox"][0] < 1080 / 2
+    assert [c["corner"] for c in log["logo_corner_candidates"]] == ["top_left"]
 
 
 def test_qualitative_process_prompt_keeps_photo_anchor():

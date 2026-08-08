@@ -33,13 +33,22 @@ brand:
   # overlay_brand_full_canvas(), nhánh `theme in ("bright","light")`), phần
   # vàng đồng (chroma cao) giữ nguyên mọi theme — KHÔNG cần bản "white-gold"
   # riêng cho theme tối (vẫn giữ file đó trong assets/ làm bản tham chiếu).
+  # TASK-017 (2026-08-07, quy định MỚI chủ dự án — "logo LUÔN phải có, đổi
+  # biến thể theo nền sáng/tối") — mỗi asset family giờ có THÊM
+  # `white_gold_path` cạnh `path` (navy-gold, vẫn là mặc định/lùi mượt khi
+  # không cấu hình bản trắng-vàng). `overlay_brand_full_canvas()` tự chọn
+  # ĐỘNG giữa 2 file theo độ sáng ĐÚNG vùng bbox sẽ dán logo (không phải cả
+  # ảnh, xem brand_stamp.py::_select_logo_variant) — KHÔNG còn tô lại
+  # (recolor) pixel logo như bản 2026-08-04.
   active_asset: "brand_kit"
   assets:
     brand_kit:
       path: "assets/fva-brand-kit-navy-gold-transparent.png"
+      white_gold_path: "assets/fva-brand-kit-white-gold-transparent.png"
       width_ratio: 0.178
     standard_icon:
       path: "assets/fva-icon-navy-gold-transparent.png"
+      white_gold_path: "assets/fva-icon-white-gold-transparent.png"
       width_ratio: 0.148
 
   # Màu ước theo logo đã nhận (nền navy đậm, chữ trắng bạc, nhấn vàng đồng) —
@@ -86,6 +95,85 @@ brand:
       right_ratio: 0.035
       top_ratio: 0.025
       height_ratio: 0.055
+      # TASK-017 Phase 1 — "bận chữ thật" đo trên ĐÚNG bbox logo (không mở
+      # rộng — bản đầu dùng scan mở rộng 20% đã PHA LOÃNG tín hiệu thật với
+      # khoảng đệm RỖNG phía trên logo, xem ghi chú SỬA LỖI THẬT ở
+      # `select_logo_corner`). Đã thử kết hợp thêm tín hiệu cấu trúc
+      # (aligned_component_count, đếm cụm nét cùng hàng/cỡ giống glyph) --
+      # BỎ vì không bền: chữ đậm/kerning sát nhau bị dilation (MaxFilter
+      # trong `_contrast_mask`) NỐI LIỀN các glyph thành 1 khối lớn, bị bộ
+      # lọc bề rộng (<=70% bbox) loại khỏi component_count -- bằng chứng
+      # thật (ảnh Bách Hóa Xanh × WinCommerce, TASK-017 Phase 3): chữ "XANH"
+      # bị logo đè rõ ràng nhưng component_count đo được = 0.
+      #
+      # Ngưỡng dark_pixel_ratio ĐƠN, hiệu chỉnh lại trên 16 mẫu góc thật (8
+      # ảnh × 2 góc, gồm CẢ 2 case đè chữ thật phát hiện ở Phase 3) sau khi
+      # sửa bằng bbox KHÍT: mọi góc chỉ có hoạ tiết ảnh (mây, kim loại, biểu
+      # đồ) đo được <= 0.038; mọi góc CÓ CHỮ THẬT (kể cả chỉ đè MỘT PHẦN bbox)
+      # đo được >= 0.125. Đặt giữa khoảng hở đó.
+      #
+      # SỬA LỖI THẬT (2026-08-08, TASK-019) — ngưỡng trên hiệu chỉnh trên góc
+      # ẢNH SÁNG MÀU, chưa từng gặp góc rơi vào ảnh minh hoạ TỐI MÀU tự nhiên
+      # (đèn trần/kệ hàng, màn hình giao dịch) — dark_pixel_ratio ở góc đó đo
+      # được tới 0.48-0.82 (gấp 4-6 lần ngưỡng) dù KHÔNG có chữ tiêu đề thật
+      # (xác nhận bằng mắt). Từ TASK-019, "occupied" đòi hỏi CẢ dark_pixel_ratio
+      # >= floor này VÀ near_background_ratio >= corner_near_bg_floor (dưới) —
+      # xem docstring `select_logo_corner` SỬA LỖI THẬT #3.
+      text_dark_pixel_floor: 0.08
+      # TASK-017 Phase 1 — tỷ lệ chiều cao TÍNH TỪ ĐỈNH ảnh dùng để đo nửa
+      # trái/phải khi xác định bên nào là ảnh minh hoạ (`_measure_illustration_
+      # half`). CHỈ đo dải trên cùng (nơi logo thật sự có thể đặt), KHÔNG đo
+      # cả chiều cao ảnh -- bằng chứng thật (ảnh POM, TASK-017 Phase 3): tính
+      # cả chiều cao khiến khối thẻ số liệu ở NỬA DƯỚI (không liên quan gì
+      # tới góc đặt logo) áp đảo phép đo, xác định SAI nửa chứa tiêu đề. Hiệu
+      # chỉnh thêm trên đúng 8 ảnh thật: dải càng cao càng dễ ăn luôn phần
+      # TỐI của chính ảnh minh hoạ (vd ảnh POM — cuộn thép có vùng bóng đổ
+      # tối ngay dưới dải mở đầu) khiến dark_pixel_ratio bên minh hoạ vượt cả
+      # bên chữ; 0.08-0.12 cho kết quả ĐÚNG trên cả 8/8 ảnh, 0.15 sai 1/8
+      # (POM). Đặt 0.10 (giữa khoảng an toàn).
+      #
+      # SỬA LỖI THẬT (2026-08-08, TASK-019) — tuyên bố "8/8 đúng" ở trên SAI:
+      # dark_pixel_ratio một mình đo SAI nửa trên đúng 2/8 ảnh khi ảnh minh
+      # hoạ là ẢNH CHỤP TỐI MÀU (091d9428... Bách Hóa Xanh mở rộng miền Bắc,
+      # bb8f9ddf... BHX × WinCommerce) — ảnh tối hơn hẳn khối tiêu đề (chữ
+      # navy thưa trên nền ivory), nên dark_pixel_ratio kết luận NGƯỢC. Giữ
+      # `half_scan_top_fraction` (đổi frac không sửa được lỗi này — dark_pixel_
+      # ratio nửa ảnh minh hoạ tối vẫn cao hơn nửa chữ ở MỌI frac đã thử,
+      # 0.05-0.50). Thêm tín hiệu near_background_ratio làm quyết định CHÍNH
+      # (xem 3 khoá dưới) — dark_pixel_ratio giờ chỉ còn là dự phòng khi
+      # near_background_ratio không đủ lệch để quyết (bố cục phủ ảnh toàn
+      # chiều rộng, không chia 2 cột rõ).
+      half_scan_top_fraction: 0.10
+      # TASK-019 — dung sai (mỗi kênh RGB, 0-255) coi 1 pixel là "gần màu nền
+      # theme" (background.primary) khi đo near_background_ratio. Hiệu chỉnh
+      # trên đúng 8 ảnh thật: tolerance=30 tách rõ ràng nhất — 4/8 ảnh có bố
+      # cục 2 cột rõ cho near_bg 2 nửa lệch nhau >=30 điểm % (margin nhỏ nhất
+      # đo được 7 điểm %, xem `_tmp-task019/analyze_half3.py` ngoài repo);
+      # tolerance=40 làm 1 ca (BSR) lệch sát ngưỡng ceiling, mất margin an
+      # toàn — KHÔNG tự ý nới.
+      half_scan_near_bg_tolerance: 30
+      # TASK-019 — near_background_ratio của 1 nửa PHẢI <= floor NÀY (nửa kia
+      # PHẢI >= ceiling bên dưới) để quyết ĐÂY LÀ ảnh minh hoạ một cách CHẮC
+      # CHẮN. Không đạt cả 2 điều kiện (bố cục phủ ảnh toàn chiều rộng, 2 nửa
+      # near_bg gần nhau) -> lùi về dark_pixel_ratio (xem trên).
+      half_scan_near_bg_floor: 0.35
+      # TASK-019 — xem half_scan_near_bg_floor; ngưỡng "chắc chắn là chữ/nền
+      # trống" cho nửa còn lại.
+      half_scan_near_bg_ceiling: 0.65
+      # TASK-019 — ngưỡng near_background_ratio đo trên ĐÚNG bbox logo (khác
+      # 3 khoá half_scan_* ở trên đo trên NỬA ảnh) để quyết "occupied" ở
+      # `select_logo_corner` (xem docstring SỬA LỖI THẬT #3). Hiệu chỉnh trên
+      # 16 mẫu góc thật (8 ảnh × 2 góc): mọi góc CÓ CHỮ TIÊU ĐỀ THẬT đo được
+      # >= 0.73 (chữ pipeline sinh ra luôn có khoảng nền theme lộ ra quanh
+      # glyph); mọi góc chỉ có ảnh minh hoạ (kể cả có chi tiết/chữ NHỎ tình
+      # cờ trong ảnh chụp, vd số liệu mờ trên màn hình) đo được <= 0.13. Đặt
+      # 0.40 (giữa khoảng hở rộng, KHÔNG sát bên nào).
+      corner_near_bg_floor: 0.40
+      # TASK-017 Phase 2 — ngưỡng điểm tương phản (0..1, xem
+      # brand_stamp._select_logo_variant) DƯỚI mức này thì coi CẢ HAI biến
+      # thể đều tương phản kém — vẫn chọn biến thể điểm cao hơn (không được
+      # bỏ logo) nhưng ghi log rõ để Lead xem lại tài sản logo nếu lặp lại.
+      low_contrast_floor: 0.6
     metadata:
       side_ratio: 0.035
       bottom_ratio: 0.012
