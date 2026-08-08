@@ -338,6 +338,12 @@ def _resolve_overlay_style() -> dict[str, float]:
         "logo_text_dark_pixel_floor": float(logo_cfg.get("text_dark_pixel_floor", 0.08)),
         "logo_low_contrast_floor": float(logo_cfg.get("low_contrast_floor", 0.6)),
         "logo_half_scan_top_fraction": float(logo_cfg.get("half_scan_top_fraction", 0.30)),
+        # TASK-019 -- xem ghi chú ngưỡng đầy đủ trong config/brand.yaml + docstring
+        # `_measure_illustration_half`.
+        "logo_half_scan_near_bg_tolerance": int(logo_cfg.get("half_scan_near_bg_tolerance", 30)),
+        "logo_half_scan_near_bg_floor": float(logo_cfg.get("half_scan_near_bg_floor", 0.35)),
+        "logo_half_scan_near_bg_ceiling": float(logo_cfg.get("half_scan_near_bg_ceiling", 0.65)),
+        "logo_corner_near_bg_floor": float(logo_cfg.get("corner_near_bg_floor", 0.40)),
         "metadata_side_ratio": float(metadata_cfg.get("side_ratio", 0.035)),
         "metadata_bottom_ratio": float(metadata_cfg.get("bottom_ratio", 0.012)),
         "image_body_font_ratio": float(metadata_cfg.get("image_body_font_ratio", 0.028)),
@@ -363,6 +369,27 @@ def _resolve_overlay_style() -> dict[str, float]:
     if not 0.05 <= style["logo_half_scan_top_fraction"] <= 1.0:
         raise ValueError(
             "brand.infographic_overlay.logo.half_scan_top_fraction phải nằm trong [0.05, 1]"
+        )
+    if not 0 <= style["logo_half_scan_near_bg_tolerance"] <= 120:
+        raise ValueError(
+            "brand.infographic_overlay.logo.half_scan_near_bg_tolerance phải nằm trong [0, 120]"
+        )
+    if not 0.0 <= style["logo_half_scan_near_bg_floor"] <= 1.0:
+        raise ValueError(
+            "brand.infographic_overlay.logo.half_scan_near_bg_floor phải nằm trong [0, 1]"
+        )
+    if not 0.0 <= style["logo_half_scan_near_bg_ceiling"] <= 1.0:
+        raise ValueError(
+            "brand.infographic_overlay.logo.half_scan_near_bg_ceiling phải nằm trong [0, 1]"
+        )
+    if style["logo_half_scan_near_bg_floor"] >= style["logo_half_scan_near_bg_ceiling"]:
+        raise ValueError(
+            "brand.infographic_overlay.logo.half_scan_near_bg_floor phải nhỏ hơn "
+            "half_scan_near_bg_ceiling"
+        )
+    if not 0.0 <= style["logo_corner_near_bg_floor"] <= 1.0:
+        raise ValueError(
+            "brand.infographic_overlay.logo.corner_near_bg_floor phải nằm trong [0, 1]"
         )
     if not 0.01 <= style["image_body_font_ratio"] <= 0.08:
         raise ValueError(
@@ -902,45 +929,119 @@ def _paste_logo(overlay: Image.Image, *, logo_path: Path, top_pad_px: int, pad: 
 # Không còn ứng viên sạch trong nửa ảnh minh hoạ -> `chosen=None` ->
 # `overlay_brand_full_canvas` RAISE (KHÔNG âm thầm bỏ logo) -- caller
 # (`ai_full.render_ai_full`) sinh lại ảnh / NEEDS_HUMAN, xem contract TASK-017.
+#
+# TASK-019 (2026-08-08, chủ dự án chỉ ra trực tiếp) -- SỬA bước (a): chủ dự
+# án BÁC luôn giả định ngầm "ưu tiên góc trên-phải" mà TASK-013/017 dựa vào
+# (prompt không ép được bố cục ổn định -- bằng chứng: 2/8 ảnh bố cục ngược,
+# ảnh minh hoạ ở TRÁI). `_measure_illustration_half()` dùng CHỈ dark_pixel_
+# ratio hoá ra đo SAI nửa trên đúng 2 ảnh đó (ảnh chụp tối màu tự nhiên tối
+# hơn khối tiêu đề) -- thêm tín hiệu `near_background_ratio` (tỷ lệ pixel gần
+# màu nền theme) làm quyết định chính, dark_pixel_ratio lùi thành dự phòng.
+# Xem docstring `_measure_illustration_half` cho chi tiết đầy đủ + số đo.
 # =====================================================================
 
 
+def _near_background_ratio(
+    region: Image.Image, background: tuple[int, int, int], *, tolerance: int
+) -> float:
+    """Tỷ lệ pixel LỆCH mỗi kênh RGB <= `tolerance` so với màu nền theme
+    (`background.primary`) -- đo TRỰC TIẾP "vùng trống" (nền phẳng/khoảng
+    trắng quanh chữ) thay vì suy qua độ tối (xem `_measure_illustration_half`
+    cho lý do dark_pixel_ratio một mình không đủ tin cậy, TASK-019)."""
+    rgb = region.convert("RGB")
+    pixels = list(rgb.getdata())
+    if not pixels:
+        return 0.0
+    close = sum(
+        1
+        for r, g, b in pixels
+        if abs(r - background[0]) <= tolerance
+        and abs(g - background[1]) <= tolerance
+        and abs(b - background[2]) <= tolerance
+    )
+    return close / len(pixels)
+
+
 def _measure_illustration_half(
-    canvas: Image.Image, *, final_w: int, final_h: int, top_fraction: float = 0.10
+    canvas: Image.Image,
+    *,
+    final_w: int,
+    final_h: int,
+    background: tuple[int, int, int],
+    top_fraction: float = 0.10,
+    near_bg_tolerance: int = 30,
+    near_bg_floor: float = 0.35,
+    near_bg_ceiling: float = 0.65,
 ) -> dict:
-    """Đo nửa TRÁI/PHẢI ảnh chứa khối tiêu đề (chữ) vs. ảnh minh hoạ bằng
-    CHÍNH `dark_pixel_ratio` của `scan_text_collision` trên MỖI nửa -- không
+    """Đo nửa TRÁI/PHẢI ảnh chứa khối tiêu đề (chữ) vs. ảnh minh hoạ -- không
     tin bố cục cứng "tiêu đề trái/minh hoạ phải" ép trong prompt (TASK-013
     Phần A); prompt là xác định, đo là tất định (yêu cầu chủ dự án TASK-017).
-    Chữ navy/gold đặc luôn tạo dark_pixel_ratio cao hơn hẳn hoạ tiết ảnh chụp
-    thuần -- xác nhận trên 8 ảnh thật (TASK-013 Phase D + TASK-017 Phase 3).
+
+    SỬA LỖI THẬT (2026-08-08, TASK-019, chủ dự án chỉ ra trực tiếp) -- bản
+    TASK-017 chỉ dùng `dark_pixel_ratio` (nửa nào tối hơn = có chữ) SAI trên
+    2/8 ảnh thật khi ảnh minh hoạ ở bên TRÁI (`091d9428...` Bách Hóa Xanh mở
+    rộng miền Bắc, `bb8f9ddf...` BHX x WinCommerce): cả hai đều là ẢNH CHỤP
+    TỐI MÀU (kệ hàng/màn hình) darker hơn hẳn khối tiêu đề (chữ navy thưa
+    trên nền ivory gần trắng) -- dark_pixel_ratio khi đó cho kết luận NGƯỢC
+    (nửa ảnh minh hoạ bị đo là nửa "có chữ"). Xác nhận bằng mắt trên ảnh thật
+    (không chỉ qua số đo) -- xem `_tmp-task019/analyze_half*.py` (ngoài repo).
+
+    TÍN HIỆU MỚI, ƯU TIÊN: `_near_background_ratio` -- tỷ lệ pixel gần màu
+    NỀN THEME (`background.primary`, KHÔNG hardcode trắng -- theme Dark nền
+    navy, near-white sẽ vô nghĩa). Khối tiêu đề luôn có nhiều khoảng trống
+    nền thật quanh chữ (near_bg cao); ảnh chụp phủ kín khung nên near_bg thấp,
+    BẤT KỂ ảnh sáng hay tối -- tín hiệu này sống sót qua đúng trường hợp làm
+    dark_pixel_ratio sai (ảnh tối). Đối chiếu trên đúng bộ 8 ảnh thật (TASK-013
+    Phase D + TASK-017 Phase 3): near_bg 2 nửa lệch xa nhau (>=30 điểm % qua
+    ngưỡng floor/ceiling) trên 4/8 ảnh có bố cục 2 cột rõ (kể cả đúng 2 ảnh
+    lỗi ở trên) -- dùng làm quyết định TRỰC TIẾP khi lệch xa. 4/8 ảnh còn lại
+    (bố cục ảnh phủ toàn chiều rộng, không chia 2 cột rõ) near_bg 2 nửa GẦN
+    NHAU -- không đủ tin cậy để quyết -- LÙI VỀ `dark_pixel_ratio` cũ (đã đúng
+    trên cả 4 ca này, xem TASK-017) làm tín hiệu dự phòng, KHÔNG thay hẳn.
+    Kết hợp 2 tín hiệu độc lập thay vì tin một chỉ số duy nhất (bài học
+    TASK-017: `aligned_component_count` từng bị glyph-merging đánh lừa).
 
     CHỈ đo dải TRÊN CÙNG (`top_fraction` * final_h, mặc định 10%, xem config
     `infographic_overlay.logo.half_scan_top_fraction`) -- KHÔNG đo cả chiều
     cao ảnh. Bằng chứng thật (ảnh POM, TASK-017 Phase 3): đo cả ảnh khiến
     khối thẻ số liệu ở NỬA DƯỚI (không liên quan gì tới góc đặt logo, vốn chỉ
-    ở dải trên) áp đảo phép đo, xác định SAI nửa chứa tiêu đề. Dải càng cao
-    càng dễ ăn luôn phần TỐI của chính ảnh minh hoạ (vd vùng bóng đổ dưới
-    cuộn thép) khiến dark_pixel_ratio bên minh hoạ vượt cả bên chữ -- hiệu
-    chỉnh trên 8 ảnh thật cho thấy 0.08-0.12 đúng cả 8/8, 0.15 sai 1/8.
-
-    Hoà (vd ảnh nền phẳng 1 màu, không chữ) -> lùi về quy ước prompt (tiêu đề
-    TRÁI, xem `_corners_for_half`)."""
+    ở dải trên) áp đảo phép đo, xác định SAI nửa chứa tiêu đề."""
     from .postflight import scan_text_collision
 
     half_w = max(final_w // 2, 1)
     band_h = max(round(final_h * top_fraction), 1)
-    left_scan = scan_text_collision(canvas, (0, 0, half_w, band_h))
-    right_scan = scan_text_collision(canvas, (half_w, 0, final_w, band_h))
+    left_bbox = (0, 0, half_w, band_h)
+    right_bbox = (half_w, 0, final_w, band_h)
+
+    left_near_bg = _near_background_ratio(
+        canvas.crop(left_bbox), background, tolerance=near_bg_tolerance
+    )
+    right_near_bg = _near_background_ratio(
+        canvas.crop(right_bbox), background, tolerance=near_bg_tolerance
+    )
+
+    left_scan = scan_text_collision(canvas, left_bbox)
+    right_scan = scan_text_collision(canvas, right_bbox)
     left_ratio = left_scan.get("dark_pixel_ratio", 0.0)
     right_ratio = right_scan.get("dark_pixel_ratio", 0.0)
-    text_half = "left" if left_ratio >= right_ratio else "right"
-    image_half = "right" if text_half == "left" else "left"
+
+    if left_near_bg <= near_bg_floor and right_near_bg >= near_bg_ceiling:
+        image_half, decision_method = "left", "near_background_ratio"
+    elif right_near_bg <= near_bg_floor and left_near_bg >= near_bg_ceiling:
+        image_half, decision_method = "right", "near_background_ratio"
+    else:
+        text_half = "left" if left_ratio >= right_ratio else "right"
+        image_half = "right" if text_half == "left" else "left"
+        decision_method = "dark_pixel_ratio_fallback"
+    text_half = "right" if image_half == "left" else "left"
     return {
         "text_half": text_half,
         "image_half": image_half,
         "left_dark_pixel_ratio": left_ratio,
         "right_dark_pixel_ratio": right_ratio,
+        "left_near_background_ratio": round(left_near_bg, 4),
+        "right_near_background_ratio": round(right_near_bg, 4),
+        "decision_method": decision_method,
         "scan_band_h": band_h,
     }
 
@@ -978,6 +1079,9 @@ def select_logo_corner(
     final_h: int,
     corners: tuple[str, ...],
     dark_pixel_floor: float,
+    background: tuple[int, int, int] | None = None,
+    near_bg_tolerance: int = 30,
+    corner_near_bg_floor: float = 0.40,
 ) -> dict:
     """Quét từng ứng viên góc (đúng thứ tự ưu tiên, đã giới hạn về ĐÚNG nửa
     chứa ảnh minh hoạ bởi caller qua `_corners_for_half`) và trả kết quả CÓ
@@ -1006,6 +1110,36 @@ def select_logo_corner(
     (kể cả chỉ đè MỘT PHẦN bbox) đo được >= 0.125 -- đặt giữa khoảng hở đó
     (xem config `infographic_overlay.logo.text_dark_pixel_floor`).
 
+    SỬA LỖI THẬT #3 (2026-08-08, TASK-019) -- ngưỡng dark_pixel_ratio ĐƠN ở
+    trên chỉ hiệu chỉnh trên góc ẢNH SÁNG MÀU (mây, kim loại, biểu đồ nền
+    sáng) -- CHƯA từng gặp góc rơi vào ẢNH MINH HOẠ TỐI MÀU tự nhiên (đèn
+    trần/kệ hàng, màn hình giao dịch tối) cho tới khi sửa Phase 1
+    (`_measure_illustration_half`) chọn ĐÚNG nửa ảnh minh hoạ ở 2 ảnh trước
+    đây luôn bị đo sai nửa. Ảnh thật (091d9428... Bách Hóa Xanh mở rộng miền
+    Bắc, góc trên-trái = đèn trần) đo được dark_pixel_ratio=0.48 (gấp ~4 lần
+    ngưỡng 0.125 dù KHÔNG có chữ thật -- xác nhận bằng mắt) -- dark_pixel_ratio
+    một mình KHÔNG phân biệt được "tối vì có mực chữ" với "tối vì bản thân
+    ảnh chụp tối màu".
+
+    Tín hiệu bổ sung: `near_background_ratio` (CÙNG hàm `_near_background_ratio`
+    dùng ở `_measure_illustration_half`) đo trên ĐÚNG bbox logo. Chữ tiêu đề do
+    pipeline SINH RA luôn nằm trên nền theme PHẲNG (ivory/navy), nên bbox
+    quanh nó LUÔN còn nhiều khoảng nền lộ ra quanh/giữa các glyph -- đo trên
+    16 mẫu góc thật (8 ảnh x 2 góc, TASK-013 Phase D + TASK-017 Phase 3 +
+    2 góc mới lộ ra sau khi sửa Phase 1): mọi góc CÓ CHỮ TIÊU ĐỀ THẬT đo
+    near_background_ratio >= 0.73; mọi góc chỉ có ảnh minh hoạ (dù là hoạ
+    tiết thuần hay có chi tiết/chữ NHỎ tình cờ xuất hiện trong ảnh chụp, vd
+    số liệu mờ trên màn hình giao dịch nền ảnh -- KHÔNG phải chữ do pipeline
+    tạo ra) đo được <= 0.13 -- đặt ngưỡng 0.40 giữa khoảng hở đó
+    (`infographic_overlay.logo.corner_near_bg_floor`). "occupied" giờ đòi
+    hỏi CẢ HAI tín hiệu cùng vượt ngưỡng (kết hợp, không tin một chỉ số duy
+    nhất) -- ĐÂY LÀ ĐK CHẶT HƠN bản cũ (chỉ SIẾT thêm điều kiện, không bỏ
+    điều kiện cũ) nên KHÔNG thể biến 1 góc cũ đã "occupied" đúng (dark cao +
+    near_bg cao, chữ tiêu đề thật) thành "sạch" sai -- chỉ gỡ oan cho góc ảnh
+    minh hoạ tối màu (dark cao nhưng near_bg thấp, không có nền theme lộ ra).
+    Thiếu `background` (caller cũ không truyền) -> lùi mượt về dark_pixel_ratio
+    một mình (hành vi TASK-017), KHÔNG raise.
+
     `chosen=None` khi KHÔNG ứng viên nào sạch -- caller quyết định (sinh lại
     ảnh), hàm này KHÔNG BAO GIỜ tự dán đè lên chữ."""
     from .postflight import scan_text_collision
@@ -1018,9 +1152,20 @@ def select_logo_corner(
         )
         bbox = (x, y, x + logo_w, y + logo_h)
         scan = scan_text_collision(content_canvas, bbox)
-        occupied = scan.get("dark_pixel_ratio", 0.0) >= dark_pixel_floor
+        dark_hit = scan.get("dark_pixel_ratio", 0.0) >= dark_pixel_floor
+        near_bg_ratio = None
+        if background is not None:
+            near_bg_ratio = _near_background_ratio(
+                content_canvas.crop(bbox), background, tolerance=near_bg_tolerance
+            )
+            occupied = dark_hit and near_bg_ratio >= corner_near_bg_floor
+        else:
+            occupied = dark_hit
         candidates.append(
-            {"corner": corner, "x": x, "y": y, "bbox": list(bbox), "occupied": occupied, **scan}
+            {
+                "corner": corner, "x": x, "y": y, "bbox": list(bbox), "occupied": occupied,
+                "near_background_ratio": near_bg_ratio, **scan,
+            }
         )
         if chosen is None and not occupied:
             chosen = corner
@@ -1043,6 +1188,7 @@ def precheck_logo_corner(
     png_bytes: bytes,
     *,
     ratio: str,
+    theme: str | None = None,
     settings=None,
     logo_path: str | Path | None = None,
 ) -> dict:
@@ -1060,9 +1206,17 @@ def precheck_logo_corner(
     caller/log đối chiếu được. `chosen=None` ở mọi nhánh sớm (thiếu file/vượt
     biên) giờ đi kèm `all_occupied=True` (trước đây `False`, KHÔNG NHẤT QUÁN
     với `chosen is None` -- sửa luôn, bug có sẵn không liên quan trực tiếp
-    logic va chạm chữ)."""
+    logic va chạm chữ).
+
+    TASK-019 (2026-08-08): `_measure_illustration_half` giờ cần màu nền theme
+    (`background.primary`) để đo `near_background_ratio` -- nhận thêm `theme`
+    (CÙNG theme caller đã chốt cho lượt sinh ảnh này, xem `ai_full.
+    render_ai_full`; KHÔNG tự suy theme mặc định riêng ở đây vì có thể LỆCH
+    với theme thật sẽ dùng để đóng dấu, làm sai màu nền tham chiếu)."""
     style = _resolve_overlay_style()
     final_w, final_h = _resolve_final_size(ratio, settings)
+    _resolved_theme, _theme_id, palette = load_theme_palette(theme)
+    background = _hex_to_rgb(palette["background.primary"])
     source_image = Image.open(io.BytesIO(png_bytes)).convert("RGB")
     content_canvas = source_image.resize((final_w, final_h), Image.LANCZOS).convert("RGBA")
     resolved_logo_path = Path(logo_path) if logo_path else _default_logo_path()
@@ -1075,8 +1229,11 @@ def precheck_logo_corner(
     if logo_margin + logo_w > final_w or logo_y + logo_h > final_h:
         return {"chosen": None, "all_occupied": True, "candidates": [], "image_half": None}
     half = _measure_illustration_half(
-        content_canvas, final_w=final_w, final_h=final_h,
+        content_canvas, final_w=final_w, final_h=final_h, background=background,
         top_fraction=style["logo_half_scan_top_fraction"],
+        near_bg_tolerance=style["logo_half_scan_near_bg_tolerance"],
+        near_bg_floor=style["logo_half_scan_near_bg_floor"],
+        near_bg_ceiling=style["logo_half_scan_near_bg_ceiling"],
     )
     result = select_logo_corner(
         content_canvas,
@@ -1088,6 +1245,9 @@ def precheck_logo_corner(
         final_h=final_h,
         corners=_corners_for_half(half["image_half"]),
         dark_pixel_floor=style["logo_text_dark_pixel_floor"],
+        background=background,
+        near_bg_tolerance=style["logo_half_scan_near_bg_tolerance"],
+        corner_near_bg_floor=style["logo_corner_near_bg_floor"],
     )
     result["image_half"] = half["image_half"]
     result["half_measurement"] = half
@@ -1268,8 +1428,11 @@ def overlay_brand_full_canvas(
     if logo_margin + logo_w > final_w or logo_y + logo_h > final_h:
         raise ValueError("Logo full-canvas vượt biên ảnh; kiểm tra config infographic_overlay")
     half = _measure_illustration_half(
-        content_canvas, final_w=final_w, final_h=final_h,
+        content_canvas, final_w=final_w, final_h=final_h, background=colors["background"],
         top_fraction=style["logo_half_scan_top_fraction"],
+        near_bg_tolerance=style["logo_half_scan_near_bg_tolerance"],
+        near_bg_floor=style["logo_half_scan_near_bg_floor"],
+        near_bg_ceiling=style["logo_half_scan_near_bg_ceiling"],
     )
     corner_result = select_logo_corner(
         content_canvas,
@@ -1281,6 +1444,9 @@ def overlay_brand_full_canvas(
         final_h=final_h,
         corners=_corners_for_half(half["image_half"]),
         dark_pixel_floor=style["logo_text_dark_pixel_floor"],
+        background=colors["background"],
+        near_bg_tolerance=style["logo_half_scan_near_bg_tolerance"],
+        corner_near_bg_floor=style["logo_corner_near_bg_floor"],
     )
     logo_scrim_applied = False
     if corner_result["chosen"] is None:

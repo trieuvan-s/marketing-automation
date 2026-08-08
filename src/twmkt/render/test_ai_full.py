@@ -594,6 +594,144 @@ def test_full_canvas_overlay_raises_when_illustration_half_has_no_clean_logo_spo
 
 
 # =====================================================================
+# TASK-019 (2026-08-08, chủ dự án chỉ ra trực tiếp) -- `_measure_illustration_
+# half` bằng dark_pixel_ratio ĐƠN kết luận SAI trên ảnh có bố cục NGƯỢC (ảnh
+# minh hoạ TRÁI, tiêu đề PHẢI) khi ảnh minh hoạ là ẢNH CHỤP TỐI MÀU tự nhiên
+# (tối hơn khối tiêu đề) -- bằng chứng thật 2/8 ảnh Phase 3 (091d9428... Bách
+# Hóa Xanh mở rộng miền Bắc, bb8f9ddf... BHX × WinCommerce). Sửa bằng tín hiệu
+# `near_background_ratio` (tỷ lệ pixel gần màu NỀN THEME) làm quyết định
+# chính. CÙNG gốc rễ cũng làm SAI "occupied" ở `select_logo_corner` khi góc
+# logo rơi đúng vào ảnh minh hoạ tối màu (dark_pixel_ratio cao dù không có
+# chữ) -- sửa bằng ĐK kết hợp (dark_pixel_ratio VÀ near_background_ratio).
+# Test dưới đây dùng canvas TỔNG HỢP (không cần ảnh AI thật, đúng yêu cầu
+# contract TASK-019 "KHÔNG gọi API sinh ảnh ở task này").
+# =====================================================================
+
+
+def _reversed_layout_png_bytes(w: int, h: int, *, bg=(0xF6, 0xF0, 0xE5)) -> bytes:
+    """Ảnh tổng hợp bố cục NGƯỢC, dựng THẲNG ở kích thước final (không qua
+    resize trung gian, tránh lệch tỷ lệ khi tính near_background_ratio): NỬA
+    TRÁI = ảnh minh hoạ (hoạ tiết TỐI MÀU, dày đặc, phủ kín, KHÔNG dùng màu
+    gần nền theme -- mô phỏng ảnh chụp tối tự nhiên như đèn trần/màn hình
+    giao dịch, xem 2 ảnh lỗi thật TASK-019); NỬA PHẢI = khối tiêu đề (nền
+    theme PHẲNG + 2 thanh chữ tối MỎNG, còn NHIỀU khoảng nền lộ ra quanh chữ
+    -- đúng cấu trúc chữ tiêu đề pipeline sinh ra, near_background_ratio cao
+    như 16 mẫu góc thật đã đo, xem docstring `select_logo_corner`)."""
+    im = Image.new("RGB", (w, h), bg)
+    draw = ImageDraw.Draw(im)
+    half_w = w // 2
+    top_h = round(h * 0.20)  # phủ dải quét half (10%) lẫn bbox góc logo (~12%)
+    cell = max(top_h // 20, 4)
+    dark_palette = [(15, 20, 25), (40, 45, 40), (25, 30, 45), (55, 50, 35)]
+    i = 0
+    for y in range(0, top_h, cell):
+        for x in range(0, half_w, cell):
+            draw.rectangle([x, y, x + cell, y + cell], fill=dark_palette[i % len(dark_palette)])
+            i += 1
+    text_color = (10, 20, 60)
+    line_h = max(round(top_h * 0.10), 6)
+    for row in range(2):
+        y0 = round(top_h * 0.20) + row * line_h * 3
+        draw.rectangle([half_w + 40, y0, w - 60, y0 + line_h], fill=text_color)
+    return _to_png_bytes(im)
+
+
+def test_measure_illustration_half_detects_reversed_layout_illustration_left():
+    """TASK-019 -- bố cục NGƯỢC (ảnh minh hoạ TRÁI, tiêu đề PHẢI) phải được
+    nhận đúng nửa qua near_background_ratio dù ảnh minh hoạ TỐI hơn khối tiêu
+    đề (dark_pixel_ratio một mình sẽ kết luận NGƯỢC -- xem SỬA LỖI THẬT ở
+    docstring `_measure_illustration_half`)."""
+    final_w, final_h = 1080, 1350
+    raw = Image.open(io.BytesIO(_reversed_layout_png_bytes(final_w, final_h))).convert("RGB")
+    canvas = raw.convert("RGBA")
+    half = bs._measure_illustration_half(
+        canvas, final_w=final_w, final_h=final_h, background=(0xF6, 0xF0, 0xE5),
+        top_fraction=0.10, near_bg_tolerance=30, near_bg_floor=0.35, near_bg_ceiling=0.65,
+    )
+    assert half["left_dark_pixel_ratio"] > half["right_dark_pixel_ratio"], (
+        "canvas tổng hợp phải tái hiện đúng cái bẫy: ảnh minh hoạ trái TỐI hơn "
+        "khối tiêu đề phải (dark_pixel_ratio một mình sẽ đoán ngược)"
+    )
+    assert half["image_half"] == "left"
+    assert half["text_half"] == "right"
+    assert half["decision_method"] == "near_background_ratio"
+
+
+def test_full_canvas_overlay_places_logo_top_left_for_reversed_layout():
+    """TASK-019 end-to-end -- bố cục ảnh trái/tiêu đề phải phải ra logo góc
+    trên-TRÁI, KHÔNG RAISE, qua đúng `overlay_brand_full_canvas` (không mock
+    scan_text_collision, đo trên canvas tổng hợp thật)."""
+    raw = _reversed_layout_png_bytes(1080, 1350)
+    stamped, log = bs.overlay_brand_full_canvas(
+        raw, ratio="4:5", theme="bright", source="CafeF",
+        disclaimer="Nội dung mang tính tham khảo, không phải khuyến nghị đầu tư.",
+    )
+    assert log["image_half"] == "left"
+    assert log["logo_position"] == "top_left"
+    assert log["logo_bbox"][0] < 1080 // 2
+    image = Image.open(io.BytesIO(stamped))
+    assert image.size[0] == 1080
+
+
+def test_select_logo_corner_allows_dark_illustration_texture_not_real_text():
+    """TASK-019 SỬA LỖI THẬT #3 -- góc chỉ có hoạ tiết ảnh minh hoạ TỐI MÀU
+    (dark_pixel_ratio cao) nhưng KHÔNG có nền theme lộ ra (near_background_
+    ratio thấp) phải được coi là SẠCH, không phải chữ thật. Bằng chứng thật:
+    ảnh Bách Hóa Xanh mở rộng miền Bắc (091d9428...), góc đèn trần đo
+    dark_pixel_ratio=0.48 (gấp ~4 lần ngưỡng cũ) nhưng KHÔNG có chữ (xác nhận
+    bằng mắt, TASK-019)."""
+    final_w, final_h = 1080, 1350
+    logo_w, logo_h, logo_margin, logo_y = 192, 128, 38, 34
+    canvas = Image.new("RGBA", (final_w, final_h), (30, 30, 30, 255))
+    draw = ImageDraw.Draw(canvas)
+    cell = 8
+    dark_palette = [(15, 20, 25, 255), (45, 40, 35, 255), (25, 30, 45, 255)]
+    i = 0
+    for y in range(0, final_h, cell):
+        for x in range(0, final_w, cell):
+            draw.rectangle([x, y, x + cell, y + cell], fill=dark_palette[i % len(dark_palette)])
+            i += 1
+    result = bs.select_logo_corner(
+        canvas, logo_w=logo_w, logo_h=logo_h, logo_margin=logo_margin, logo_y=logo_y,
+        final_w=final_w, final_h=final_h, corners=("top_left",), dark_pixel_floor=0.08,
+        background=(0xF6, 0xF0, 0xE5), near_bg_tolerance=30, corner_near_bg_floor=0.40,
+    )
+    candidate = result["candidates"][0]
+    assert candidate["dark_pixel_ratio"] >= 0.08, "canvas phải tái hiện đúng 'tối' theo metric cũ"
+    assert candidate["near_background_ratio"] < 0.40
+    assert candidate["occupied"] is False
+    assert result["chosen"] == "top_left"
+
+
+def test_select_logo_corner_still_blocks_real_text_on_theme_background():
+    """TASK-019 -- ĐK MỚI (near_background_ratio) chỉ SIẾT THÊM (AND với
+    dark_pixel_ratio), không được làm mất khả năng chặn chữ tiêu đề thật:
+    chữ trên nền theme phẳng (near_background_ratio cao, đúng cấu trúc chữ
+    pipeline sinh ra) vẫn phải bị coi là "occupied" như hành vi TASK-017."""
+    final_w, final_h = 1080, 1350
+    logo_w, logo_h, logo_margin, logo_y = 192, 128, 38, 34
+    bg = (0xF6, 0xF0, 0xE5)
+    canvas = Image.new("RGBA", (final_w, final_h), (*bg, 255))
+    draw = ImageDraw.Draw(canvas)
+    text_color = (10, 20, 60, 255)
+    draw.rectangle(
+        [logo_margin + 10, logo_y + 10, logo_margin + logo_w - 10, logo_y + 40], fill=text_color
+    )
+    draw.rectangle(
+        [logo_margin + 10, logo_y + 60, logo_margin + logo_w - 10, logo_y + 90], fill=text_color
+    )
+    result = bs.select_logo_corner(
+        canvas, logo_w=logo_w, logo_h=logo_h, logo_margin=logo_margin, logo_y=logo_y,
+        final_w=final_w, final_h=final_h, corners=("top_left",), dark_pixel_floor=0.08,
+        background=bg, near_bg_tolerance=30, corner_near_bg_floor=0.40,
+    )
+    candidate = result["candidates"][0]
+    assert candidate["near_background_ratio"] >= 0.40
+    assert candidate["occupied"] is True
+    assert result["chosen"] is None
+
+
+# =====================================================================
 # TASK-017 Phase 2 (2026-08-07) -- chọn biến thể logo theo tương phản.
 #
 # Không ảnh THẬT nào trong bộ 8 ảnh chấm ở Phase 3 có nền vùng logo TỐI (cả

@@ -860,7 +860,7 @@ def render_ai_full(
         # bừa (brand_stamp.overlay_brand_full_canvas() tự bỏ qua logo trong
         # trường hợp đó, nhưng ta chặn TỪ ĐÂY để không xuất ảnh thiếu logo
         # ra ngoài mà không ai biết).
-        logo_precheck = precheck_logo_corner(raw_bytes, ratio=ratio, settings=settings)
+        logo_precheck = precheck_logo_corner(raw_bytes, ratio=ratio, theme=theme, settings=settings)
         logo_attempts = 1
         if logo_precheck["all_occupied"]:
             logo_retry_instruction = (
