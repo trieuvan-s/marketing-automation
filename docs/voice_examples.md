@@ -143,15 +143,18 @@ số vào một câu — tách ra: câu 1 gợi tension, mỏ neo số đưa xu�
 
 ## 2c. Luật kết chung (áp cho MỌI khung ở §2)
 
-- **KẾT MỞ (gần như bắt buộc).** Đóng bằng *điều đáng theo dõi* (2–3 biến số cần quan sát) hoặc một
+- **KẾT MỞ (tuỳ chọn).** Đóng bằng *điều đáng theo dõi* (2–3 biến số cần quan sát) hoặc một
   câu hỏi thả cho người đọc. **Không** chốt phán quyết mua/bán.
-  - *"Điều đáng theo dõi không phải con số tăng trưởng, mà là ba thứ: …"*
+  - *"Ba điều nên theo dõi tiếp: biên lãi ròng quý sau có co lại hay không, nợ xấu diễn biến thế
+    nào, và lãi suất huy động có tăng thêm hay không."*
   - *"Còn bạn nghiêng về phe nào: đã tính kỹ, hay còn nhiều rủi ro?"* (bản FB có CTA)
 - **Một câu chốt-nguyên-lý (tuỳ chọn, tối đa 1).** Sau kết mở, được thêm ĐÚNG một bài học về *cách
   nghĩ* — ngắn, quotable, KHÔNG phải khuyến nghị hành động.
-  *"Đầu tư không chỉ là chọn cổ phiếu tốt, mà là hiểu vì sao thị trường chọn chúng."*
+  *"Một danh sách cổ phiếu 'khuyến nghị' chỉ có ý nghĩa nếu người đọc còn kiểm tra lại mức giá đang
+  trả và những giả định phía sau danh sách đó có đúng hay không."*
 - **Câu chốt một dòng đánh dấu khúc ngoặt** (dùng ở mọi khung để tạo nhịp):
-  *"Cái bẫy nằm ở chỗ dễ thấy nhất."* / *"Tiền không biến mất."*
+  *"Nhưng đây là chỗ số liệu không khớp với tuyên bố ban đầu."* / *"Khoản chênh lệch đó không biến
+  mất, nó chuyển sang một khoản mục khác trong báo cáo."*
 
 ---
 
@@ -164,6 +167,8 @@ số vào một câu — tách ra: câu 1 gợi tension, mỏ neo số đưa xu�
 - Steelman phía đối lập trước khi mở rộng khung.
 - Kết mở (điều đáng theo dõi / câu hỏi) + được thêm 1 câu chốt-nguyên-lý dạy cách nghĩ.
 - Đoạn ngắn, nhiều khoảng trắng cho social. Ẩn dụ đời thường, xưng ta/bạn.
+- Tiêu đề mục (nếu bài chia mục có tiêu đề) nêu được nội dung phần đó bàn về điều gì — người đọc
+  lướt qua một mình tiêu đề cũng đoán được chủ đề, không cần đọc câu đầu mới hiểu.
 
 **TRÁNH**
 - Mở bằng bối cảnh chung chung.
