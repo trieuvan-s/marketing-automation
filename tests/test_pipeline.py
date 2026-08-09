@@ -147,6 +147,46 @@ def test_data_root_env_override_wins_over_settings():
         del os.environ["DATA_ROOT"]
 
 
+def test_data_root_warns_when_default_store_is_missing(monkeypatch, capsys, caplog):
+    """Khong co DATA_ROOT + DB vang mat -> canh bao ro, nhung van tra path."""
+    from twmkt.config import Settings, data_root
+    from pathlib import Path
+    import tempfile
+
+    monkeypatch.delenv("DATA_ROOT", raising=False)
+    caplog.set_level("WARNING", logger="twmkt.config")
+    root = Path(tempfile.mkdtemp()) / "empty-data-root"
+
+    assert data_root(Settings({"storage": {"data_root": str(root)}})) == root
+    assert str(root) in capsys.readouterr().err
+    assert "set ENV DATA_ROOT" in caplog.text
+
+
+def test_data_root_missing_store_does_not_warn_when_env_is_set(monkeypatch, capsys, caplog):
+    from twmkt.config import Settings, data_root
+    from pathlib import Path
+    import tempfile
+
+    explicit_root = Path(tempfile.mkdtemp()) / "explicit-root"
+    monkeypatch.setenv("DATA_ROOT", str(explicit_root))
+    caplog.set_level("WARNING", logger="twmkt.config")
+
+    assert data_root(Settings({"storage": {"data_root": "ignored"}})) == explicit_root
+    assert capsys.readouterr().err == ""
+    assert "set ENV DATA_ROOT" not in caplog.text
+
+
+def test_ai_full_v13_is_part_of_cache_key(monkeypatch):
+    """Version prompt phai that su doi cache key, khong chi la metadata."""
+    from twmkt.render import ai_full
+
+    spec = {"title": "Cung mot spec"}
+    assert ai_full._PROMPT_VERSION == "v13"
+    key_v13 = ai_full._cache_key(spec, "light", "4:5")
+    monkeypatch.setattr(ai_full, "_PROMPT_VERSION", "v12")
+    assert ai_full._cache_key(spec, "light", "4:5") != key_v13
+
+
 def test_data_path_directory_target_creates_itself_idempotently():
     from twmkt.config import Settings, data_path
     from pathlib import Path
@@ -4033,6 +4073,31 @@ def _run_produce_scenario(writer_llm, approved_row: dict | None = None, route_ll
     board.appended_content, board.execute_updates = _read_back_produce_result(rows, db_path=db_path)
     board.db_path = db_path   # cho test cần kiểm version count trực tiếp (vd idempotent qua nhiều run_times)
     return result, board, notifier
+
+
+def test_run_persists_brief_layer_immediately_after_brief(monkeypatch):
+    """Brief output duoc append vao layer brief bang Document Store API san co."""
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+    import produce_from_sheet as pfs
+
+    original_write = pfs.ds.write_document
+    brief_writes = []
+
+    def _capture_write(topic_key, layer, payload, written_by, **kwargs):
+        if layer == "brief":
+            brief_writes.append((topic_key, payload, written_by))
+        return original_write(topic_key, layer, payload, written_by, **kwargs)
+
+    monkeypatch.setattr(pfs.ds, "write_document", _capture_write)
+    row = _approved_row("Persist brief audit", row=240, output_type=["Article"])
+    _run_produce_scenario(_EmptyRouteLLM(), row, route_llm=_EmptyRouteLLM())
+
+    assert len(brief_writes) == 1
+    topic_key, payload, written_by = brief_writes[0]
+    assert topic_key == row["topic_key"]
+    assert written_by == "ma"
+    assert "content_units" in payload
+    assert "brief_status" in payload
 
 
 def test_run_article_done_writes_content_marks_execute_done_and_notifies():

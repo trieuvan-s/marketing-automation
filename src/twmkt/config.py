@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import os
+import logging
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +20,8 @@ except ImportError:  # pragma: no cover
 
 DEFAULT_PATH = "config/settings.yaml"
 DEFAULT_DOTENV_PATH = "secrets/.env"
+
+logger = logging.getLogger(__name__)
 
 
 def _load_dotenv() -> None:
@@ -196,8 +200,21 @@ def data_root(settings: Settings | None = None) -> Path:
     tìm config/settings.yaml theo CWD (mọi script trong repo LUÔN được chạy từ
     repo root, xem README/CLAUDE.md)."""
     settings = settings or load_settings()
-    raw = os.environ.get("DATA_ROOT") or settings.get("storage.data_root", _DEFAULT_DATA_ROOT)
-    return Path(str(raw))
+    env_data_root = os.environ.get("DATA_ROOT")
+    raw = env_data_root or settings.get("storage.data_root", _DEFAULT_DATA_ROOT)
+    root = Path(str(raw))
+    try:
+        store_exists = (root / "document_store.db").is_file()
+    except OSError:
+        store_exists = False
+    if not env_data_root and not store_exists:
+        warning = (
+            f"[config] WARNING: data_root dang dung la {root}; khong thay "
+            "document_store.db. Neu day khong phai kho du lieu dung, hay set ENV DATA_ROOT."
+        )
+        print(warning, file=sys.stderr)
+        logger.warning(warning)
+    return root
 
 
 def data_path(*parts: str, settings: Settings | None = None) -> Path:

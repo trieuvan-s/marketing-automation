@@ -67,7 +67,7 @@ _DEFAULT_MODEL = "gpt-image-2"
 _DEFAULT_QUALITY = "medium"
 _API_URL = "https://api.openai.com/v1/images/generations"
 _TIMEOUT_S = 120
-_PROMPT_VERSION = "v12"  # v12: primary-subject precedence for photo relevance.
+_PROMPT_VERSION = "v13"  # v13: TASK-013/017/019 real subject + layout + logo fixes.
 
 # Bước 4.3 — sinh ĐÚNG size cho từng tỷ lệ (KHÔNG crop sau bởi API — nhờ
 # brand_stamp.matting() fit-inside/contain, xem SỬA LỖI ĐẶC TẢ 2026-07-24 --
