@@ -101,6 +101,7 @@ from twmkt.sheets_board import SheetsBoard, content_row, facts_to_json  # noqa: 
 from twmkt.utils.telegram_notifier import make_notifier  # noqa: E402
 
 from store import pipeline_store as ps  # noqa: E402
+from store import document_store as ds  # noqa: E402
 from twmkt.sheets_board import _now_ddmmyyyy  # noqa: E402
 
 # store phải giữ NGUYÊN VĂN (Lead xác nhận 2026-07-27, sau khi bug
@@ -498,6 +499,10 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                                   fail_loud=factory.is_fail_loud_step(settings, "brief"),
                                   settings=settings)
                        if write_article else BriefResult())
+        if write_article:
+            # TASK-024: keep the exact Brief output for later source-adherence audits.
+            # document_store is append-only; `brief` is an existing schema layer.
+            ds.write_document(topic_key, "brief", asdict(brief_result), "ma")
         brief = ProductionBrief(
             title=item["context"], hook=item["hook"], tickers=item["tickers"],
             group=item["group"], topic=item["topic"], url=item["source"],
