@@ -142,6 +142,11 @@ def _cli_error_detail(proc) -> str:
     return (proc.stderr or "").strip()[:200]
 
 
+# Biến môi trường PHẢI bị loại khỏi tiến trình con `claude -p`: nếu CLI thấy chúng,
+# nó chuyển sang xác thực bằng API key thay vì phiên Claude Pro/Max đã đăng nhập.
+_CLI_STRIPPED_ENV = frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"})
+
+
 class ClaudeCodeLLM(LLMClient):
     """Backend qua CLI `claude -p` (gói Pro/Max/Team hiện có — KHÔNG cần
     ANTHROPIC_API_KEY riêng, KHÔNG billing API). Shell tiến trình con, ghép
@@ -197,9 +202,18 @@ class ClaudeCodeLLM(LLMClient):
         cmd = [binary, "-p", "--output-format", "json"]
         if model:
             cmd += ["--model", model]
+        # BUG THẬT (2026-08-09, production chết cả 3 định dạng): `config._load_dotenv()`
+        # bơm ANTHROPIC_API_KEY từ secrets/.env vào os.environ ở MỌI lượt load_settings().
+        # subprocess.run() KHÔNG lọc env -> tiến trình con `claude -p` THỪA KẾ key đó,
+        # CLI thấy có key nên chuyển sang xác thực bằng API thay vì phiên Pro/Max đã
+        # đăng nhập -> "API Error: 400 Identity verification is required to continue".
+        # Trái CHÍNH docstring lớp này ("KHÔNG cần ANTHROPIC_API_KEY riêng, KHÔNG billing
+        # API"). Xoá key khỏi env CON (không đụng os.environ của tiến trình cha, nên
+        # AnthropicLLM ở đường khác VẪN dùng key bình thường).
+        child_env = {k: v for k, v in os.environ.items() if k not in _CLI_STRIPPED_ENV}
         try:
             proc = self._run_fn(cmd, input=full_prompt, capture_output=True, text=True,
-                                encoding="utf-8", timeout=self.timeout_s)
+                                encoding="utf-8", timeout=self.timeout_s, env=child_env)
         except FileNotFoundError:
             return self._fail(f"không thấy CLI '{self.binary}' (cài Claude Code / thêm vào PATH)",
                               fail_loud=fail_loud)
