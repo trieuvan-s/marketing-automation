@@ -707,6 +707,46 @@ def test_sync_all_full_recovery_after_accidental_deletion(board, db_path):
 
 
 # =============================================================================
+# CAS theo timestamp cho cột người-sở-hữu (TASK-030) -- chiều NGƯỢC LẠI: store
+# THẬT SỰ mới hơn Sheet thì render vẫn phải ghi đè bình thường. Bài test race
+# (tests/test_race_render_ingest.py) chỉ kiểm chiều "KHÔNG chứng minh được ->
+# giữ nguyên" -- thiếu chiều này thì `_cas_user_value()` có thể bị vá quá tay
+# thành "không bao giờ ghi", âm thầm phá đường phục hồi Bước 5.4.
+# =============================================================================
+
+def test_cas_overwrites_when_sheet_value_matches_an_older_store_version(board, db_path):
+    """Sheet đang hiện 1 giá trị CŨ (khớp đúng 1 version quá khứ trong lịch sử
+    gate_status) trong khi store đã tiến xa hơn (version mới nhất khác) --
+    đây CHÍNH LÀ bằng chứng CAS cần để ghi đè an toàn: giá trị Sheet không
+    phải "người vừa sửa tay, chưa kịp ingest" mà là "Sheet chưa bắt kịp store"
+    (đúng cơ chế Bước 5.4: Sheet bị xoá/reset về giá trị quá khứ, render dựng
+    lại đúng). Nếu `_cas_user_value()` bị vá quá tay thành luôn giữ nguyên khi
+    khác Sheet, test này ĐỎ."""
+    ps.write_raw("tk-1", {"context": "Bài 1", "hook": "h", "source": "u1",
+                          "tickers": [], "group": "", "topic": ""}, db_path=db_path)
+    ps.write_gate_status("tk-1", gate1="PENDING", db_path=db_path)   # version 1
+    ss.render_context_to_sheet(board, db_path=db_path)   # Sheet hiện PENDING
+
+    grid = board._tab("CONTEXT").get_all_values()
+    header = grid[0]
+    assert grid[1][_header_index(header, GATE1_COL)] == "PENDING"
+
+    # store tiến thêm 1 bước (vd worker/ingest khác ghi APPROVE) -- Sheet
+    # KHÔNG được đụng tới (mô phỏng chưa render lại), vẫn còn "PENDING" cũ.
+    ps.write_gate_status("tk-1", gate1="APPROVE", db_path=db_path)   # version 2 (mới nhất)
+
+    ss.render_context_to_sheet(board, db_path=db_path)
+
+    grid_after = board._tab("CONTEXT").get_all_values()
+    row_after = grid_after[1]
+    assert row_after[_header_index(header, GATE1_COL)] == "APPROVE", (
+        "store MỚI HƠN Sheet (Sheet khớp đúng version CŨ trong lịch sử) -- "
+        "render phải ghi đè bình thường, không được vá CAS quá tay thành "
+        "'không bao giờ ghi' (sẽ phá đường phục hồi Bước 5.4)."
+    )
+
+
+# =============================================================================
 # Output Type (Bước 4)
 # =============================================================================
 
