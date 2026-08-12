@@ -297,6 +297,30 @@ def _ext(fmt_value: str) -> str:
     return "json" if fmt_value == "infographic" else "md"
 
 
+def _cleanup_stale_output(settings, slug: str, type_: str, *, keep: Path) -> int:
+    """TASK-031 — "Xử lý lại": trước khi ghi file MỚI (`keep`, dưới
+    output/<hôm nay>/), dọn file .md/.json CŨ CÙNG (slug, type_) còn nằm ở
+    thư mục NGÀY KHÁC (lượt xử lý trước) -- KHÔNG đụng file của content_type
+    khác (assumption 2: "chỉ đụng content_type lượt mới sẽ sinh"). File trên
+    đĩa CHỈ là bản audit tiện đọc tay (content_output trong store mới là
+    nguồn sự thật, append-only, KHÔNG mất version cũ) -- xoá ở đây KHÔNG mất
+    dữ liệu thật, chỉ tránh 2 bản rải rác nhiều ngày dễ đọc nhầm bản cũ. Trả
+    số file đã xoá (0 nếu không có gì để dọn -- topic mới lần đầu sản xuất)."""
+    root = data_path(settings.get("storage.output_dir", "output"), settings=settings)
+    if not root.exists():
+        return 0
+    removed = 0
+    for day_dir in root.iterdir():
+        if not day_dir.is_dir():
+            continue
+        for f in day_dir.glob(f"{slug}-{type_}.*"):
+            if f.resolve() == keep.resolve():
+                continue
+            f.unlink()
+            removed += 1
+    return removed
+
+
 def match_source_by_domain(url: str, sources: list[Source]) -> Source | None:
     """CONTEXT không còn lưu tên Publisher (đã gọn hoá) -> khớp nguồn đăng ký
     (SOURCES) theo TÊN MIỀN của url bài, để full-fetch dùng đúng selector (mỗi
@@ -353,7 +377,8 @@ def run_sync_only() -> dict:
 
 
 def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
-        setup: bool = False, topic_keys: list[str] | None = None) -> dict:
+        setup: bool = False, topic_keys: list[str] | None = None,
+        force: set[str] | None = None) -> dict:
     """Sản xuất cho các topic Gate1=APPROVE + Execute∈{RUN,FAILED} — P2
     store-as-truth (nhánh feature/store-as-truth): đọc/ghi STORE
     (store/pipeline_store.py), KHÔNG còn đọc/ghi tab CONTEXT/CONTENT trên
@@ -362,6 +387,24 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
     Sheet, không phải trạng thái nội dung cần store làm nguồn sự thật). Sheet
     thấy được kết quả của run() qua store/sync_service.py (Bước 3, chưa xây ở
     phase này) — KHÔNG qua đường này.
+
+    `force` (TASK-031 — luồng "Xử lý lại", QUYẾT ĐỊNH TƯỜNG MINH, KHÔNG ngầm
+    định): tập `topic_key` phải BỎ QUA `existing_content_keys()` (Lớp 5 Phase 2)
+    ở lượt chạy NÀY, dù content_output đã status=DONE từ lượt trước —
+    store/sync_service.py::ingest_context_from_sheet() là nơi DUY NHẤT bơm vào
+    đây (qua execution_queue.payload_json {"force": true}, đọc lại ở
+    scripts/queue_worker.py), ĐÚNG lúc người chọn "Xử lý lại" (GATE1_REPROCESS)
+    ở Gate 1 — KHÔNG áp dụng cho APPROVE-lại-bình-thường/đổi Output Type (2 ca
+    đó KHÔNG nằm trong `force`, giữ nguyên hành vi idempotent cũ, tránh đốt
+    tiền LLM vô cớ). KHÔNG cần tách theo content_type: `channels`/
+    `output_type_excluded` (đã tính từ `item['output_type']` bên dưới) tự giới
+    hạn ĐÚNG những content_type Output Type MỚI thật sự yêu cầu — content_type
+    KHÁC (ngoài Output Type mới) vẫn bị `output_type_excluded` chặn TRƯỚC khi
+    chạm `seen`, nên KHÔNG bị ghi đè dù đã rơi khỏi `seen` (giữ NGUYÊN, đúng
+    "chỉ đụng content_type lượt mới sẽ sinh"). File output cũ (`output/<ngày
+    cũ>/`) của các content_type ĐƯỢC force cũng bị dọn (`_cleanup_stale_output`)
+    ngay trước khi ghi file mới — content_output trong store (append-only) VẪN
+    giữ NGUYÊN version cũ, KHÔNG hard-delete lịch sử.
 
     `topic_keys` (VIỆC 5.1 — điểm ráp webhook per-topic):
       - None (mặc định) -> HÀNH VI CŨ: quét TẤT CẢ topic đủ điều kiện, cắt theo
@@ -455,6 +498,15 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
     html_collector = factory.build_collector_for_source(Source("_", "_", fetch_type="html"), settings)
 
     seen = ps.existing_content_keys()   # Lớp 5 Phase 2: (TopicKey, Type) đã sinh -> bỏ qua
+    force = force or set()
+    if force:
+        # TASK-031 — "Xử lý lại": cho các topic trong `force`, coi như CHƯA
+        # có gì trong CONTENT (rơi khỏi seen) -> mọi nhánh write_article/
+        # video/infographic bên dưới thật sự chạy lại, KHÔNG rơi vào
+        # `if (topic_key, type_) in seen: skip`. content_output cũ trong
+        # store KHÔNG bị đụng ở đây (existing_content_keys() không đổi) --
+        # chỉ set `seen` cục bộ của lượt chạy NÀY bị lọc bớt.
+        seen = {pair for pair in seen if pair[0] not in force}
     out_dir = data_path(settings.get("storage.output_dir", "output"), _today(), settings=settings)
     out_dir.mkdir(parents=True, exist_ok=True)
     approx_tol = float(settings.get("guardrail.approx_tolerance_pct", 5)) / 100
@@ -695,6 +747,8 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
             article_outcome = r.outcome
             if r.outcome == WriterOutcome.DONE:
                 fn = out_dir / f"{_slug(item['context'])}-{article_content_type}.md"
+                if topic_key in force:
+                    _cleanup_stale_output(settings, _slug(item["context"]), article_content_type, keep=fn)
                 fn.write_text(r.draft.body, encoding="utf-8")
                 _write_content(topic_key, article_content_type, status="DONE", output=r.draft.body, notes="", content_units_json=content_units_json)
                 written += 1
@@ -706,6 +760,8 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                 # ERROR) để người xem lý do, nhưng KHÔNG seen.add (chưa coi là xong).
                 note = "; ".join(r.draft.compliance_issues)
                 fn = out_dir / f"{_slug(item['context'])}-{article_content_type}.md"
+                if topic_key in force:
+                    _cleanup_stale_output(settings, _slug(item["context"]), article_content_type, keep=fn)
                 fn.write_text(r.draft.body, encoding="utf-8")
                 _write_content(topic_key, article_content_type, status="ERROR", output=r.draft.body, notes=note, content_units_json=content_units_json)
                 written += 1
@@ -817,6 +873,8 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
             # NGUYÊN VĂN draft.body (Lead xác nhận 2026-07-27 -- store là nguồn
             # sự thật, KHÔNG được chỉ có bản cắt như Sheet preview).
             fn = out_dir / f"{_slug(item['context'])}-{type_}.{_ext(type_)}"
+            if topic_key in force:
+                _cleanup_stale_output(settings, _slug(item["context"]), type_, keep=fn)
             fn.write_text(draft.body, encoding="utf-8")
             _write_content(topic_key, type_, status=status, output=draft.body, notes=note, content_units_json=content_units_json)
             written += 1

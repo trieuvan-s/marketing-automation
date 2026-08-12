@@ -5115,6 +5115,142 @@ def test_run_article_idempotent_skips_writer_when_already_in_content():
     assert board.execute_updates.get(2) == "DONE"
 
 
+def test_run_reprocess_force_bypasses_seen_and_writes_new_article_version():
+    """TASK-031 — luồng "Xử lý lại": produce_from_sheet.run(force={topic_key})
+    PHẢI thật sự sinh version MỚI cho topic đã DONE (KHÔNG rơi vào nhánh skip
+    của existing_content_keys(), khác nghĩa của test_run_article_idempotent_
+    skips_writer_when_already_in_content ở trên). Kiểm bằng SỐ VERSION
+    (read_history), cùng nếp test_run_retries_channel_after_error_not_stuck_
+    forever_nafoods_bug — version count mới là bằng chứng thật KHÔNG bị vứt."""
+    from store import document_store as ds
+    from twmkt.curation.keys import compute_topic_key
+
+    class _CleanWriterLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            return _clean_writer_json()
+
+    _URL = "https://example.com/bai-xu-ly-lai-force"
+    _KEY = compute_topic_key(_URL)
+    row = _approved_row("Bài xử lý lại (force)", row=2, source=_URL)
+
+    _r, board, _n = _run_produce_scenario(
+        _CleanWriterLLM(), row,
+        pre_seed_content=[(_KEY, "article", {
+            "status": "DONE", "output": "ban cu (loi hoac muon sinh lai)", "notes": "", "facts": "[]"})],
+        run_kwargs={"topic_keys": [_KEY], "limit": 1, "force": {_KEY}})
+
+    history = ds.read_history(_KEY, "content_output", "article", db_path=board.db_path)
+    assert len(history) == 2, (
+        f"kỳ vọng ĐÚNG 2 version (DONE cũ pre-seed + DONE mới do force ép chạy lại), thực tế {len(history)}"
+    )
+    assert history[-1][1]["status"] == "DONE"
+    assert history[-1][1]["output"] != "ban cu (loi hoac muon sinh lai)", (
+        "force PHẢI sinh nội dung MỚI thật (gọi lại Writer), không phải giữ nguyên bản pre-seed"
+    )
+
+
+def test_run_reprocess_force_with_different_output_type_only_touches_new_type():
+    """TASK-031 — "Xử lý lại" kèm Output Type KHÁC lượt trước (giả định #2 của
+    Lead): content_type CŨ (article, KHÔNG nằm trong Output Type MỚI="Video")
+    PHẢI giữ NGUYÊN — output_type_excluded loại nó TRƯỚC KHI chạm `seen`/force,
+    nên PoisonWriterLLM chứng minh Writer không hề bị gọi lại, và version vẫn
+    ĐÚNG 1 (bản pre-seed). content_type MỚI (video) ĐƯỢC sinh version mới."""
+    from store import document_store as ds
+    from twmkt.curation.keys import compute_topic_key
+
+    class _PoisonWriterLLM:
+        def complete(self, *a, **kw):
+            raise AssertionError(
+                "Output Type mới = Video (không có Article) -> Writer KHÔNG được gọi lại")
+
+    _URL = "https://example.com/bai-xu-ly-lai-doi-output-type"
+    _KEY = compute_topic_key(_URL)
+    row = _approved_row("Bài xử lý lại đổi Output Type", row=2, source=_URL, output_type=["Video"])
+
+    _r, board, _n = _run_produce_scenario(
+        _PoisonWriterLLM(), row,
+        pre_seed_content=[(_KEY, "article", {
+            "status": "DONE", "output": "ban cu article", "notes": "", "facts": "[]"})],
+        run_kwargs={"topic_keys": [_KEY], "limit": 1, "force": {_KEY}})
+
+    article_history = ds.read_history(_KEY, "content_output", "article", db_path=board.db_path)
+    assert len(article_history) == 1, (
+        f"article KHÔNG nằm trong Output Type mới -> GIỮ NGUYÊN, kỳ vọng 1 version, thực tế {len(article_history)}"
+    )
+    assert article_history[-1][1]["output"] == "ban cu article"
+
+    video_history = ds.read_history(_KEY, "content_output", "video", db_path=board.db_path)
+    assert len(video_history) == 1, "video là content_type Output Type MỚI chọn -> PHẢI được sinh"
+    assert video_history[-1][1]["status"] == "DONE"
+
+
+def test_run_reapprove_without_force_never_regenerates_content_burns_no_llm():
+    """Ca ĐỐI CHỨNG bắt buộc theo TASK-031: APPROVE lại bình thường (KHÔNG
+    chọn "Xử lý lại" trên Sheet -> ingest_context_from_sheet() KHÔNG gắn cờ
+    force -> produce_from_sheet.run() KHÔNG nhận tham số `force`) PHẢI giữ
+    hành vi idempotent CŨ — topic đã DONE cả 3 loại KHÔNG version mới nào,
+    KHÔNG đốt tiền LLM. Writer (article) là đường có gate $0 CỨNG
+    (write_article, tính TRƯỚC run_brief/Writer) -- PoisonWriterLLM chứng minh
+    KHÔNG bị gọi. video/infographic dùng Mock mặc định (hành vi pre-existing
+    "vẫn thử sinh rồi vứt nếu đã seen" của existing_content_keys() KHÔNG đổi
+    bởi TASK-031, ngoài phạm vi vá lần này) -- vẫn phải giữ ĐÚNG 1 version."""
+    from store import document_store as ds
+    from twmkt.curation.keys import compute_topic_key
+
+    class _PoisonWriterLLM:
+        def complete(self, *a, **kw):
+            raise AssertionError("APPROVE lại bình thường (không force) -> Writer KHÔNG được gọi")
+
+    _URL = "https://example.com/bai-approve-lai-binh-thuong"
+    _KEY = compute_topic_key(_URL)
+    row = _approved_row("Bài APPROVE lại bình thường", row=2, source=_URL)
+
+    _r, board, _n = _run_produce_scenario(
+        _PoisonWriterLLM(), row,
+        pre_seed_content=[
+            (_KEY, "article", {"status": "DONE", "output": "a", "notes": "", "facts": "[]"}),
+            (_KEY, "infographic", {"status": "DONE", "output": "i", "notes": "", "facts": "[]"}),
+            (_KEY, "video", {"status": "DONE", "output": "v", "notes": "", "facts": "[]"}),
+        ],
+        run_kwargs={"topic_keys": [_KEY], "limit": 1})   # KHÔNG truyền force
+
+    for type_, expected in (("article", "a"), ("infographic", "i"), ("video", "v")):
+        history = ds.read_history(_KEY, "content_output", type_, db_path=board.db_path)
+        assert len(history) == 1, f"{type_}: kỳ vọng ĐÚNG 1 version (KHÔNG chạy lại), thực tế {len(history)}"
+        assert history[-1][1]["output"] == expected
+    assert board.execute_updates.get(2) == "DONE"
+
+
+def test_cleanup_stale_output_removes_old_day_files_keeps_new_and_other_types(tmp_path):
+    """TASK-031 — `_cleanup_stale_output()` (dọn file output/<ngày cũ>/ của
+    lượt trước khi "Xử lý lại" ghi bản mới, assumption #1 của Lead): xoá ĐÚNG
+    file CÙNG (slug, type_) ở thư mục NGÀY KHÁC, GIỮ NGUYÊN file `keep` (nếu
+    tình cờ trùng đường dẫn) và file content_type KHÁC CÙNG slug."""
+    import sys, os
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+    import produce_from_sheet as pfs
+    from twmkt.config import Settings
+
+    settings = Settings({"storage": {"data_root": str(tmp_path)}})
+    old_dir = tmp_path / "output" / "2026-08-07"
+    new_dir = tmp_path / "output" / "2026-08-13"
+    old_dir.mkdir(parents=True)
+    new_dir.mkdir(parents=True)
+
+    stale_article = old_dir / "bai-test-article.md"
+    stale_article.write_text("ban cu", encoding="utf-8")
+    other_type_same_day = old_dir / "bai-test-infographic.json"
+    other_type_same_day.write_text("khong lien quan", encoding="utf-8")
+    keep = new_dir / "bai-test-article.md"
+
+    removed = pfs._cleanup_stale_output(settings, "bai-test", "article", keep=keep)
+
+    assert removed == 1
+    assert not stale_article.exists()          # file CŨ cùng loại -- bị xoá
+    assert other_type_same_day.exists()        # content_type KHÁC -- GIỮ NGUYÊN
+    assert not keep.exists()                   # hàm này KHÔNG tự ghi -- chỉ dọn trước khi caller write_text()
+
+
 def test_run_retries_channel_after_error_not_stuck_forever_nafoods_bug():
     """SỬA LỖI THẬT (2026-08-03, Lead báo qua ca "Nafoods Group") —
     existing_content_keys() TRƯỚC ĐÂY coi content_output ERROR/NEEDS_HUMAN là
@@ -9798,6 +9934,61 @@ def test_queue_worker_run_once_claims_processes_and_marks_done(monkeypatch, tmp_
 
     row = qs.list_queue(db_path=db_path)[0]
     assert row["status"] == "done"
+
+
+def test_queue_worker_run_once_passes_force_when_job_payload_has_it(monkeypatch, tmp_path):
+    """TASK-031 — job mang payload {"force": true} (gắn bởi ingest_context_
+    from_sheet() khi người chọn "Xử lý lại") -> run_once() PHẢI truyền
+    force={topic_key} xuống produce_from_sheet.run(). Đây là chỗ DUY NHẤT nối
+    tín hiệu force từ hàng đợi sang run() thật."""
+    from store import document_store as ds
+    from store import queue_store as qs
+    from twmkt.config import Settings
+
+    qw = _queue_worker_module()
+    db_path = tmp_path / "store.db"
+    monkeypatch.setenv("DOCUMENT_STORE_PATH", str(db_path))
+    ds.init_db(db_path)
+    qs.enqueue("tk-1", payload={"force": True}, db_path=db_path)
+
+    called = []
+
+    def _fake_run(*, topic_keys, limit, force=None):
+        called.append((topic_keys, limit, force))
+        return {"approved": 1, "produced": 1}
+
+    monkeypatch.setattr(qw.produce_from_sheet, "run", _fake_run)
+
+    handled = qw.run_once(settings=Settings({}), worker_id="test-worker")
+    assert handled is True
+    assert called == [(["tk-1"], 1, {"tk-1"})]
+
+
+def test_queue_worker_run_once_omits_force_kwarg_for_normal_job(monkeypatch, tmp_path):
+    """ĐỐI CHỨNG: job KHÔNG mang force (rerun bình thường/APPROVE lại) -> lời
+    gọi run() GIỮ NGUYÊN chữ ký cũ (topic_keys, limit) — KHÔNG kèm kwarg
+    `force` -- tránh mọi hiểu lầm ngầm định "hễ có job là ép chạy lại"."""
+    from store import document_store as ds
+    from store import queue_store as qs
+    from twmkt.config import Settings
+
+    qw = _queue_worker_module()
+    db_path = tmp_path / "store.db"
+    monkeypatch.setenv("DOCUMENT_STORE_PATH", str(db_path))
+    ds.init_db(db_path)
+    qs.enqueue("tk-1", db_path=db_path)
+
+    called = []
+
+    def _fake_run(*, topic_keys, limit):   # KHÔNG chấp nhận `force` -- lỗi ngay nếu bị truyền
+        called.append((topic_keys, limit))
+        return {"approved": 1, "produced": 1}
+
+    monkeypatch.setattr(qw.produce_from_sheet, "run", _fake_run)
+
+    handled = qw.run_once(settings=Settings({}), worker_id="test-worker")
+    assert handled is True
+    assert called == [(["tk-1"], 1)]
 
 
 def test_queue_worker_run_once_marks_failed_when_run_raises(monkeypatch, tmp_path):

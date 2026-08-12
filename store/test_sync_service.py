@@ -947,6 +947,111 @@ def test_ingest_context_from_sheet_does_not_enqueue_when_gate1_still_pending(boa
     assert qs.list_queue(db_path=db_path) == []
 
 
+# =============================================================================
+# TASK-031 — "Xử lý lại" (GATE1_REPROCESS): giá trị thứ 5 của Gate 1, ép chạy
+# lại kể cả topic đã DONE (khác "APPROVE lại bình thường", không tự re-run
+# nếu đã DONE — xem produce_from_sheet.existing_content_keys()).
+# =============================================================================
+
+def test_ingest_context_from_sheet_reprocess_normalizes_gate1_to_approve(board, db_path):
+    """Sau ingest, store PHẢI thấy gate1="APPROVE" (KHÔNG lưu literal "Xử lý
+    lại" -- state machine không có state riêng cho giá trị này, xem assumption
+    #3 TASK-031: "gate1 quay về APPROVE y hệt lượt bình thường")."""
+    from twmkt.sheets_board import GATE1_REPROCESS
+
+    ps.write_raw("tk-1", {"context": "Bài 1", "hook": "h", "source": "u1",
+                          "tickers": [], "group": "", "topic": ""}, db_path=db_path)
+    ps.write_gate_status("tk-1", gate1="APPROVE", execute="DONE", output_type=["Article"], db_path=db_path)
+
+    board._tab("CONTEXT").set_rows(_ctx_row(gate1=GATE1_REPROCESS, output_type="Article"))
+    ss.ingest_context_from_sheet(board, db_path=db_path)
+
+    gate = ps.read_gate_status("tk-1", db_path=db_path)
+    assert gate["gate1"] == "APPROVE"
+    assert gate["execute"] == "Waiting"
+
+
+def test_ingest_context_from_sheet_reprocess_enqueues_job_with_force_payload(board, db_path):
+    """Job MỚI vào hàng đợi PHẢI mang payload force=True -- queue_worker.py
+    đọc lại field này để truyền `force` xuống produce_from_sheet.run(), khác
+    hẳn job rerun bình thường (payload rỗng)."""
+    import json as _json
+    from twmkt.sheets_board import GATE1_REPROCESS
+
+    ps.write_raw("tk-1", {"context": "Bài 1", "hook": "h", "source": "u1",
+                          "tickers": [], "group": "", "topic": ""}, db_path=db_path)
+    ps.write_gate_status("tk-1", gate1="APPROVE", execute="DONE", output_type=["Article"], db_path=db_path)
+
+    board._tab("CONTEXT").set_rows(_ctx_row(gate1=GATE1_REPROCESS, output_type="Article"))
+    ss.ingest_context_from_sheet(board, db_path=db_path)
+
+    job = qs.find_pending("tk-1", job_type="produce", db_path=db_path)
+    assert job is not None and job["status"] == "queued"
+    assert _json.loads(job["payload_json"]) == {"force": True}
+
+
+def test_ingest_context_from_sheet_reprocess_reruns_even_when_gate1_already_approve_same_output_type(board, db_path):
+    """Khác rerun bình thường (chỉ enqueue khi gate1 CHUYỂN sang APPROVE hoặc
+    Output Type đổi) -- "Xử lý lại" PHẢI enqueue dù gate1 đã ĐANG APPROVE VÀ
+    Output Type GIỮ NGUYÊN (ca "lượt trước lỗi, thử lại y hệt" -- không đổi gì
+    khác ngoài việc chọn "Xử lý lại")."""
+    from twmkt.sheets_board import GATE1_REPROCESS
+
+    ps.write_raw("tk-1", {"context": "Bài 1", "hook": "h", "source": "u1",
+                          "tickers": [], "group": "", "topic": ""}, db_path=db_path)
+    ps.write_gate_status("tk-1", gate1="APPROVE", execute="FAILED", output_type=["Article"], db_path=db_path)
+
+    board._tab("CONTEXT").set_rows(_ctx_row(gate1=GATE1_REPROCESS, output_type="Article"))
+    n = ss.ingest_context_from_sheet(board, db_path=db_path)
+
+    assert n == 1   # vẫn ghi version mới (execute Waiting) dù gate1/output_type không đổi
+    job = qs.find_pending("tk-1", job_type="produce", db_path=db_path)
+    assert job is not None and job["status"] == "queued"
+
+
+def test_ingest_context_from_sheet_reprocess_cancels_stale_pending_job_before_enqueue(board, db_path):
+    """Job CŨ (nếu còn sót lại ở trạng thái 'queued', KHÔNG mang force=True) bị
+    huỷ TRƯỚC KHI enqueue job MỚI -- nếu không, enqueue() dedup theo topic_key+
+    job_type sẽ trả về job CŨ (không force), khiến produce_from_sheet.run()
+    KHÔNG BAO GIỜ nhận được force=True cho topic này."""
+    import json as _json
+    from twmkt.sheets_board import GATE1_REPROCESS
+
+    ps.write_raw("tk-1", {"context": "Bài 1", "hook": "h", "source": "u1",
+                          "tickers": [], "group": "", "topic": ""}, db_path=db_path)
+    ps.write_gate_status("tk-1", gate1="APPROVE", execute="Waiting", output_type=["Article"], db_path=db_path)
+    old_job_id = qs.enqueue("tk-1", job_type="produce", request_id="req-cu-truoc-reprocess", db_path=db_path)
+
+    board._tab("CONTEXT").set_rows(_ctx_row(gate1=GATE1_REPROCESS, output_type="Article"))
+    ss.ingest_context_from_sheet(board, db_path=db_path)
+
+    jobs = qs.list_queue(db_path=db_path)
+    old = [j for j in jobs if j["id"] == old_job_id]
+    new = [j for j in jobs if j["id"] != old_job_id]
+    assert old and old[0]["status"] == "cancelled"
+    assert new and new[0]["status"] == "queued"
+    assert _json.loads(new[0]["payload_json"]) == {"force": True}
+
+
+def test_ingest_context_from_sheet_normal_reapprove_never_carries_force_payload(board, db_path):
+    """ĐỐI CHỨNG: APPROVE lại bình thường (Gate 1 rời APPROVE rồi APPROVE lại,
+    KHÔNG qua "Xử lý lại") vẫn enqueue (hành vi cũ, không đổi) NHƯNG payload
+    PHẢI rỗng -- KHÔNG lẫn cờ force=True, tránh mọi topic re-approve bình
+    thường vô tình bị coi là "ép chạy lại"."""
+    import json as _json
+
+    ps.write_raw("tk-1", {"context": "Bài 1", "hook": "h", "source": "u1",
+                          "tickers": [], "group": "", "topic": ""}, db_path=db_path)
+    ps.write_gate_status("tk-1", gate1="PENDING", execute="DONE", output_type=["Article"], db_path=db_path)
+
+    board._tab("CONTEXT").set_rows(_ctx_row(gate1="APPROVE", output_type="Article"))
+    ss.ingest_context_from_sheet(board, db_path=db_path)
+
+    job = qs.find_pending("tk-1", job_type="produce", db_path=db_path)
+    assert job is not None and job["status"] == "queued"
+    assert _json.loads(job["payload_json"]) == {}
+
+
 def test_ingest_context_from_sheet_does_not_double_enqueue_across_two_ingest_runs(board, db_path):
     """Chạy ingest 2 LẦN liên tiếp trên CÙNG trạng thái Sheet (vd sync_all()
     gọi lặp, hay poll ngắn chạy xen giữa lúc worker CHƯA kịp claim job) -- lần

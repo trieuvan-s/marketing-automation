@@ -184,6 +184,20 @@ _GATE1_KEY = GATE1_COL.lower()   # dùng cho .index()/so sánh header đã lower
 _GATE2_KEY = GATE2_COL.lower()
 _GATE3_KEY = GATE3_COL.lower()
 
+# TASK-031 (2026-08-13, quyết định chủ dự án) — giá trị THỨ 5 của GATE1_COL
+# (cùng hàng PENDING/APPROVE/REJECT/DELETE), CHỌN KÈM Output Type mong muốn.
+# Khác "APPROVE lại bình thường" (không tự re-run nếu topic đã DONE, xem
+# store/pipeline_store.existing_content_keys()) -- "Xử lý lại" là tín hiệu
+# TƯỜNG MINH "coi lượt trước như CHƯA xong", store/sync_service.py::
+# ingest_context_from_sheet() đọc giá trị này, chuẩn hoá gate1 lưu trong store
+# về "APPROVE" (state machine KHÔNG có trạng thái riêng cho giá trị này) +
+# enqueue job kèm payload force=True, xem scripts/produce_from_sheet.py::run()
+# tham số `force`. Dropdown Sheet PRODUCTION đã CỐ Ý không set qua code (xem
+# comment "Duyệt Context ... CỐ Ý KHÔNG ghi setDataValidation" dưới hàm
+# _sheet_requests) -- thêm giá trị này vào dropdown là việc TAY của Lead trên
+# Sheet thật, xem handoffs/TASK-031-agent-a.md.
+GATE1_REPROCESS = "Xử lý lại"
+
 # P2 store-as-truth Bước 4 (2026-07-25) — "Output Type": ĐẦU VÀO giới hạn Content
 # Factory (chỉ sinh loại được người chọn, xem produce_from_sheet.py::run() —
 # tra _wanted_types()). Giá trị hợp lệ (OUTPUT_TYPE_VALUES): Article ·

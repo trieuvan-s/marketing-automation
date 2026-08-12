@@ -153,7 +153,16 @@ def run_once(*, settings, worker_id: str, board=None) -> bool:
             # trên job chỉ để truy vết "ai kích hoạt lượt render này".
             render_production_assets.run()
         else:
-            produce_from_sheet.run(topic_keys=[job["topic_key"]], limit=1)
+            # TASK-031 — payload force=True (gắn lúc enqueue bởi
+            # ingest_context_from_sheet() khi người chọn "Xử lý lại" ở Gate 1)
+            # -> truyền `force` xuống run() để BỎ QUA existing_content_keys()
+            # cho ĐÚNG topic này. KHÔNG truyền kwarg `force` khi job KHÔNG có
+            # cờ này (tường minh — giữ nguyên chữ ký gọi cũ cho rerun bình
+            # thường, tránh mọi hiểu lầm "APPROVE lại là ép chạy lại").
+            run_kwargs = {"topic_keys": [job["topic_key"]], "limit": 1}
+            if (job.get("payload") or {}).get("force"):
+                run_kwargs["force"] = {job["topic_key"]}
+            produce_from_sheet.run(**run_kwargs)
         qs.mark_done(job["id"])
         print(f"[queue-worker] Job #{job['id']} DONE (dispatch) — xem gate_status.execute "
              f"trên Sheet cho kết quả NGHIỆP VỤ thật (DONE/FAILED/NEEDS_HUMAN).")

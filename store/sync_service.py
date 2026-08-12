@@ -40,8 +40,9 @@ from __future__ import annotations
 
 from twmkt.sheets_board import (  # noqa: F401
     _col_a1, _display_notes_business, raw_content_type,
-    CONTENT_HEADER, CONTEXT_HEADER, EXECUTE_WAITING, GATE1_COL, GATE2_COL, GATE3_COL,
-    OUTPUT_TYPE_COL, SheetsBoard, content_row, context_row, facts_to_json,
+    CONTENT_HEADER, CONTEXT_HEADER, EXECUTE_WAITING, GATE1_COL, GATE1_REPROCESS,
+    GATE2_COL, GATE3_COL, OUTPUT_TYPE_COL, SheetsBoard, content_row, context_row,
+    facts_to_json,
 )
 
 from . import document_store as ds
@@ -563,6 +564,16 @@ def ingest_context_from_sheet(board: SheetsBoard, *, db_path=None) -> int:
         if not topic_key:
             continue   # dòng chưa có TopicKey (vd chưa backfill) -- bỏ qua, KHÔNG đoán khoá
         sheet_gate1 = _cell(row, i_g1) or "PENDING"
+        # TASK-031 — "Xử lý lại" (GATE1_REPROCESS) là tín hiệu TƯỜNG MINH ép
+        # sản xuất lại (kể cả topic đã DONE, kể cả CÙNG Output Type), KHÁC
+        # "APPROVE lại bình thường" (không tự chạy lại topic đã DONE, xem
+        # store/pipeline_store.existing_content_keys()). Chuẩn hoá về "APPROVE"
+        # NGAY TẠI ĐÂY -- gate_status trong store KHÔNG có state riêng cho giá
+        # trị này (list_approved_topics() chỉ nhận "APPROVE"); is_reprocess giữ
+        # lại để enqueue kèm payload force=True bên dưới.
+        is_reprocess = sheet_gate1 == GATE1_REPROCESS
+        if is_reprocess:
+            sheet_gate1 = "APPROVE"
         sheet_notes = _cell(row, i_notes)
         sheet_execute = _cell(row, i_ex).upper()
         sheet_output_type = [t.strip() for t in _cell(row, i_ot).split(",") if t.strip()]
@@ -678,20 +689,31 @@ def ingest_context_from_sheet(board: SheetsBoard, *, db_path=None) -> int:
         # infographic thay vì article") — phải coi nó là tín hiệu chạy lại
         # ngang hàng với việc bấm APPROVE.
         output_type_changed = "output_type" in updates
-        rerun = sheet_gate1 == "APPROVE" and (prev_gate1 != "APPROVE" or output_type_changed)
+        # TASK-031 — "Xử lý lại" LUÔN là rerun, kể cả khi gate1 đã ĐANG
+        # APPROVE và Output Type không đổi (ca "lượt trước lỗi, thử lại y hệt"
+        # — output_type_changed=False thì không sao, is_reprocess tự đứng ra
+        # làm tín hiệu, KHÔNG phụ thuộc "có chuyển tiếp Gate 1" như rerun
+        # thường, vì gate1 đã bị chuẩn hoá về "APPROVE" ngay từ đầu vòng lặp).
+        rerun = is_reprocess or (
+            sheet_gate1 == "APPROVE" and (prev_gate1 != "APPROVE" or output_type_changed))
 
         # HUỶ YÊU CẦU (2026-07-28): người RÚT lại (APPROVE -> PENDING/REJECT)
         # hoặc ĐỔI Output Type. Cả hai đều làm job đang xếp hàng trở nên vô
         # nghĩa — nó sẽ sinh nội dung theo yêu cầu người vừa bỏ. Huỷ job
         # 'queued'; job 'claimed' cứ chạy hết (xem queue_store.cancel_pending).
+        # "Xử lý lại" CŨNG phải huỷ job cũ (nếu có sót lại) TRƯỚC khi enqueue
+        # job force MỚI — nếu không, enqueue() dedup theo topic_key+job_type sẽ
+        # trả về job CŨ (không có payload force=True) thay vì tạo job mới.
         left_approve = prev_gate1 == "APPROVE" and sheet_gate1 != "APPROVE"
-        if left_approve or output_type_changed:
+        if left_approve or output_type_changed or is_reprocess:
             n = qs.cancel_pending(
                 topic_key, job_type="produce", db_path=db_path,
-                reason=("Gate 1 rút khỏi APPROVE" if left_approve else "Output Type đổi"))
+                reason=("Gate 1 rút khỏi APPROVE" if left_approve
+                        else "Xử lý lại (Gate 1)" if is_reprocess
+                        else "Output Type đổi"))
             if n:
                 print(f"[sync] Huỷ {n} job chờ của {topic_key[:8]} "
-                      f"({'rút duyệt' if left_approve else 'đổi Output Type'}).")
+                      f"({'rút duyệt' if left_approve else 'Xử lý lại' if is_reprocess else 'đổi Output Type'}).")
             if left_approve:
                 # VIỆC Execute (2026-08-03, Lead) — rút duyệt đưa cờ về "" (mới
                 # crawl/chưa duyệt), KHÔNG phải "Waiting" (TRƯỚC ĐÂY dùng
@@ -718,8 +740,15 @@ def ingest_context_from_sheet(board: SheetsBoard, *, db_path=None) -> int:
         # Đảo thứ tự thì ca xấu nhất là có job mà store chưa kịp ghi — lần
         # ingest sau bắt lại transition, `enqueue()` tự dedup nên không nhân đôi.
         if rerun:
+            # payload force=True (TASK-031) -- queue_worker.py đọc lại field
+            # này lúc claim job, truyền xuống produce_from_sheet.run(force=...)
+            # để BỎ QUA existing_content_keys() CHỈ cho topic này (KHÔNG áp
+            # dụng ngầm cho rerun thường — người chỉ APPROVE lại/đổi Output
+            # Type KHÔNG được coi là "ép chạy lại", tránh đốt tiền LLM vô cớ).
             qs.enqueue(topic_key, job_type="produce",
-                       request_id=qs.new_request_id(), db_path=db_path)
+                       request_id=qs.new_request_id(),
+                       payload=({"force": True} if is_reprocess else None),
+                       db_path=db_path)
         if updates:
             ps.write_gate_status(topic_key, db_path=db_path, **updates)
             writes += 1
