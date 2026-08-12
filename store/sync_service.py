@@ -318,25 +318,77 @@ def _cell(row: list[str], i: int | None) -> str:
     return row[i].strip() if i is not None and i < len(row) else ""
 
 
+# --- CAS theo timestamp cho cột NGƯỜI-SỞ-HỮU của CONTEXT (TASK-030) ---------
+# BUG THẬT đã tái lập (TASK-029, tests/test_race_render_ingest.py): render
+# đọc 1 ẢNH CHỤP store (vd store TẠM CŨ do 1 job KHÁC kích, đọc TRƯỚC khi
+# 1 lượt ingest khác kịp ghi APPROVE) rồi ghi đè VÔ ĐIỀU KIỆN 3 cột người-sở-
+# hữu (Duyệt Context/Notes/Output Type) — nuốt mất APPROVE người vừa bấm nếu
+# ảnh chụp đó cũ hơn. `gate_status` đã append-only + có `created_at` mỗi
+# version SẴN (document_store.py) -- không cần đổi schema để vá.
+_GATE1_CELL = lambda payload: payload.get("gate1", "PENDING")   # noqa: E731
+_NOTES_CELL = lambda payload: payload.get("notes", "")   # noqa: E731
+_OUTPUT_TYPE_CELL = lambda payload: ", ".join(payload.get("output_type") or ["AUTO"])   # noqa: E731
+
+
+def _cas_user_value(history: list[tuple[int, dict, str]], field_cell, sheet_current: str | None, store_latest: str) -> str:
+    """CAS THEO TIMESTAMP cho 1 cột NGƯỜI-SỞ-HỮU. `history` = `ds.read_history()`
+    của gate_status (version tăng dần, MỖI version có sẵn `created_at`).
+    `sheet_current=None` -- dòng CHƯA có trên Sheet (topic mới/dòng vừa mất)
+    -> ghi tự do, không có gì để bảo vệ. Giống `store_latest` -> không xung
+    đột. KHÁC NHAU -> CHỈ ghi đè khi CHỨNG MINH ĐƯỢC: giá trị hiện có trên
+    Sheet KHỚP đúng 1 version CŨ HƠN (created_at bé hơn) version mới nhất
+    trong lịch sử -- bằng chứng store đã tiến xa hơn giá trị Sheet đang hiện
+    (vd Sheet bị reset/xoá nhầm, đây CHÍNH LÀ đường phục hồi Bước 5.4). KHÔNG
+    khớp version nào (giá trị Sheet chưa từng xuất hiện trong lịch sử ẢNH
+    CHỤP đang đọc -- đúng kịch bản race TASK-029: ảnh chụp cũ chưa hề thấy
+    version APPROVE mà 1 tiến trình khác vừa ghi) -> KHÔNG chứng minh được
+    nguồn gốc -> GIỮ NGUYÊN ô Sheet (thiên lệch an toàn, xem docstring module:
+    ô chậm vài giây là phiền, thao tác người bị nuốt là mất dữ liệu)."""
+    if not history or sheet_current is None or sheet_current == store_latest:
+        return store_latest
+    latest_created_at = history[-1][2]
+    for _version, payload, created_at in reversed(history[:-1]):
+        if created_at <= latest_created_at and field_cell(payload) == sheet_current:
+            return store_latest
+    return sheet_current
+
+
 # =============================================================================
 # store -> Sheet (render, idempotent, = lệnh phục hồi)
 # =============================================================================
 
 def render_context_to_sheet(board: SheetsBoard, *, db_path=None, settings=None) -> int:
-    """Dựng lại TOÀN BỘ tab CONTEXT từ store — bao gồm CẢ Duyệt Context/Notes,
-    đọc THẲNG từ gate_status (KHÔNG đọc lại giá trị hiện có trên Sheet trước
-    khi xoá — store, KHÔNG PHẢI Sheet, là nguồn sự thật cho 2 cột người-sở-
-    hữu này). Đây CHÍNH LÀ điều kiện để lệnh phục hồi (Bước 5.4) đúng: ingest
-    ĐÃ ghi thao tác người vào gate_status TRƯỚC khi Sheet bị xoá/render lại —
-    nếu render còn dựa vào Sheet hiện tại làm "giữ nguyên", xoá Sheet TRƯỚC
-    khi ingest kịp chạy sẽ làm mất thao tác đó (đã tự phát hiện qua
-    test_sync_all_full_recovery_after_accidental_deletion khi viết hàm này —
-    lỗi thật, không phải giả định)."""
+    """Dựng lại TOÀN BỘ tab CONTEXT từ store — bao gồm CẢ Duyệt Context/Notes/
+    Output Type, đọc THẲNG từ gate_status. 3 cột NGƯỜI-SỞ-HỮU này KHÔNG còn
+    ghi đè vô điều kiện (TASK-030, vá race render/ingest) -- đi qua CAS theo
+    timestamp (`_cas_user_value()`, xem docstring): so giá trị store với giá
+    trị HIỆN CÓ trên Sheet trước khi ghi, chỉ ghi đè khi chứng minh được store
+    mới hơn. Đây VẪN là điều kiện để lệnh phục hồi (Bước 5.4) đúng — Sheet bị
+    xoá/reset về giá trị CŨ HƠN (khớp 1 version quá khứ trong lịch sử) vẫn bị
+    CAS cho phép ghi đè, vì store CHỨNG MINH ĐƯỢC đã tiến xa hơn (xem
+    test_sync_all_full_recovery_after_accidental_deletion + test chiều ngược
+    lại trong tests/test_race_render_ingest.py)."""
+    existing_header, existing_rows = _read_sheet_rows(board, "CONTEXT")
+    i_sheet_key = _col_index(existing_header, "TopicKey")
+    i_sheet_g1 = _col_index(existing_header, GATE1_COL)
+    i_sheet_notes = _col_index(existing_header, "Notes")
+    i_sheet_ot = _col_index(existing_header, OUTPUT_TYPE_COL)
+    sheet_by_key: dict[str, list[str]] = {}
+    if i_sheet_key is not None:
+        for r in existing_rows:
+            tk = _cell(r, i_sheet_key)
+            if tk:
+                sheet_by_key[tk] = r
+
+    i_out_g1 = CONTEXT_HEADER.index(GATE1_COL)
+    i_out_notes = CONTEXT_HEADER.index("Notes")
+    i_out_ot = CONTEXT_HEADER.index(OUTPUT_TYPE_COL)
+
     keyed_rows: list[tuple[str, list[str]]] = []
     for topic_key in ds.list_topics(layer="raw", db_path=db_path):
         raw = ps.read_raw(topic_key, db_path=db_path) or {}
         gate = ps.read_gate_status(topic_key, db_path=db_path)
-        keyed_rows.append((topic_key, context_row(
+        row = context_row(
             title=raw.get("context", ""), hook_line=raw.get("hook", ""),
             source_url=raw.get("source", ""),
             score=int(raw.get("score", 0) or 0), hot_pct=float(raw.get("hot_pct", 0.0) or 0.0),
@@ -348,7 +400,8 @@ def render_context_to_sheet(board: SheetsBoard, *, db_path=None, settings=None) 
             # thái: "" = mới crawl, CHƯA qua Gate 1 (chưa có gì để chờ) khác
             # "Waiting" = ĐÃ duyệt, đang xếp hàng. Hiển thị ĐÚNG giá trị store
             # (ingest_context_from_sheet() đã tự set "Waiting" đúng lúc Gate 1
-            # chuyển APPROVE — xem đó), không tự đoán/ép ở đây nữa.
+            # chuyển APPROVE — xem đó), không tự đoán/ép ở đây nữa. Execute là
+            # cột HỆ THỐNG sở hữu hoàn toàn (worker ghi) -- KHÔNG qua CAS.
             execute=gate.get("execute", ""),
             topic_key=topic_key, notes=gate.get("notes", ""),
             output_type=gate.get("output_type") or [],
@@ -358,7 +411,21 @@ def render_context_to_sheet(board: SheetsBoard, *, db_path=None, settings=None) 
             # biệt được tin ngày nào — đúng thứ Lead cần để lọc/nhóm theo ngày.
             # `raw["timestamp"]` ghi MỘT LẦN lúc ingest đầu, không đổi về sau.
             ts=raw.get("timestamp") or None,
-        )))
+        )
+
+        sheet_row = sheet_by_key.get(topic_key)
+        gate_history = ds.read_history(topic_key, "gate_status", "", db_path=db_path)
+        row[i_out_g1] = _cas_user_value(
+            gate_history, _GATE1_CELL,
+            _cell(sheet_row, i_sheet_g1) if sheet_row is not None else None, row[i_out_g1])
+        row[i_out_notes] = _cas_user_value(
+            gate_history, _NOTES_CELL,
+            _cell(sheet_row, i_sheet_notes) if sheet_row is not None else None, row[i_out_notes])
+        row[i_out_ot] = _cas_user_value(
+            gate_history, _OUTPUT_TYPE_CELL,
+            _cell(sheet_row, i_sheet_ot) if sheet_row is not None else None, row[i_out_ot])
+
+        keyed_rows.append((topic_key, row))
 
     i_ts = CONTEXT_HEADER.index("Timestamp")
     visible = {id(r) for r in _visible_rows([r for _, r in keyed_rows], i_ts, settings=settings)}

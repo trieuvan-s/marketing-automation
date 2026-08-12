@@ -174,10 +174,19 @@ def test_regression_stale_render_snapshot_overwrites_approve_before_next_ingest(
         r for r in grid_after_stale_render[1:]
         if r[_header_index(header, "TopicKey")] == topic_key
     )
-    assert row_after_stale[i_g1] == "PENDING", (
-        "lượt render (đọc ảnh chụp store CŨ) phải ghi đè ô Sheet về PENDING -- "
-        "nếu assertion này tự nó đã fail thì bối cảnh race CHƯA được dựng đúng, "
-        "không phải bug đang được kiểm ở dưới"
+    # SỬA (TASK-030, xem handoffs/TASK-030-agent-b.md) -- bản TASK-029 kỳ vọng
+    # "PENDING" ở đây (chứng minh code CHƯA VÁ ghi đè vô điều kiện). Sau khi vá
+    # bằng CAS theo timestamp (store/sync_service.py::_cas_user_value()), ĐÂY
+    # CHÍNH LÀ ĐIỂM bản vá chặn đứng bug: ảnh chụp store CŨ (chỉ thấy version
+    # PENDING, CHƯA từng thấy version APPROVE) không chứng minh được nó MỚI
+    # HƠN giá trị "APPROVE" đang có trên Sheet -> giữ nguyên, KHÔNG ghi đè.
+    # Assertion đổi hướng 180 độ: giờ xác nhận NGAY TẠI ĐÂY ô Sheet PHẢI CÒN
+    # "APPROVE" (không đợi tới bước ingest kế tiếp mới phát hiện gián tiếp).
+    assert row_after_stale[i_g1] == "APPROVE", (
+        "BUG THẬT nếu fail (CAS không hoạt động): lượt render dùng ảnh chụp "
+        "store CŨ (chỉ thấy PENDING, chưa từng thấy APPROVE) đã ghi đè ô Sheet "
+        "-- đúng lỗ hổng TASK-028 Triệu chứng 3, bản vá TASK-030 phải chặn "
+        "được ngay ở bước này."
     )
 
     # --- 5. "Ingest kế tiếp đọc ô đã bị đè" -- HÀM PRODUCTION THẬT, db_path
@@ -187,11 +196,13 @@ def test_regression_stale_render_snapshot_overwrites_approve_before_next_ingest(
     # --- KIỂM: đây là 2 hệ quả BUG THẬT đã xác nhận trên document_store.db
     # sản xuất ngày 2026-08-08 (handoffs/TASK-028-agent-b.md, Triệu chứng 3).
     # Assertion mô tả hành vi ĐÚNG (KHÔNG được mất APPROVE, KHÔNG được huỷ job
-    # oan) -- code hiện tại (chưa vá) sẽ FAIL cả hai, đúng ý "test ĐỎ chứng
-    # minh bug có thật".
+    # oan) -- giờ đây là hệ quả TẤT YẾU của bước 4 đã đứng vững ở trên (Sheet
+    # chưa từng bị đè về PENDING nên ingest này không có gì để "phát hiện rút
+    # duyệt" nữa); giữ 2 assertion này làm lưới an toàn KIỂM TRA ĐẦU CUỐI, độc
+    # lập với chi tiết cài đặt của _cas_user_value().
     final_gate1 = ps.read_gate_status(topic_key, db_path=db_path)["gate1"]
     assert final_gate1 == "APPROVE", (
-        f"BUG THẬT (regression, CHƯA VÁ): race giữa render (ảnh chụp store CŨ) và "
+        f"BUG THẬT (regression, chưa vá đúng): race giữa render (ảnh chụp store CŨ) và "
         f"ingest kế tiếp đã xoá mất APPROVE người vừa duyệt -- gate1 hiện = "
         f"{final_gate1!r}, đúng cơ chế TASK-028 Triệu chứng 3 (ngày 2026-08-08, "
         f"3/4 job APPROVE bị mất theo đúng cách này)."
@@ -200,18 +211,28 @@ def test_regression_stale_render_snapshot_overwrites_approve_before_next_ingest(
     job_after = [j for j in qs.list_queue(db_path=db_path) if j["topic_key"] == topic_key]
     cancelled = [j for j in job_after if j["status"] == "cancelled"]
     assert not cancelled, (
-        f"BUG THẬT (regression, CHƯA VÁ): job bị cancel_pending() huỷ OAN vì "
+        f"BUG THẬT (regression, chưa vá đúng): job bị cancel_pending() huỷ OAN vì "
         f"race trên, lý do lưu trong DB: {[j.get('error') for j in cancelled]!r} "
         f"(khớp nguyên văn 'Gate 1 rút khỏi APPROVE' đã thấy trên job #95-97 "
         f"thật -- xem handoffs/TASK-028-agent-b.md)."
     )
 
-    # --- Nhật ký thứ tự lệnh đọc/ghi (yêu cầu hợp đồng TASK-029) -- ít nhất 2
-    # lượt "update" trên CONTEXT (render lần đầu + render chen ngang) phải có
-    # mặt, xác nhận trình tự thật đã được ép đúng như mô tả, không phải suy
-    # diễn từ tên biến.
-    update_calls = [c for c in board.calls if c == ("update", "CONTEXT")]
-    assert len(update_calls) >= 2, (
-        f"kỳ vọng >=2 lượt ghi CONTEXT (render đầu + render chen ngang bằng ảnh "
-        f"chụp cũ), log thật={board.calls}"
+    # --- Nhật ký thứ tự lệnh đọc/ghi (yêu cầu hợp đồng TASK-029) -- SỬA
+    # (TASK-030, xem handoff): bản TASK-029 đếm lượt "update" trên CONTEXT, kỳ
+    # vọng >=2 (render đầu + render chen ngang). Sau khi vá bằng CAS, render
+    # chen ngang ở kịch bản NÀY tạo ra 1 dòng giống HỆT dòng Sheet hiện có (CAS
+    # đã giữ nguyên APPROVE thay vì ghi PENDING đè lên) -- _write_rows() (có từ
+    # trước, VIỆC 2026-08-02) CHỦ ĐỘNG bỏ qua update() cho dòng không đổi, nên
+    # đếm "update" không còn phản ánh đúng "2 lượt render đã xảy ra" nữa (số
+    # lượng >=2 có thể tình cờ đạt được chỉ từ 1 lượt render, vì mỗi lượt vốn
+    # đã tách header/data thành 2 lệnh update riêng -- không còn là bằng chứng
+    # có ý nghĩa cho "render chen ngang có xảy ra"). Đổi sang đếm
+    # "get_all_values" -- CAS (`_cas_user_value`) BẮT BUỘC đọc lại Sheet hiện
+    # tại trước khi quyết định ghi, nên mỗi lượt render giờ đọc CONTEXT >=2 lần
+    # (1 lần cho CAS so khớp, 1 lần _write_rows() dùng để diff) -- đây MỚI là
+    # bằng chứng trực tiếp "2 lượt render đã thật sự chạy", không suy diễn.
+    read_calls = [c for c in board.calls if c == ("get_all_values", "CONTEXT")]
+    assert len(read_calls) >= 4, (
+        f"kỳ vọng >=4 lượt đọc CONTEXT (2 lượt render x >=2 lượt đọc/lượt -- CAS "
+        f"so khớp + _write_rows() diff), log thật={board.calls}"
     )
