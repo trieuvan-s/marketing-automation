@@ -423,6 +423,21 @@ _NUMBER_DISCIPLINE = (
 _MAGNITUDE_RE = re.compile(
     r"\d[\d.,]*\s*(?:%|tỷ đồng|nghìn tỷ|tỷ|triệu|usd|đồng)", re.IGNORECASE)
 
+# TASK-027 (Guardrail HAI TẦNG) — Tầng 1: bù ca THẬT gặp trên evidence full-
+# fetch (vd vietnambiz.vn, xem docs/hypotheses/2026-08-12-guardrail-hai-tang.md):
+# HTML->markdown đôi khi chèn khoảng trắng LẠC giữa từng ký tự số ("7 , 7 7 tỷ
+# cổ phiếu" thay vì "7,77 tỷ cổ phiếu", "41 ,7 triệu" thay vì "41,7 triệu") —
+# _MAGNITUDE_RE (\d[\d.,]*, KHÔNG cho khoảng trắng giữa các ký tự) bỏ lọt hoàn
+# toàn, khiến Composer viết ĐÚNG số "7,77 tỷ" bị báo ĐỘNG GIẢ "bịa số". Regex
+# này NỚI để bắt được cụm đó — CHỈ dùng quét evidence/background (KHÔNG áp cho
+# body, Composer luôn viết số liền mạch) và CHỈ khớp khi cụm digit/dấu-tách
+# liền NHAU (không xen chữ) NGAY SAU LÀ đơn vị — an toàn với enumeration kiểu
+# "Phân khu 2, 4 và 9, cùng 350 tỷ đồng" (chữ "và"/"cùng" xen giữa chặn match,
+# xem test_unsupported_numbers_spaced_digit_*).
+_SPACED_MAGNITUDE_RE = re.compile(
+    r"\d(?:[ \t]*[.,]?[ \t]*\d)*[ \t]*(?:%|tỷ đồng|nghìn tỷ|tỷ|triệu|usd|đồng)",
+    re.IGNORECASE)
+
 
 @dataclass
 class ProductionBrief:
@@ -472,8 +487,13 @@ def _normalize_number(token: str) -> str:
     phân cách, bất kể kiểu viết: evidence gốc hay để dấu CHẤM thập phân kiểu
     quốc tế ("12.61%" — dữ liệu bảng/HOSE), trong khi Writer viết đúng chuẩn
     tiếng Việt bằng dấu PHẨY ("12,61%") — không chuẩn hoá thì 2 chuỗi này
-    KHÁC NHAU dù CÙNG 1 con số, gây báo sai 'bịa số'."""
-    return re.sub(r"[.,]", "", token.lower().strip())
+    KHÁC NHAU dù CÙNG 1 con số, gây báo sai 'bịa số'.
+
+    TASK-027 (Tầng 1): CŨNG bỏ khoảng trắng (thêm '\\s' vào lớp ký tự bỏ) —
+    "thống nhất dấu thập phân" CHỈ đủ nếu 2 vế không lệch nhau ở khoảng trắng
+    NỘI BỘ cụm số; ca thật evidence chèn khoảng trắng lạc giữa ký tự số (xem
+    _SPACED_MAGNITUDE_RE) cần bước này để so khớp ra bằng nhau."""
+    return re.sub(r"[.,\s]", "", token.lower().strip())
 
 
 _DEFAULT_APPROX_TOLERANCE = 0.05   # Mục C: nới ≤5% CHỈ KHI số TRONG BÀI đi kèm từ xấp xỉ
@@ -530,9 +550,13 @@ def unsupported_numbers(body: str, source_text: str, content_units: list[Content
          Việt) mà KHÔNG coi là bịa số, miễn CHỮ SỐ giống hệt.
       3. Mục C (Phase 4.8): khớp SỐ HỌC với 1 fact.canonical_value trong dung
          sai (0% mặc định; ≤ approx_tolerance nếu số trong bài đi kèm từ xấp
-         xỉ) — `content_units` rỗng/None -> bước này no-op, hành vi y hệt trước Mục C."""
+         xỉ) — `content_units` rỗng/None -> bước này no-op, hành vi y hệt trước Mục C.
+      4. TASK-027 (Tầng 1): CŨNG khớp token bắt được qua _SPACED_MAGNITUDE_RE
+         (evidence bị chèn khoảng trắng lạc giữa ký tự số, xem docstring regex
+         đó) — dùng CHUNG _normalize_number nên tự động gộp bước 2."""
     low = source_text.lower()
     evidence_norm = {_normalize_number(m.group(0)) for m in _MAGNITUDE_RE.finditer(source_text)}
+    evidence_norm |= {_normalize_number(m.group(0)) for m in _SPACED_MAGNITUDE_RE.finditer(source_text)}
     content_units = content_units or []
     bad, seen = [], set()
     for m in _MAGNITUDE_RE.finditer(body):
@@ -549,20 +573,92 @@ def unsupported_numbers(body: str, source_text: str, content_units: list[Content
     return bad
 
 
+def _fact_source_tokens(source_sentence: str) -> set[str]:
+    """TASK-027 (Tầng 2) — set số CHUẨN HOÁ trích từ `source_sentence` (CÂU
+    NGUYÊN VĂN của 1 ContentUnit, field `source` — xem models.ContentUnit).
+    Gộp CẢ _MAGNITUDE_RE lẫn _SPACED_MAGNITUDE_RE (cùng lý do Tầng 1 — câu
+    nguồn cũng trích từ evidence full-fetch, có thể dính cùng lỗi chèn khoảng
+    trắng)."""
+    tokens = {_normalize_number(m.group(0)) for m in _MAGNITUDE_RE.finditer(source_sentence)}
+    tokens |= {_normalize_number(m.group(0)) for m in _SPACED_MAGNITUDE_RE.finditer(source_sentence)}
+    return tokens
+
+
+def _anchor_fact_count(tok: str, start: int, body: str, content_units: list[ContentUnit],
+                       tolerance: float) -> int:
+    """TASK-027 (Tầng 2) — đếm SỐ content_units mà `tok` (số TRONG BODY, tại vị
+    trí `start`) neo được: literal (chuẩn hoá) trong CÂU NGUỒN của CHÍNH fact đó
+    (`f.source`, xem _fact_source_tokens) HOẶC khớp canonical số học CỦA RIÊNG
+    fact đó (tái dùng _matches_canonical_fact — NHƯNG xét TỪNG fact 1 LÚC, khác
+    _matches_canonical_fact gọi trực tiếp ở unsupported_numbers xét CẢ danh sách
+    cùng lúc). Xét riêng từng fact để phân biệt "neo ĐÚNG 1 câu" khỏi "khớp số
+    học trùng hợp ở NHIỀU fact khác nhau" — xem unanchored_numbers/vi_sao_hai_tang
+    trong TASK-027 contract."""
+    return sum(
+        1 for f in content_units
+        if _normalize_number(tok) in _fact_source_tokens(f.source)
+        or _matches_canonical_fact(tok, body, start, [f], tolerance)
+    )
+
+
+def unanchored_numbers(body: str, content_units: list[ContentUnit] | None = None, *,
+                       approx_tolerance: float = _DEFAULT_APPROX_TOLERANCE) -> list[str]:
+    """TẦNG 2 (TASK-027) — CẢNH BÁO, KHÔNG chặn. Số liệu trong `body` KHÔNG neo
+    được về ĐÚNG MỘT CÂU nguồn qua content_units[].source: 0 câu = không fact
+    nào trích ra số này (dù có mặt đâu đó trong toàn văn bài gốc — lỗ hổng Tầng
+    1 sau khi nới sang toàn văn, xem module docstring "vi_sao_hai_tang" +
+    docs/hypotheses/2026-08-12-guardrail-hai-tang.md); >1 câu KHÁC NHAU = mơ
+    hồ, không rõ số đang neo vào dữ kiện nào. Hàm THUẦN, dùng bởi apply_
+    guardrails() — kết quả trả về đây TUYỆT ĐỐI KHÔNG được gộp vào
+    compliance_issues/draft.is_clean (cam kết TASK-027: 'KHÔNG để tầng 2 chặn').
+    `content_units` rỗng/None -> [] (không có fact nào để neo, không có cơ sở
+    để cảnh báo — tránh ngập cảnh báo vô nghĩa khi Brief chưa/không trích
+    được content_units)."""
+    content_units = content_units or []
+    if not content_units:
+        return []
+    warn, seen = [], set()
+    for m in _MAGNITUDE_RE.finditer(body):
+        tok = m.group(0)
+        key = tok.lower().strip()
+        if key in seen:
+            continue
+        if _anchor_fact_count(tok, m.start(), body, content_units, approx_tolerance) != 1:
+            seen.add(key)
+            warn.append(tok)
+    return warn
+
+
 def apply_guardrails(draft: ContentDraft, evidence: str, background: str = "",
                      content_units: list[ContentUnit] | None = None, *,
-                     approx_tolerance: float = _DEFAULT_APPROX_TOLERANCE) -> ContentDraft:
+                     approx_tolerance: float = _DEFAULT_APPROX_TOLERANCE, title: str = "") -> ContentDraft:
     """Chạy compliance.check (disclaimer/claim cấm) + chặn bịa số (evidence +
     background gộp lại — background = bối cảnh Claude Code research thêm khi
     viết; `content_units` (agents/brief.py, tuỳ chọn) cho phép số làm tròn hợp lý khớp
     canonical, xem unsupported_numbers). Gắn draft.compliance_issues
-    (Status=ERROR nếu vi phạm). Trả lại draft."""
+    (Status=ERROR nếu vi phạm). Trả lại draft.
+
+    TASK-027 (Guardrail HAI TẦNG):
+      Tầng 1 (CHẶN, không đổi cơ chế — chỉ nới vế `source_text`): `title` (tuỳ
+      chọn, mặc định "" — 100% tương thích ngược cho call site CHƯA truyền,
+      xem scope allowed_paths TASK-027 không gồm writer.py/scripts/) nối vào
+      ĐẦU `source_text` cùng evidence/background, hiện thực "TOÀN VĂN bài gốc
+      = tiêu đề + thân bài" đúng thiết kế chốt.
+      Tầng 2 (CẢNH BÁO, KHÔNG chặn): gắn draft.numeric_anchor_warnings — ATTRIBUTE
+      ĐỘNG, KHÔNG PHẢI field khai báo trong ContentDraft (models.py NGOÀI
+      scope.allowed_paths của TASK-027, xem contract) — để KHÔNG đổi
+      draft.is_clean/Status ERROR ở scripts/produce_from_sheet.py (cũng ngoài
+      scope, forbidden_paths). Wiring THẬT vào cột Notes trên Sheet (không đổi
+      Status) là việc của 1 task SAU, chạm scripts/ (hiện bị cấm ở đây) — xem
+      sheets_board.append_anchor_warnings() cho phần dịch/format đã chuẩn bị sẵn."""
     issues = compliance.check(draft)
-    source_text = f"{evidence}\n{background}"
-    if source_text.strip():   # infographic trích số THẲNG từ evidence -> luôn rỗng, bỏ qua vô ích
+    source_text = f"{title}\n{evidence}\n{background}".strip()
+    if source_text:   # infographic trích số THẲNG từ evidence -> luôn rỗng, bỏ qua vô ích
         issues += [f"Số liệu không thấy trong evidence/background: {t}" for t in
                    unsupported_numbers(draft.body, source_text, content_units, approx_tolerance=approx_tolerance)]
     draft.compliance_issues = issues
+    draft.numeric_anchor_warnings = unanchored_numbers(draft.body, content_units,
+                                                        approx_tolerance=approx_tolerance)
     return draft
 
 

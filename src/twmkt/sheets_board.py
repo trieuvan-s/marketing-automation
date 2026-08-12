@@ -445,6 +445,14 @@ _NOTES_WHOLE_MARKERS = (
 # Guardrail (agents/production.apply_guardrails) — số bịa/không khớp nguồn,
 # CÓ giá trị động (vd "28%") nên KHÔNG thể map tĩnh qua notes_messages.
 _PCT_MISMATCH_RE = re.compile(r"Số liệu không thấy trong evidence/background:\s*([^\s;|]+)")
+
+# TASK-027 (Guardrail HAI TẦNG) — Tầng 2 (agents/production.unanchored_numbers,
+# gắn ở draft.numeric_anchor_warnings, KHÔNG đi qua draft.compliance_issues —
+# xem docstring apply_guardrails). Regex/marker để dịch câu cảnh báo này sang
+# tiếng Việt nghiệp vụ NẾU 1 task SAU (chạm scripts/, ngoài scope TASK-027) nối
+# nó vào Notes — chuẩn bị sẵn ở đây, CHƯA wire vào luồng ghi Sheet thật.
+_ANCHOR_WARNING_PREFIX = "CẢNH BÁO neo câu (không chặn):"
+_ANCHOR_WARNING_RE = re.compile(re.escape(_ANCHOR_WARNING_PREFIX) + r"\s*([^\s;|]+)")
 # Router từ chối 1 tuyến (produce_from_sheet._channel_skip_reason) — GIỮ
 # rationale (đã là câu tiếng Việt tự nhiên do Router/LLM viết), chỉ thay PHẦN
 # ĐẦU kỹ thuật ("FORMAT_MISMATCH: Router quyết định tuyến X không hợp tin
@@ -472,6 +480,9 @@ def _translate_notes_clause(clause: str, messages: dict) -> str:
     m = _PCT_MISMATCH_RE.search(clause)
     if m:
         return f"Số liệu {m.group(1)} trong bài không có trong nguồn"
+    m = _ANCHOR_WARNING_RE.search(clause)
+    if m:
+        return f"Số liệu {m.group(1)} chưa neo rõ về đúng 1 câu nguồn — CẢNH BÁO, không chặn, nên kiểm lại tay"
     m = _ROUTER_DECLINE_RE.match(clause.strip())
     if m:
         loai = _ROUTER_DECLINE_CHANNEL_VI.get(m.group(1), m.group(1))
@@ -505,6 +516,23 @@ def _display_notes_business(notes: str) -> str:
             translated = messages.get("GENERIC_FALLBACK", _DEFAULT_VI_NOTES_MESSAGES["GENERIC_FALLBACK"])
         out_clauses.append(translated)
     return "; ".join(out_clauses)
+
+
+def append_anchor_warnings(notes: str, warnings: list[str]) -> str:
+    """TASK-027 (Tầng 2) — nối `draft.numeric_anchor_warnings` (agents/
+    production.unanchored_numbers) vào `notes` sẵn có, dùng CÙNG dấu nối "; "
+    với compliance_issues (khớp _display_notes_business()). CHỈ ghép CHUỖI —
+    KHÔNG đụng Status (ERROR/DONE tính từ draft.is_clean/compliance_issues ở
+    scripts/produce_from_sheet.py, NGOÀI scope TASK-027) nên gọi hàm này KHÔNG
+    BAO GIỜ tự làm 1 dòng từ DONE hoá ERROR — đây chính là cơ chế hiện thực
+    "ghi CẢNH BÁO vào Notes, KHÔNG chặn". CHƯA có call site (wiring vào
+    _write_content thật là việc của task SAU, chạm scripts/, hiện bị cấm ở
+    TASK-027) — hàm THUẦN, test trực tiếp qua append_anchor_warnings() +
+    _display_notes_business(). `warnings` rỗng -> trả `notes` y nguyên."""
+    if not warnings:
+        return notes
+    clauses = [f"{_ANCHOR_WARNING_PREFIX} {tok}" for tok in warnings]
+    return "; ".join([notes, *clauses]) if notes else "; ".join(clauses)
 
 
 CONTEXT_HEADER = ["Timestamp", "Hot%", "Score", "Group", "Topic", "Context", "Hook",

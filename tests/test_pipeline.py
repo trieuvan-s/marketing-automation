@@ -303,23 +303,46 @@ def test_resolve_sheet_id_default_returns_test_sheet_never_production():
 
 
 def test_resolve_sheet_id_allow_production_true_returns_production():
+    import os
+
     from twmkt.config import Settings, resolve_sheet_id
 
     s = Settings({"sheets": {"spreadsheet_id": "PROD-ID", "test_spreadsheet_id": "TEST-ID"}})
-    assert resolve_sheet_id(s, allow_production=True) == "PROD-ID"
+    # resolve_sheet_id() đọc TWMKT_SHEET_ID từ ENV trước Settings — cô lập ENV
+    # thật (vd phiên vận hành TASK-020 trỏ sheet production) để test không bị
+    # rò rỉ giá trị ngoài ý muốn.
+    old = os.environ.get("TWMKT_SHEET_ID")
+    try:
+        os.environ.pop("TWMKT_SHEET_ID", None)
+        assert resolve_sheet_id(s, allow_production=True) == "PROD-ID"
+    finally:
+        if old is None:
+            os.environ.pop("TWMKT_SHEET_ID", None)
+        else:
+            os.environ["TWMKT_SHEET_ID"] = old
 
 
 def test_resolve_sheet_id_allow_production_true_but_missing_production_id_raises():
+    import os
+
     from twmkt.config import ProductionSheetBlocked, Settings, resolve_sheet_id
 
     s = Settings({"sheets": {"spreadsheet_id": "", "test_spreadsheet_id": "TEST-ID"}})
+    old = os.environ.get("TWMKT_SHEET_ID")
     try:
-        resolve_sheet_id(s, allow_production=True)
-    except ProductionSheetBlocked:
-        pass
-    else:
-        raise AssertionError("Thiếu spreadsheet_id production nhưng allow_production=True "
-                             "PHẢI raise, KHÔNG được lùi về sheet test.")
+        os.environ.pop("TWMKT_SHEET_ID", None)
+        try:
+            resolve_sheet_id(s, allow_production=True)
+        except ProductionSheetBlocked:
+            pass
+        else:
+            raise AssertionError("Thiếu spreadsheet_id production nhưng allow_production=True "
+                                 "PHẢI raise, KHÔNG được lùi về sheet test.")
+    finally:
+        if old is None:
+            os.environ.pop("TWMKT_SHEET_ID", None)
+        else:
+            os.environ["TWMKT_SHEET_ID"] = old
 
 
 def test_resolve_sheet_id_env_test_sheet_override():
@@ -12354,3 +12377,253 @@ def test_aigen_seam_missing_npm_gives_actionable_error(tmp_path, monkeypatch):
 
     res = seam.run_aigen_pipeline(tmp_path / "content-output.json", aigen_repo_path=tmp_path)
     assert not res.ok and "PATH" in res.error
+
+
+# --- TASK-027 — Guardrail HAI TẦNG (Tầng 1 CHẶN toàn văn + Tầng 2 CẢNH BÁO ---
+# neo câu qua fact.source). Fixture DƯỚI ĐÂY lấy TỪ BÀI THẬT trong store
+# (D:/trung-temp/marketing-database/marketing-automation/documents/...) —
+# xem docs/hypotheses/2026-08-12-guardrail-hai-tang.md cho nguồn gốc + đo
+# TRƯỚC/SAU đầy đủ (4 ô). Ca "sai ngữ cảnh" (bắt buộc dựng tay theo contract)
+# lấy SỐ THẬT từ 2 bài trên nhưng TỰ VIẾT câu gắn sai ngữ cảnh.
+
+# Excerpt THẬT (rút gọn, giữ NGUYÊN VĂN từng ký tự) từ cafef.vn — BSR xuất bán
+# diesel sinh học B5 + KQKD 6 tháng đầu năm 2026 (documents/2026-08-08/
+# 7def460f581a318c.json).
+_BSR_EVIDENCE_REAL = (
+    "Hoạt động mở rộng danh mục sản phẩm diễn ra trong bối cảnh kết quả kinh "
+    "doanh của BSR tăng mạnh. Trong 6 tháng đầu năm 2026, BSR ghi nhận doanh "
+    "thu hợp nhất 100.922 tỷ đồng, tăng 47% so với cùng kỳ năm trước. Lợi "
+    "nhuận sau thuế đạt 12.636 tỷ đồng, gấp gần 7 lần mức 1.884 tỷ đồng của "
+    "cùng kỳ năm 2025. Doanh nghiệp cũng nộp ngân sách Nhà nước 5.871 tỷ "
+    "đồng. Riêng quý II/2026, BSR đạt doanh thu hơn 55.000 tỷ đồng, tăng 50% "
+    "so với cùng kỳ; lợi nhuận sau thuế đạt 4.097 tỷ đồng, tăng hơn 384%. "
+    "Năm 2026, doanh nghiệp đặt kế hoạch doanh thu hợp nhất 154.140 tỷ đồng "
+    "và lợi nhuận sau thuế 2.162 tỷ đồng."
+)
+_BSR_TITLE_REAL = ("Nhà máy lọc dầu doanh thu hơn 100.000 tỷ của Việt Nam lần "
+                   "đầu tiên xuất bán một loại nhiên liệu mới")
+
+# Excerpt THẬT (rút gọn, giữ NGUYÊN VĂN — kể cả khoảng trắng LẠC bên trong cụm
+# số "7 , 7 7"/"41 ,7", lỗi trích xuất HTML->markdown THẬT gặp trên
+# vietnambiz.vn) — documents/2026-08-07/a83da1256c1b951d.json.
+_CTG_EVIDENCE_REAL = (
+    "Theo cơ cấu cổ đông tại ngày 15/1/2026, cổ đông Nhà nước, với Ngân hàng "
+    "Nhà nước là cơ quan đại diện chủ sở hữu, nắm hơn 5 tỷ cổ phiếu CTG, "
+    "tương ứng 64,46% vốn VietinBank. Ngân hàng có tổng cộng 7 , 7 7 tỷ cổ "
+    "phiếu. Trên cơ cấu vốn hiện tại, để nâng tỷ lệ vốn N hà nước lên tối "
+    "thiểu 65%, lượng cổ phiếu thuộc sở hữu của cổ đông Nhà nước cần tăng "
+    "thêm 41 ,7 triệu đơn vị. Trên thị trường, cổ phiếu CTG kết phiên 7/8 "
+    "tại 32.500 đồng/cp, tăng 3,7% so với tham chiếu. Khối lượng khớp lệnh "
+    "đạt gần 15 triệu đơn vị. Tạm tính theo giá đóng cửa, lượng cổ phiếu "
+    "trên có giá trị quy đổi hơn 1.354 tỷ đồng. Bên cạnh cổ đông Nhà nước, "
+    "MUFG Bank đang sở hữu 1.228.981.747 cổ phiếu CTG, tương ứng 15,82% vốn "
+    "điều lệ."
+)
+
+
+# --- Tầng 1 — chuẩn hoá khoảng trắng nội bộ cụm số (_normalize_number) -----
+def test_normalize_number_strips_internal_whitespace():
+    from twmkt.agents.production import _normalize_number
+
+    assert _normalize_number("7 , 7 7 tỷ") == _normalize_number("7,77 tỷ") == "777tỷ"
+    assert _normalize_number("41 ,7 triệu") == _normalize_number("41,7 triệu") == "417triệu"
+
+
+def test_spaced_magnitude_re_does_not_merge_enumeration_across_words():
+    """AN TOÀN: enumeration THẬT ("Phân khu 2, 4 và 9, cùng 350 tỷ đồng" —
+    excerpt thật khác trong store) KHÔNG được gộp "2, 4" hay "9," thành 1 số —
+    chữ "và"/"cùng" xen giữa phải CHẶN _SPACED_MAGNITUDE_RE, chỉ "350 tỷ đồng"
+    (liền mạch, đơn giản) mới khớp."""
+    from twmkt.agents.production import _SPACED_MAGNITUDE_RE
+
+    text = "tại các Phân khu 2, 4 và 9, cùng 350 tỷ đồng vốn đầu tư."
+    toks = [m.group(0) for m in _SPACED_MAGNITUDE_RE.finditer(text)]
+    assert toks == ["350 tỷ đồng"]
+
+
+# --- Tầng 1 — báo động giả (ca THẬT, xem docs/hypotheses/...) --------------
+def test_unsupported_numbers_accepts_real_evidence_with_stray_whitespace_inside_digits():
+    """FP1 (THẬT, TASK-027): evidence CTG thật bị chèn khoảng trắng lạc giữa
+    ký tự số ("7 , 7 7 tỷ", "41 ,7 triệu") — TRƯỚC khi có _SPACED_MAGNITUDE_RE,
+    Composer viết ĐÚNG "7,77 tỷ"/"41,7 triệu" (liền mạch, chuẩn) vẫn bị báo
+    ĐỘNG GIẢ bịa số vì _MAGNITUDE_RE cũ không khớp qua khoảng trắng."""
+    from twmkt.agents.production import unsupported_numbers
+
+    body = ("VietinBank hiện có tổng cộng 7,77 tỷ cổ phiếu lưu hành. Để nâng "
+           "tỷ lệ sở hữu Nhà nước lên tối thiểu 65%, lượng cổ phiếu thuộc sở "
+           "hữu Nhà nước cần tăng thêm 41,7 triệu đơn vị.")
+    assert unsupported_numbers(body, _CTG_EVIDENCE_REAL) == []
+
+
+def test_apply_guardrails_title_param_covers_headline_only_figures():
+    """FP2 (THẬT, TASK-027): output video THẬT (2026-08-08) tái dùng NGUYÊN VĂN
+    tiêu đề bài gốc làm hero/narration — tiêu đề làm tròn "hơn 100.000 tỷ"
+    trong khi THÂN BÀI chỉ có số CHÍNH XÁC "100.922 tỷ đồng" (content_units
+    rỗng — đường LEGACY, không có canonical để vớt). Thiếu tiêu đề trong
+    source_text -> báo ĐỘNG GIẢ; nối tiêu đề vào (`title=`) -> sạch."""
+    from twmkt.agents.production import apply_guardrails
+    from twmkt.models import ContentDraft, ContentFormat
+
+    body = _BSR_TITLE_REAL   # đúng NGUYÊN VĂN hero/narration trong output THẬT
+    without_title = ContentDraft(fmt=ContentFormat.INFOGRAPHIC, title="t", body=body)
+    apply_guardrails(without_title, _BSR_EVIDENCE_REAL, content_units=[])
+    assert not without_title.is_clean
+    assert any("100.000" in i for i in without_title.compliance_issues)
+
+    with_title = ContentDraft(fmt=ContentFormat.INFOGRAPHIC, title="t", body=body)
+    apply_guardrails(with_title, _BSR_EVIDENCE_REAL, content_units=[], title=_BSR_TITLE_REAL)
+    assert with_title.is_clean
+
+
+def test_unsupported_numbers_stays_clean_on_real_bsr_quarterly_figures_control():
+    """FP3 (THẬT, kiểm soát KHÔNG hồi quy) — số liệu quý II BSR viết lại đúng,
+    liền mạch (không dính lỗi khoảng trắng) — PHẢI sạch cả TRƯỚC lẫn SAU."""
+    from twmkt.agents.production import unsupported_numbers
+
+    body = ("BSR ghi nhận doanh thu quý II/2026 hơn 55.000 tỷ đồng, tăng 50% "
+           "so với cùng kỳ; lợi nhuận sau thuế 4.097 tỷ đồng, tăng hơn 384%.")
+    assert unsupported_numbers(body, _BSR_EVIDENCE_REAL) == []
+
+
+def test_unsupported_numbers_stays_clean_on_real_ctg_price_figures_control():
+    """FP4 (THẬT, kiểm soát KHÔNG hồi quy) — số liệu giá CTG viết lại đúng,
+    liền mạch — PHẢI sạch cả TRƯỚC lẫn SAU."""
+    from twmkt.agents.production import unsupported_numbers
+
+    body = ("Cổ phiếu CTG đóng cửa phiên 7/8 ở mức 32.500 đồng, tăng 3,7% so "
+           "với tham chiếu, khối lượng khớp lệnh gần 15 triệu đơn vị, giá trị "
+           "giao dịch quy đổi hơn 1.354 tỷ đồng.")
+    assert unsupported_numbers(body, _CTG_EVIDENCE_REAL) == []
+
+
+# --- Tầng 2 — cảnh báo neo câu qua fact.source (ca DỰNG TAY, BẮT BUỘC) -----
+def _src_fact(canonical, source, label="y", value="x"):
+    from twmkt.models import ContentUnit
+    return ContentUnit(value=value, label=label, canonical_value=canonical, source=source)
+
+
+def test_unanchored_numbers_catches_number_never_extracted_as_any_fact_wc1():
+    """WC1 (sai ngữ cảnh, dựng tay — số THẬT từ bài BSR): content_units chỉ
+    trích lợi nhuận 6 tháng (12.636 tỷ) + nộp ngân sách (5.871 tỷ) — Composer
+    gán NHẦM số mục tiêu CẢ NĂM 2026 (2.162 tỷ, KHÔNG được trích thành fact
+    nào) làm lợi nhuận 6 tháng. Tầng 1 (toàn văn) cho qua vì "2.162 tỷ đồng"
+    LÀ substring thật của bài gốc (ở câu khác) -> Tầng 2 PHẢI bắt (neo 0 câu)."""
+    from twmkt.agents.production import unanchored_numbers, unsupported_numbers
+
+    content_units = [
+        _src_fact(12.636e9, "Lợi nhuận sau thuế đạt 12.636 tỷ đồng.", label="LNST BSR 6T/2026"),
+        _src_fact(5.871e9, "Doanh nghiệp cũng nộp ngân sách Nhà nước 5.871 tỷ đồng.",
+                 label="Nộp ngân sách NN BSR 6T/2026"),
+    ]
+    body = "Trong 6 tháng đầu năm 2026, BSR ghi nhận lợi nhuận sau thuế 2.162 tỷ đồng."
+    assert unsupported_numbers(body, _BSR_EVIDENCE_REAL, content_units) == []   # Tầng 1 cho qua (đúng thiết kế)
+    warn = unanchored_numbers(body, content_units)
+    assert any("2.162" in w for w in warn)   # Tầng 2 bắt được
+
+
+def test_unanchored_numbers_catches_number_never_extracted_as_any_fact_wc3():
+    """WC3 (sai ngữ cảnh, dựng tay — số THẬT từ bài BSR) — cùng dạng lỗi WC1
+    nhưng ở cặp doanh thu: gán số MỤC TIÊU CẢ NĂM (154.140 tỷ, không có fact)
+    làm doanh thu 6 tháng THẬT. "47%" dùng ĐÚNG ngữ cảnh trong cùng câu vẫn
+    PHẢI sạch (không lây báo động giả sang số dùng đúng)."""
+    from twmkt.agents.production import unanchored_numbers, unsupported_numbers
+
+    content_units = [
+        _src_fact(100.922e9, "BSR ghi nhận doanh thu hợp nhất 100.922 tỷ đồng, tăng 47% so với cùng "
+                            "kỳ năm trước.", label="Doanh thu hợp nhất BSR 6T/2026"),
+        _src_fact(55e9, "Riêng quý II/2026, BSR đạt doanh thu hơn 55.000 tỷ đồng, tăng 50% so với "
+                       "cùng kỳ.", label="Doanh thu BSR quý II/2026"),
+    ]
+    body = "BSR ghi nhận doanh thu hợp nhất 154.140 tỷ đồng trong 6 tháng đầu năm 2026, tăng 47% so với cùng kỳ."
+    assert unsupported_numbers(body, _BSR_EVIDENCE_REAL, content_units) == []
+    warn = unanchored_numbers(body, content_units)
+    assert any("154.140" in w for w in warn)   # số sai ngữ cảnh -> cảnh báo
+    assert not any("47%" in w for w in warn)   # số dùng ĐÚNG (khớp fact doanh thu 6T) -> KHÔNG cảnh báo oan
+
+
+def test_unanchored_numbers_known_gap_same_sentence_entity_swap_wc2():
+    """WC2 (sai ngữ cảnh, dựng tay — số THẬT từ bài CTG) — GIỚI HẠN ĐÃ BIẾT
+    (ghi vào docs/hypotheses/...): Composer gán nhầm số sở hữu của CỔ ĐÔNG NHÀ
+    NƯỚC (5 tỷ cp, 64,46%) cho MUFG — cả 2 số đều neo ĐÚNG 1 câu (câu của fact
+    Nhà nước) nên Tầng 2 (chỉ đếm SỐ câu neo, không so khớp nhãn/thực thể)
+    KHÔNG bắt được — test này XÁC NHẬN giới hạn, không phải regression."""
+    from twmkt.agents.production import unanchored_numbers
+
+    content_units = [
+        _src_fact(5e9, "cổ đông Nhà nước, với Ngân hàng Nhà nước là cơ quan đại diện chủ sở hữu, "
+                     "nắm hơn 5 tỷ cổ phiếu CTG, tương ứng 64,46% vốn VietinBank.",
+                 label="Sở hữu Nhà nước tại VietinBank"),
+        _src_fact(1228981747, "MUFG Bank đang sở hữu 1.228.981.747 cổ phiếu CTG, tương ứng 15,82% "
+                            "vốn điều lệ.", label="Sở hữu MUFG tại VietinBank"),
+    ]
+    body = "MUFG Bank hiện nắm hơn 5 tỷ cổ phiếu CTG, tương ứng 64,46% vốn điều lệ VietinBank."
+    warn = unanchored_numbers(body, content_units)
+    assert warn == []   # GIỚI HẠN ĐÃ BIẾT: neo đúng 1 câu (đúng SỐ, sai THỰC THỂ) -> lọt
+
+
+def test_unanchored_numbers_known_gap_same_sentence_period_swap_wc4():
+    """WC4 (sai ngữ cảnh, dựng tay — số THẬT từ bài BSR) — cùng nhóm giới hạn
+    WC2: gán %tăng trưởng 6 tháng (47%) cho câu nói về quý II (đáng lẽ 50%) —
+    "47%" vẫn neo đúng 1 câu (câu 6 tháng) nên KHÔNG bị cảnh báo."""
+    from twmkt.agents.production import unanchored_numbers
+
+    content_units = [
+        _src_fact(47, "BSR ghi nhận doanh thu hợp nhất 100.922 tỷ đồng, tăng 47% so với cùng kỳ "
+                    "năm trước.", label="Tăng trưởng doanh thu BSR 6T/2026"),
+        _src_fact(50, "Riêng quý II/2026, BSR đạt doanh thu hơn 55.000 tỷ đồng, tăng 50% so với "
+                    "cùng kỳ.", label="Tăng trưởng doanh thu BSR quý II/2026"),
+    ]
+    body = "Quý II/2026, BSR ghi nhận doanh thu tăng 47% so với cùng kỳ."
+    warn = unanchored_numbers(body, content_units)
+    assert warn == []   # GIỚI HẠN ĐÃ BIẾT — xem WC2
+
+
+def test_unanchored_numbers_noop_when_content_units_empty():
+    """content_units rỗng/None -> [] (không có fact nào để neo, tránh ngập
+    cảnh báo vô nghĩa khi Brief chưa/không trích được content_units — cùng
+    triết lý no-op của _matches_canonical_fact khi content_units rỗng)."""
+    from twmkt.agents.production import unanchored_numbers
+
+    assert unanchored_numbers("Lãi tăng 40% so với cùng kỳ.", []) == []
+    assert unanchored_numbers("Lãi tăng 40% so với cùng kỳ.", None) == []
+
+
+def test_apply_guardrails_tier2_warns_but_never_blocks_cam_ket():
+    """Cam kết TASK-027: 'KHÔNG để tầng 2 chặn'. draft.numeric_anchor_warnings
+    (attribute ĐỘNG — models.ContentDraft KHÔNG khai báo field này, NGOÀI
+    scope.allowed_paths TASK-027) PHẢI khác rỗng ở ca WC1, nhưng draft.is_clean
+    vẫn PHẢI True (compliance_issues KHÔNG được nhận thêm gì từ Tầng 2)."""
+    from twmkt.agents.production import apply_guardrails
+    from twmkt.models import ContentDraft, ContentFormat
+
+    content_units = [
+        _src_fact(12.636e9, "Lợi nhuận sau thuế đạt 12.636 tỷ đồng.", label="LNST BSR 6T/2026"),
+        _src_fact(5.871e9, "Doanh nghiệp cũng nộp ngân sách Nhà nước 5.871 tỷ đồng.",
+                 label="Nộp ngân sách NN BSR 6T/2026"),
+    ]
+    body = "Trong 6 tháng đầu năm 2026, BSR ghi nhận lợi nhuận sau thuế 2.162 tỷ đồng."
+    draft = ContentDraft(fmt=ContentFormat.INFOGRAPHIC, title="t", body=body)
+    apply_guardrails(draft, _BSR_EVIDENCE_REAL, content_units=content_units)
+    assert draft.is_clean   # Tầng 2 KHÔNG được chặn
+    assert draft.numeric_anchor_warnings and any("2.162" in w for w in draft.numeric_anchor_warnings)
+
+
+# --- sheets_board.py — chuẩn bị Notes/Vietnamese cho Tầng 2 (chưa wire vào
+# scripts/produce_from_sheet.py — ngoài scope TASK-027, xem contract) --------
+def test_append_anchor_warnings_merges_into_notes_string_only():
+    from twmkt.sheets_board import append_anchor_warnings
+
+    assert append_anchor_warnings("", []) == ""
+    assert append_anchor_warnings("Đã có lỗi khác", []) == "Đã có lỗi khác"
+    assert append_anchor_warnings("", ["2.162 tỷ đồng"]) == "CẢNH BÁO neo câu (không chặn): 2.162 tỷ đồng"
+    merged = append_anchor_warnings("Đã có lỗi khác", ["2.162 tỷ đồng"])
+    assert merged == "Đã có lỗi khác; CẢNH BÁO neo câu (không chặn): 2.162 tỷ đồng"
+
+
+def test_display_notes_business_translates_anchor_warning_to_editor_vietnamese():
+    from twmkt.sheets_board import _display_notes_business, append_anchor_warnings
+
+    notes = append_anchor_warnings("", ["2.162 tỷ đồng"])
+    shown = _display_notes_business(notes)
+    assert "2.162 tỷ đồng" in shown and "CẢNH BÁO" in shown
+    assert "fact.source" not in shown and "compliance_issues" not in shown   # không lộ thuật ngữ kỹ thuật
