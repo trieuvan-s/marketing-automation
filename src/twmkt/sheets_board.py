@@ -452,7 +452,12 @@ _PCT_MISMATCH_RE = re.compile(r"Số liệu không thấy trong evidence/backgro
 # tiếng Việt nghiệp vụ NẾU 1 task SAU (chạm scripts/, ngoài scope TASK-027) nối
 # nó vào Notes — chuẩn bị sẵn ở đây, CHƯA wire vào luồng ghi Sheet thật.
 _ANCHOR_WARNING_PREFIX = "CẢNH BÁO neo câu (không chặn):"
-_ANCHOR_WARNING_RE = re.compile(re.escape(_ANCHOR_WARNING_PREFIX) + r"\s*([^\s;|]+)")
+# Token số (vd "2.162 tỷ đồng") có thể chứa khoảng trắng NỘI BỘ — khác
+# _PCT_MISMATCH_RE (token luôn 1 khối liền, vd "28%"). Search chạy trên 1
+# CLAUSE ĐÃ TÁCH theo "; " (xem _display_notes_business) nên phần còn lại
+# sau prefix CHÍNH LÀ token, khớp tới hết chuỗi thay vì dừng ở khoảng trắng
+# đầu tiên.
+_ANCHOR_WARNING_RE = re.compile(re.escape(_ANCHOR_WARNING_PREFIX) + r"\s*(.+)$")
 # Router từ chối 1 tuyến (produce_from_sheet._channel_skip_reason) — GIỮ
 # rationale (đã là câu tiếng Việt tự nhiên do Router/LLM viết), chỉ thay PHẦN
 # ĐẦU kỹ thuật ("FORMAT_MISMATCH: Router quyết định tuyến X không hợp tin
