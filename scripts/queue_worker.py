@@ -89,10 +89,15 @@ def _sync_sheet(board) -> None:
     Ingest ngay trước mỗi lần render thu hẹp cửa sổ mất mát từ "cả lượt chạy
     job" (phút) xuống "giữa 2 lệnh gọi API liền nhau" (giây). CỬA SỔ NÀY VẪN
     CÒN — đóng hẳn cần render CHỈ các cột máy-sở-hữu thay vì clear+ghi cả tab,
-    xem ghi chú trong docs/VPS_MIGRATION_BACKLOG.md."""
+    xem ghi chú trong docs/VPS_MIGRATION_BACKLOG.md.
+
+    `rebuild=False` (TASK-032) -- lượt gọi này lặp lại SAU MỖI job, đúng kịch
+    bản có race thật giữa job KHÁC và ingest (TASK-029) nên PHẢI qua CAS
+    (`render_context_to_sheet()` mặc định BỎ QUA CAS từ TASK-032, xem docstring
+    hàm đó -- lối gọi trực tiếp/thủ công KHÔNG ingest trước mới dùng default)."""
     ss.ingest_context_from_sheet(board)
     ss.ingest_content_from_sheet(board)
-    ss.render_context_to_sheet(board)
+    ss.render_context_to_sheet(board, rebuild=False)
     ss.render_content_to_sheet(board)
 
 

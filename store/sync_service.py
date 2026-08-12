@@ -357,17 +357,43 @@ def _cas_user_value(history: list[tuple[int, dict, str]], field_cell, sheet_curr
 # store -> Sheet (render, idempotent, = lệnh phục hồi)
 # =============================================================================
 
-def render_context_to_sheet(board: SheetsBoard, *, db_path=None, settings=None) -> int:
+def render_context_to_sheet(board: SheetsBoard, *, db_path=None, settings=None, rebuild: bool = True) -> int:
     """Dựng lại TOÀN BỘ tab CONTEXT từ store — bao gồm CẢ Duyệt Context/Notes/
     Output Type, đọc THẲNG từ gate_status. 3 cột NGƯỜI-SỞ-HỮU này KHÔNG còn
-    ghi đè vô điều kiện (TASK-030, vá race render/ingest) -- đi qua CAS theo
-    timestamp (`_cas_user_value()`, xem docstring): so giá trị store với giá
-    trị HIỆN CÓ trên Sheet trước khi ghi, chỉ ghi đè khi chứng minh được store
-    mới hơn. Đây VẪN là điều kiện để lệnh phục hồi (Bước 5.4) đúng — Sheet bị
-    xoá/reset về giá trị CŨ HƠN (khớp 1 version quá khứ trong lịch sử) vẫn bị
-    CAS cho phép ghi đè, vì store CHỨNG MINH ĐƯỢC đã tiến xa hơn (xem
-    test_sync_all_full_recovery_after_accidental_deletion + test chiều ngược
-    lại trong tests/test_race_render_ingest.py)."""
+    ghi đè vô điều kiện MẶC ĐỊNH (TASK-030, vá race render/ingest) -- khi
+    `rebuild=False` đi qua CAS theo timestamp (`_cas_user_value()`, xem
+    docstring): so giá trị store với giá trị HIỆN CÓ trên Sheet trước khi ghi,
+    chỉ ghi đè khi chứng minh được store mới hơn.
+
+    TASK-032 -- `rebuild` (mặc định True) LÀ TÍN HIỆU TƯỜNG MINH bắt buộc phải
+    có, không suy luận được từ dữ liệu ô. Lý do: TASK-030 để lộ 1 mâu thuẫn
+    ngữ nghĩa thật -- khi gate_status của 1 topic CHỈ CÓ ĐÚNG 1 version (chưa
+    từng qua ingest thật, vd topic nạp thẳng bằng script/test), Sheet hiện giá
+    trị KHÁC store rơi vào ĐÚNG 1 nhánh "không version nào chứng minh được" của
+    `_cas_user_value()` -- và XÉT THUẦN TỪ (history, sheet_current,
+    store_latest), nhánh đó Y HỆT kịch bản race thật (TASK-029, xem
+    tests/test_race_render_ingest.py::test_regression_stale_render_snapshot_
+    overwrites_approve_before_next_ingest) mà CAS phải BẢO VỆ (giữ nguyên Sheet).
+    2 kịch bản chỉ khác nhau ở Ý ĐỊNH của lượt gọi -- không có cách phân biệt
+    bằng dữ liệu, y hệt bằng chứng đã thấy ở test_render_context_to_sheet_
+    without_prior_ingest_reflects_store_not_sheet (store/test_sync_service.py)
+    kỳ vọng store thắng cho ĐÚNG kịch bản dữ liệu đó. Do đó:
+
+      rebuild=True (MẶC ĐỊNH, hành vi CŨ trước TASK-030) -- BỎ QUA CAS hoàn
+        toàn cho 3 cột người-sở-hữu, store LUÔN thắng. Đây là lựa chọn AN TOÀN
+        cho lối gọi TRỰC TIẾP/thủ công KHÔNG chủ động ingest trước (test, lệnh
+        `scripts/sync_store_sheet.py --from-store`, script vá tay) -- đúng
+        đường phục hồi Bước 5.4 ("Sheet đang sai, muốn store thắng tuyệt đối").
+      rebuild=False -- CAS áp dụng (`_cas_user_value()`), bảo vệ thao tác
+        người khỏi bị 1 ảnh chụp store CŨ ghi đè (TASK-029). CHỈ 2 nơi cần
+        truyền rebuild=False, cả 2 đều là lượt sync TỰ ĐỘNG lặp lại (có race
+        thật giữa nhiều tiến trình): `scripts/queue_worker.py::_sync_sheet()`
+        và `sync_all()` bên dưới.
+
+    Đường phục hồi Bước 5.4 khi Sheet bị XOÁ (không phải "giá trị sai") không
+    phụ thuộc `rebuild` -- `sheet_row is None` luôn để store thắng vô điều kiện
+    (xem nhánh `sheet_current is None` trong `_cas_user_value()`), kể cả khi
+    `rebuild=False` (xem test_sync_all_full_recovery_after_accidental_deletion)."""
     existing_header, existing_rows = _read_sheet_rows(board, "CONTEXT")
     i_sheet_key = _col_index(existing_header, "TopicKey")
     i_sheet_g1 = _col_index(existing_header, GATE1_COL)
@@ -413,17 +439,21 @@ def render_context_to_sheet(board: SheetsBoard, *, db_path=None, settings=None) 
             ts=raw.get("timestamp") or None,
         )
 
-        sheet_row = sheet_by_key.get(topic_key)
-        gate_history = ds.read_history(topic_key, "gate_status", "", db_path=db_path)
-        row[i_out_g1] = _cas_user_value(
-            gate_history, _GATE1_CELL,
-            _cell(sheet_row, i_sheet_g1) if sheet_row is not None else None, row[i_out_g1])
-        row[i_out_notes] = _cas_user_value(
-            gate_history, _NOTES_CELL,
-            _cell(sheet_row, i_sheet_notes) if sheet_row is not None else None, row[i_out_notes])
-        row[i_out_ot] = _cas_user_value(
-            gate_history, _OUTPUT_TYPE_CELL,
-            _cell(sheet_row, i_sheet_ot) if sheet_row is not None else None, row[i_out_ot])
+        # rebuild=True (mặc định) -- BỎ QUA CAS, giữ nguyên giá trị store vừa
+        # tính ở row[...] (đã đúng "store thắng"). Chỉ khi rebuild=False (lượt
+        # sync tự động, có race thật) mới đọc lịch sử + so khớp CAS.
+        if not rebuild:
+            sheet_row = sheet_by_key.get(topic_key)
+            gate_history = ds.read_history(topic_key, "gate_status", "", db_path=db_path)
+            row[i_out_g1] = _cas_user_value(
+                gate_history, _GATE1_CELL,
+                _cell(sheet_row, i_sheet_g1) if sheet_row is not None else None, row[i_out_g1])
+            row[i_out_notes] = _cas_user_value(
+                gate_history, _NOTES_CELL,
+                _cell(sheet_row, i_sheet_notes) if sheet_row is not None else None, row[i_out_notes])
+            row[i_out_ot] = _cas_user_value(
+                gate_history, _OUTPUT_TYPE_CELL,
+                _cell(sheet_row, i_sheet_ot) if sheet_row is not None else None, row[i_out_ot])
 
         keyed_rows.append((topic_key, row))
 
@@ -943,10 +973,16 @@ def ingest_content_from_sheet(board: SheetsBoard, *, db_path=None) -> int:
 def sync_all(board: SheetsBoard, *, db_path=None) -> dict:
     """Ingest TRƯỚC (không mất thao tác người vừa bấm giữa 2 lượt), rồi render
     LẠI cả 2 tab từ store đã cập nhật. Đây là lệnh CHẠY DUY NHẤT cho vận hành
-    bình thường lẫn "phục hồi khi xoá nhầm" (Bước 5.4)."""
+    bình thường lẫn "phục hồi khi xoá nhầm" (Bước 5.4).
+
+    `rebuild=False` (TASK-032) -- đây LÀ lượt sync tự động (ingest xong render
+    ngay), đúng kịch bản có race thật giữa nhiều tiến trình (TASK-029) nên
+    PHẢI qua CAS, không được bỏ qua như default của render_context_to_sheet()
+    (xem docstring hàm đó). Đường phục hồi Bước 5.4 khi Sheet bị XOÁ vẫn đúng
+    dưới CAS -- sheet_row=None luôn để store thắng, không phụ thuộc rebuild."""
     n_ingest_ctx = ingest_context_from_sheet(board, db_path=db_path)
     n_ingest_content = ingest_content_from_sheet(board, db_path=db_path)
-    n_render_ctx = render_context_to_sheet(board, db_path=db_path)
+    n_render_ctx = render_context_to_sheet(board, db_path=db_path, rebuild=False)
     n_render_content = render_content_to_sheet(board, db_path=db_path)
     return {
         "ingested_context": n_ingest_ctx, "ingested_content": n_ingest_content,

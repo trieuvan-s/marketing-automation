@@ -62,7 +62,10 @@ def main(argv: list[str] | None = None) -> dict:
     if from_store_only:
         print("[reload] CHỈ 1 CHIỀU store -> Sheet (bỏ qua ingest — mọi thay đổi "
               "trên Sheet chưa ingest sẽ bị ghi đè).")
-        n_ctx = render_context_to_sheet(board)
+        # rebuild=True (TASK-032, tường minh dù trùng default) -- ĐÂY CHÍNH LÀ
+        # lệnh phục hồi Bước 5.4 "Sheet đang sai, muốn store thắng tuyệt đối":
+        # bỏ qua CAS, không có ingest trước nên không có gì để CAS bảo vệ.
+        n_ctx = render_context_to_sheet(board, rebuild=True)
         n_content = render_content_to_sheet(board)
         board.set_machine_columns_hidden(hidden=True)   # giữ cột máy-ghi luôn ẩn sau khi dựng lại
         print(f"[reload] Đã dựng lại: CONTEXT={n_ctx} dòng, CONTENT={n_content} dòng.")

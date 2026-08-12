@@ -134,7 +134,15 @@ def test_regression_stale_render_snapshot_overwrites_approve_before_next_ingest(
     ps.write_gate_status(topic_key, gate1="PENDING", execute="", db_path=db_path)
 
     board = _OrderedFakeBoard()
-    ss.render_context_to_sheet(board, db_path=db_path)   # dựng Sheet lần đầu (Gate1=PENDING)
+    # rebuild=False (TASK-032) -- CẢ HAI lệnh render trong test này mô phỏng
+    # `queue_worker.py::_sync_sheet()` (lượt sync TỰ ĐỘNG sau mỗi job, nơi có
+    # race thật) chứ KHÔNG phải lối gọi trực tiếp/thủ công -- default MỚI của
+    # render_context_to_sheet() (rebuild=True, bỏ qua CAS) đúng cho lối gọi
+    # kia (xem store/test_sync_service.py::test_render_context_to_sheet_
+    # without_prior_ingest_reflects_store_not_sheet + docstring hàm), KHÔNG
+    # đúng ở đây -- không đổi giá trị assert nào, chỉ khai báo tường minh ý
+    # định lượt gọi, đúng tinh thần "không ngầm định" của cả bản vá này.
+    ss.render_context_to_sheet(board, db_path=db_path, rebuild=False)   # dựng Sheet lần đầu (Gate1=PENDING)
 
     grid0 = board._tab("CONTEXT").get_all_values()
     header = grid0[0]
@@ -166,8 +174,9 @@ def test_regression_stale_render_snapshot_overwrites_approve_before_next_ingest(
     )
 
     # --- 4. "Render chen vào với ảnh chụp store CŨ" -- HÀM PRODUCTION THẬT,
-    # chỉ khác db_path trỏ snapshot (mô phỏng đọc SỚM HƠN của 1 job KHÁC). ----
-    ss.render_context_to_sheet(board, db_path=stale_snapshot_path)
+    # chỉ khác db_path trỏ snapshot (mô phỏng đọc SỚM HƠN của 1 job KHÁC).
+    # rebuild=False (TASK-032, xem ghi chú ở lệnh render đầu tiên phía trên). --
+    ss.render_context_to_sheet(board, db_path=stale_snapshot_path, rebuild=False)
 
     grid_after_stale_render = board._tab("CONTEXT").get_all_values()
     row_after_stale = next(
