@@ -11450,7 +11450,12 @@ def test_queue_worker_sync_sheet_ingests_before_render_never_loses_approval(monk
     order = []
     monkeypatch.setattr(qw.ss, "ingest_context_from_sheet", lambda b: order.append("ingest_ctx"))
     monkeypatch.setattr(qw.ss, "ingest_content_from_sheet", lambda b: order.append("ingest_content"))
-    monkeypatch.setattr(qw.ss, "render_context_to_sheet", lambda b: order.append("render_ctx"))
+    # rebuild=False -- TASK-032 đổi _sync_sheet() để truyền tường minh tham số
+    # này (mặc định render_context_to_sheet() giờ là rebuild=True, xem docstring
+    # hàm đó); double ở đây chỉ khoá THỨ TỰ gọi, không khoá giá trị rebuild,
+    # nên chỉ cần mở rộng chữ ký cho khớp, không đổi assertion nào.
+    monkeypatch.setattr(qw.ss, "render_context_to_sheet",
+                        lambda b, rebuild=False: order.append("render_ctx"))
     monkeypatch.setattr(qw.ss, "render_content_to_sheet", lambda b: order.append("render_content"))
 
     qw._sync_sheet(object())

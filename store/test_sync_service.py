@@ -707,6 +707,95 @@ def test_sync_all_full_recovery_after_accidental_deletion(board, db_path):
 
 
 # =============================================================================
+# CAS theo timestamp cho cột người-sở-hữu (TASK-030) -- chiều NGƯỢC LẠI: store
+# THẬT SỰ mới hơn Sheet thì render vẫn phải ghi đè bình thường. Bài test race
+# (tests/test_race_render_ingest.py) chỉ kiểm chiều "KHÔNG chứng minh được ->
+# giữ nguyên" -- thiếu chiều này thì `_cas_user_value()` có thể bị vá quá tay
+# thành "không bao giờ ghi", âm thầm phá đường phục hồi Bước 5.4.
+# =============================================================================
+
+def test_cas_overwrites_when_sheet_value_matches_an_older_store_version(board, db_path):
+    """Sheet đang hiện 1 giá trị CŨ (khớp đúng 1 version quá khứ trong lịch sử
+    gate_status) trong khi store đã tiến xa hơn (version mới nhất khác) --
+    đây CHÍNH LÀ bằng chứng CAS cần để ghi đè an toàn: giá trị Sheet không
+    phải "người vừa sửa tay, chưa kịp ingest" mà là "Sheet chưa bắt kịp store"
+    (đúng cơ chế Bước 5.4: Sheet bị xoá/reset về giá trị quá khứ, render dựng
+    lại đúng). Nếu `_cas_user_value()` bị vá quá tay thành luôn giữ nguyên khi
+    khác Sheet, test này ĐỎ."""
+    ps.write_raw("tk-1", {"context": "Bài 1", "hook": "h", "source": "u1",
+                          "tickers": [], "group": "", "topic": ""}, db_path=db_path)
+    ps.write_gate_status("tk-1", gate1="PENDING", db_path=db_path)   # version 1
+    ss.render_context_to_sheet(board, db_path=db_path)   # Sheet hiện PENDING
+
+    grid = board._tab("CONTEXT").get_all_values()
+    header = grid[0]
+    assert grid[1][_header_index(header, GATE1_COL)] == "PENDING"
+
+    # store tiến thêm 1 bước (vd worker/ingest khác ghi APPROVE) -- Sheet
+    # KHÔNG được đụng tới (mô phỏng chưa render lại), vẫn còn "PENDING" cũ.
+    ps.write_gate_status("tk-1", gate1="APPROVE", db_path=db_path)   # version 2 (mới nhất)
+
+    ss.render_context_to_sheet(board, db_path=db_path)
+
+    grid_after = board._tab("CONTEXT").get_all_values()
+    row_after = grid_after[1]
+    assert row_after[_header_index(header, GATE1_COL)] == "APPROVE", (
+        "store MỚI HƠN Sheet (Sheet khớp đúng version CŨ trong lịch sử) -- "
+        "render phải ghi đè bình thường, không được vá CAS quá tay thành "
+        "'không bao giờ ghi' (sẽ phá đường phục hồi Bước 5.4)."
+    )
+
+
+def test_rebuild_flag_switches_between_keep_and_overwrite_for_same_cell_state(board, db_path):
+    """KHOÁ NGỮ NGHĨA (TASK-032) -- CÙNG 1 trạng thái ô (Sheet=APPROVE hiện có
+    nhưng KHÔNG khớp version nào trong lịch sử gate_status, store=PENDING duy
+    nhất): `rebuild=False` (lượt sync tự động, CAS bảo vệ -- kịch bản race
+    TASK-029) phải GIỮ NGUYÊN "APPROVE"; `rebuild=True` (lượt gọi trực tiếp/
+    thủ công, mặc định của render_context_to_sheet() -- kịch bản "chưa từng
+    ingest" test_render_context_to_sheet_without_prior_ingest_reflects_store_
+    not_sheet) phải GHI ĐÈ về "PENDING". Đây CHÍNH LÀ cặp kịch bản dữ liệu
+    Y HỆT NHAU mà chỉ tham số `rebuild` phân biệt được -- ai đổi lại thành suy
+    luận từ dữ liệu (bỏ tham số này, hoặc để 2 nhánh cho cùng kết quả) sẽ làm
+    test này ĐỎ ngay."""
+    def _seed(tk):
+        ps.write_raw(tk, {"context": "Bài 1", "hook": "h", "source": "u1",
+                          "tickers": [], "group": "", "topic": ""}, db_path=db_path)
+        ps.write_gate_status(tk, gate1="PENDING", db_path=db_path)   # ĐÚNG 1 version
+
+    def _sheet_showing_approve():
+        return [
+            CONTEXT_HEADER,
+            ["24/07/2026", "0.0", "0", "", "", "Bài 1", "h", "u1", "APPROVE", "", "", "", "", "tk-x"],
+        ]
+
+    # rebuild=False -- CAS bảo vệ, giữ nguyên Sheet (không version nào chứng
+    # minh được store đã tiến xa hơn "APPROVE" đang hiện).
+    _seed("tk-x")
+    board._tab("CONTEXT").set_rows(_sheet_showing_approve())
+    ss.render_context_to_sheet(board, db_path=db_path, rebuild=False)
+    grid = board._tab("CONTEXT").get_all_values()
+    assert grid[1][_header_index(grid[0], GATE1_COL)] == "APPROVE", (
+        "rebuild=False phải GIỮ giá trị Sheet khi không chứng minh được store "
+        "mới hơn (bảo vệ thao tác người, TASK-029)."
+    )
+
+    # rebuild=True -- bỏ qua CAS, store thắng tuyệt đối (topic KHÁC, tránh
+    # version gate_status của tk-x ở trên làm nhiễu phép so sánh).
+    _seed("tk-y")
+    board._tab("CONTEXT").set_rows([
+        CONTEXT_HEADER,
+        ["24/07/2026", "0.0", "0", "", "", "Bài 1", "h", "u1", "APPROVE", "", "", "", "", "tk-y"],
+    ])
+    ss.render_context_to_sheet(board, db_path=db_path, rebuild=True)
+    grid2 = board._tab("CONTEXT").get_all_values()
+    row_y = next(r for r in grid2[1:] if r[_header_index(grid2[0], "TopicKey")] == "tk-y")
+    assert row_y[_header_index(grid2[0], GATE1_COL)] == "PENDING", (
+        "rebuild=True phải GHI ĐÈ Sheet bằng giá trị store, kể cả khi Sheet "
+        "chưa từng ingest (đường phục hồi Bước 5.4 / lối gọi trực tiếp)."
+    )
+
+
+# =============================================================================
 # Output Type (Bước 4)
 # =============================================================================
 
