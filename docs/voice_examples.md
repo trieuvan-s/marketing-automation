@@ -143,15 +143,18 @@ số vào một câu — tách ra: câu 1 gợi tension, mỏ neo số đưa xu�
 
 ## 2c. Luật kết chung (áp cho MỌI khung ở §2)
 
-- **KẾT MỞ (gần như bắt buộc).** Đóng bằng *điều đáng theo dõi* (2–3 biến số cần quan sát) hoặc một
+- **KẾT MỞ (tuỳ chọn).** Đóng bằng *điều đáng theo dõi* (2–3 biến số cần quan sát) hoặc một
   câu hỏi thả cho người đọc. **Không** chốt phán quyết mua/bán.
-  - *"Điều đáng theo dõi không phải con số tăng trưởng, mà là ba thứ: …"*
-  - *"Còn bạn nghiêng về phe nào: đã tính kỹ, hay còn nhiều rủi ro?"* (bản FB có CTA)
+  - *"Các yếu tố nên theo dõi tiếp: biên lãi ròng quý sau có co lại hay không, nợ xấu diễn biến thế
+    nào, và lãi suất huy động có tăng thêm hay không."*
+  - *"Còn bạn nghiêng về phe nào?"* (bản FB có CTA)
 - **Một câu chốt-nguyên-lý (tuỳ chọn, tối đa 1).** Sau kết mở, được thêm ĐÚNG một bài học về *cách
   nghĩ* — ngắn, quotable, KHÔNG phải khuyến nghị hành động.
-  *"Đầu tư không chỉ là chọn cổ phiếu tốt, mà là hiểu vì sao thị trường chọn chúng."*
+  *"Một danh sách cổ phiếu 'khuyến nghị' chỉ có ý nghĩa nếu người đọc còn kiểm tra lại mức giá đang
+  trả và những giả định phía sau danh sách đó có đúng hay không."*
 - **Câu chốt một dòng đánh dấu khúc ngoặt** (dùng ở mọi khung để tạo nhịp):
-  *"Cái bẫy nằm ở chỗ dễ thấy nhất."* / *"Tiền không biến mất."*
+  *"Nhưng đây là chỗ số liệu không khớp với tuyên bố ban đầu."* / *"Khoản chênh lệch không biến
+  mất mà chuyển sang một khoản mục khác trong báo cáo."*
 
 ---
 
@@ -164,6 +167,8 @@ số vào một câu — tách ra: câu 1 gợi tension, mỏ neo số đưa xu�
 - Steelman phía đối lập trước khi mở rộng khung.
 - Kết mở (điều đáng theo dõi / câu hỏi) + được thêm 1 câu chốt-nguyên-lý dạy cách nghĩ.
 - Đoạn ngắn, nhiều khoảng trắng cho social. Ẩn dụ đời thường, xưng ta/bạn.
+- Tiêu đề mục (nếu bài chia mục có tiêu đề) nêu được nội dung phần đó bàn về điều gì — người đọc
+  lướt qua một mình tiêu đề cũng đoán được chủ đề, không cần đọc câu đầu mới hiểu.
 
 **TRÁNH**
 - Mở bằng bối cảnh chung chung.
@@ -211,7 +216,7 @@ Như vậy, nỗi lo của chuyên gia và logic chiến lược không mâu thu
 
 Và đây đúng là chỗ đáng lo nhất. Khi quả bóng rủi ro được đẩy về các ngân hàng thương mại, một viễn cảnh được chính giới chuyên môn nêu ra: rất có thể tới đây chính phủ sẽ phải đứng ra bảo lãnh cho các khoản vay này, bởi ngân hàng không phải không biết sợ. Nếu điều đó xảy ra, ta sẽ chứng kiến cơ chế "quá quan trọng để được phép thất bại" hình thành ngay trước mắt: nhà nước cần các dự án này thành công đến mức buộc phải nâng đỡ chúng, và sự nâng đỡ ấy lại khiến rủi ro tập trung thêm. Đó là con dao hai lưỡi của mọi mô hình tín dụng được nhà nước chỉ định, từ ngân hàng chính sách Hàn Quốc thời chaebol đến chỉ đạo tín dụng của Trung Quốc: nó tăng tốc được những cú nhảy vọt, nhưng cũng dồn rủi ro vào vài điểm, và khi một điểm vỡ thì cả hệ thống rung theo.
 
-Thời gian sẽ trả lời. Điều đáng theo dõi không phải con số tăng trưởng tín dụng, mà là ba thứ: trong 18 dự án, bao nhiêu thực sự là hạ tầng công ích và bao nhiêu là bất động sản thương mại ăn theo quanh nó; mức nợ liên quan của từng ngân hàng với ba tập đoàn sau khi loại trừ; và danh sách đầu đàn này có dừng ở ba cái tên hay còn nối dài. Tháo phanh để đi nhanh có thể là quyết đoán, cũng có thể là liều lĩnh. Ranh giới nằm ở chỗ những dự án ấy có tự sinh đủ dòng tiền để trả nợ hay không. Còn trước mắt, chiếc xe đã bỏ bớt phanh và đang tăng ga.
+Thời gian sẽ trả lời, nhưng ba con số sau đáng theo dõi hơn hẳn con số tăng trưởng tín dụng chung: trong 18 dự án, bao nhiêu thực sự là hạ tầng công ích và bao nhiêu là bất động sản thương mại ăn theo quanh nó; mức nợ liên quan của từng ngân hàng với ba tập đoàn sau khi loại trừ; và danh sách đầu đàn này có dừng ở ba cái tên hay còn nối dài. Tháo phanh để đi nhanh có thể là quyết đoán, cũng có thể là liều lĩnh. Ranh giới nằm ở chỗ những dự án ấy có tự sinh đủ dòng tiền để trả nợ hay không. Còn trước mắt, chiếc xe đã bỏ bớt phanh và đang tăng ga.
 
 ---
 
@@ -334,9 +339,9 @@ Hòa Phát hưởng lợi từ Dung Quất 2 và phòng vệ thương mại HRC.
 
 Điểm chung không phải "miễn nhiễm với rủi ro", mà là có động lực tăng trưởng đủ mạnh để vượt lên trên bối cảnh chung.
 
-Vì vậy, điều đáng theo dõi không phải danh sách 8 cổ phiếu, mà là liệu những giả định của SSI có trở thành hiện thực hay không: biên lãi ngân hàng có co hẹp, đơn hàng xuất khẩu có duy trì, và nhập siêu có bắt đầu ảnh hưởng đến lợi nhuận doanh nghiệp hay không.
+Vì vậy, danh sách 8 cổ phiếu tự nó không nói lên nhiều; ba biến số sau mới quyết định giả định của SSI đúng hay sai: biên lãi ngân hàng có co hẹp, đơn hàng xuất khẩu có duy trì, và nhập siêu có bắt đầu ảnh hưởng đến lợi nhuận doanh nghiệp hay không.
 
-Đầu tư không chỉ là chọn danh sách cổ phiếu tốt, mà còn cần biết vì sao thị trường chọn chúng.
+Chọn đúng danh sách cổ phiếu chỉ là nửa việc; nửa còn lại là hiểu vì sao thị trường chọn chúng.
 
 *Nội dung chỉ mang tính thông tin, không phải khuyến nghị đầu tư.*
 

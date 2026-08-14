@@ -303,23 +303,46 @@ def test_resolve_sheet_id_default_returns_test_sheet_never_production():
 
 
 def test_resolve_sheet_id_allow_production_true_returns_production():
+    import os
+
     from twmkt.config import Settings, resolve_sheet_id
 
     s = Settings({"sheets": {"spreadsheet_id": "PROD-ID", "test_spreadsheet_id": "TEST-ID"}})
-    assert resolve_sheet_id(s, allow_production=True) == "PROD-ID"
+    # resolve_sheet_id() đọc TWMKT_SHEET_ID từ ENV trước Settings — cô lập ENV
+    # thật (vd phiên vận hành TASK-020 trỏ sheet production) để test không bị
+    # rò rỉ giá trị ngoài ý muốn.
+    old = os.environ.get("TWMKT_SHEET_ID")
+    try:
+        os.environ.pop("TWMKT_SHEET_ID", None)
+        assert resolve_sheet_id(s, allow_production=True) == "PROD-ID"
+    finally:
+        if old is None:
+            os.environ.pop("TWMKT_SHEET_ID", None)
+        else:
+            os.environ["TWMKT_SHEET_ID"] = old
 
 
 def test_resolve_sheet_id_allow_production_true_but_missing_production_id_raises():
+    import os
+
     from twmkt.config import ProductionSheetBlocked, Settings, resolve_sheet_id
 
     s = Settings({"sheets": {"spreadsheet_id": "", "test_spreadsheet_id": "TEST-ID"}})
+    old = os.environ.get("TWMKT_SHEET_ID")
     try:
-        resolve_sheet_id(s, allow_production=True)
-    except ProductionSheetBlocked:
-        pass
-    else:
-        raise AssertionError("Thiếu spreadsheet_id production nhưng allow_production=True "
-                             "PHẢI raise, KHÔNG được lùi về sheet test.")
+        os.environ.pop("TWMKT_SHEET_ID", None)
+        try:
+            resolve_sheet_id(s, allow_production=True)
+        except ProductionSheetBlocked:
+            pass
+        else:
+            raise AssertionError("Thiếu spreadsheet_id production nhưng allow_production=True "
+                                 "PHẢI raise, KHÔNG được lùi về sheet test.")
+    finally:
+        if old is None:
+            os.environ.pop("TWMKT_SHEET_ID", None)
+        else:
+            os.environ["TWMKT_SHEET_ID"] = old
 
 
 def test_resolve_sheet_id_env_test_sheet_override():
@@ -5092,6 +5115,142 @@ def test_run_article_idempotent_skips_writer_when_already_in_content():
     assert board.execute_updates.get(2) == "DONE"
 
 
+def test_run_reprocess_force_bypasses_seen_and_writes_new_article_version():
+    """TASK-031 — luồng "Xử lý lại": produce_from_sheet.run(force={topic_key})
+    PHẢI thật sự sinh version MỚI cho topic đã DONE (KHÔNG rơi vào nhánh skip
+    của existing_content_keys(), khác nghĩa của test_run_article_idempotent_
+    skips_writer_when_already_in_content ở trên). Kiểm bằng SỐ VERSION
+    (read_history), cùng nếp test_run_retries_channel_after_error_not_stuck_
+    forever_nafoods_bug — version count mới là bằng chứng thật KHÔNG bị vứt."""
+    from store import document_store as ds
+    from twmkt.curation.keys import compute_topic_key
+
+    class _CleanWriterLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False):
+            return _clean_writer_json()
+
+    _URL = "https://example.com/bai-xu-ly-lai-force"
+    _KEY = compute_topic_key(_URL)
+    row = _approved_row("Bài xử lý lại (force)", row=2, source=_URL)
+
+    _r, board, _n = _run_produce_scenario(
+        _CleanWriterLLM(), row,
+        pre_seed_content=[(_KEY, "article", {
+            "status": "DONE", "output": "ban cu (loi hoac muon sinh lai)", "notes": "", "facts": "[]"})],
+        run_kwargs={"topic_keys": [_KEY], "limit": 1, "force": {_KEY}})
+
+    history = ds.read_history(_KEY, "content_output", "article", db_path=board.db_path)
+    assert len(history) == 2, (
+        f"kỳ vọng ĐÚNG 2 version (DONE cũ pre-seed + DONE mới do force ép chạy lại), thực tế {len(history)}"
+    )
+    assert history[-1][1]["status"] == "DONE"
+    assert history[-1][1]["output"] != "ban cu (loi hoac muon sinh lai)", (
+        "force PHẢI sinh nội dung MỚI thật (gọi lại Writer), không phải giữ nguyên bản pre-seed"
+    )
+
+
+def test_run_reprocess_force_with_different_output_type_only_touches_new_type():
+    """TASK-031 — "Xử lý lại" kèm Output Type KHÁC lượt trước (giả định #2 của
+    Lead): content_type CŨ (article, KHÔNG nằm trong Output Type MỚI="Video")
+    PHẢI giữ NGUYÊN — output_type_excluded loại nó TRƯỚC KHI chạm `seen`/force,
+    nên PoisonWriterLLM chứng minh Writer không hề bị gọi lại, và version vẫn
+    ĐÚNG 1 (bản pre-seed). content_type MỚI (video) ĐƯỢC sinh version mới."""
+    from store import document_store as ds
+    from twmkt.curation.keys import compute_topic_key
+
+    class _PoisonWriterLLM:
+        def complete(self, *a, **kw):
+            raise AssertionError(
+                "Output Type mới = Video (không có Article) -> Writer KHÔNG được gọi lại")
+
+    _URL = "https://example.com/bai-xu-ly-lai-doi-output-type"
+    _KEY = compute_topic_key(_URL)
+    row = _approved_row("Bài xử lý lại đổi Output Type", row=2, source=_URL, output_type=["Video"])
+
+    _r, board, _n = _run_produce_scenario(
+        _PoisonWriterLLM(), row,
+        pre_seed_content=[(_KEY, "article", {
+            "status": "DONE", "output": "ban cu article", "notes": "", "facts": "[]"})],
+        run_kwargs={"topic_keys": [_KEY], "limit": 1, "force": {_KEY}})
+
+    article_history = ds.read_history(_KEY, "content_output", "article", db_path=board.db_path)
+    assert len(article_history) == 1, (
+        f"article KHÔNG nằm trong Output Type mới -> GIỮ NGUYÊN, kỳ vọng 1 version, thực tế {len(article_history)}"
+    )
+    assert article_history[-1][1]["output"] == "ban cu article"
+
+    video_history = ds.read_history(_KEY, "content_output", "video", db_path=board.db_path)
+    assert len(video_history) == 1, "video là content_type Output Type MỚI chọn -> PHẢI được sinh"
+    assert video_history[-1][1]["status"] == "DONE"
+
+
+def test_run_reapprove_without_force_never_regenerates_content_burns_no_llm():
+    """Ca ĐỐI CHỨNG bắt buộc theo TASK-031: APPROVE lại bình thường (KHÔNG
+    chọn "Xử lý lại" trên Sheet -> ingest_context_from_sheet() KHÔNG gắn cờ
+    force -> produce_from_sheet.run() KHÔNG nhận tham số `force`) PHẢI giữ
+    hành vi idempotent CŨ — topic đã DONE cả 3 loại KHÔNG version mới nào,
+    KHÔNG đốt tiền LLM. Writer (article) là đường có gate $0 CỨNG
+    (write_article, tính TRƯỚC run_brief/Writer) -- PoisonWriterLLM chứng minh
+    KHÔNG bị gọi. video/infographic dùng Mock mặc định (hành vi pre-existing
+    "vẫn thử sinh rồi vứt nếu đã seen" của existing_content_keys() KHÔNG đổi
+    bởi TASK-031, ngoài phạm vi vá lần này) -- vẫn phải giữ ĐÚNG 1 version."""
+    from store import document_store as ds
+    from twmkt.curation.keys import compute_topic_key
+
+    class _PoisonWriterLLM:
+        def complete(self, *a, **kw):
+            raise AssertionError("APPROVE lại bình thường (không force) -> Writer KHÔNG được gọi")
+
+    _URL = "https://example.com/bai-approve-lai-binh-thuong"
+    _KEY = compute_topic_key(_URL)
+    row = _approved_row("Bài APPROVE lại bình thường", row=2, source=_URL)
+
+    _r, board, _n = _run_produce_scenario(
+        _PoisonWriterLLM(), row,
+        pre_seed_content=[
+            (_KEY, "article", {"status": "DONE", "output": "a", "notes": "", "facts": "[]"}),
+            (_KEY, "infographic", {"status": "DONE", "output": "i", "notes": "", "facts": "[]"}),
+            (_KEY, "video", {"status": "DONE", "output": "v", "notes": "", "facts": "[]"}),
+        ],
+        run_kwargs={"topic_keys": [_KEY], "limit": 1})   # KHÔNG truyền force
+
+    for type_, expected in (("article", "a"), ("infographic", "i"), ("video", "v")):
+        history = ds.read_history(_KEY, "content_output", type_, db_path=board.db_path)
+        assert len(history) == 1, f"{type_}: kỳ vọng ĐÚNG 1 version (KHÔNG chạy lại), thực tế {len(history)}"
+        assert history[-1][1]["output"] == expected
+    assert board.execute_updates.get(2) == "DONE"
+
+
+def test_cleanup_stale_output_removes_old_day_files_keeps_new_and_other_types(tmp_path):
+    """TASK-031 — `_cleanup_stale_output()` (dọn file output/<ngày cũ>/ của
+    lượt trước khi "Xử lý lại" ghi bản mới, assumption #1 của Lead): xoá ĐÚNG
+    file CÙNG (slug, type_) ở thư mục NGÀY KHÁC, GIỮ NGUYÊN file `keep` (nếu
+    tình cờ trùng đường dẫn) và file content_type KHÁC CÙNG slug."""
+    import sys, os
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+    import produce_from_sheet as pfs
+    from twmkt.config import Settings
+
+    settings = Settings({"storage": {"data_root": str(tmp_path)}})
+    old_dir = tmp_path / "output" / "2026-08-07"
+    new_dir = tmp_path / "output" / "2026-08-13"
+    old_dir.mkdir(parents=True)
+    new_dir.mkdir(parents=True)
+
+    stale_article = old_dir / "bai-test-article.md"
+    stale_article.write_text("ban cu", encoding="utf-8")
+    other_type_same_day = old_dir / "bai-test-infographic.json"
+    other_type_same_day.write_text("khong lien quan", encoding="utf-8")
+    keep = new_dir / "bai-test-article.md"
+
+    removed = pfs._cleanup_stale_output(settings, "bai-test", "article", keep=keep)
+
+    assert removed == 1
+    assert not stale_article.exists()          # file CŨ cùng loại -- bị xoá
+    assert other_type_same_day.exists()        # content_type KHÁC -- GIỮ NGUYÊN
+    assert not keep.exists()                   # hàm này KHÔNG tự ghi -- chỉ dọn trước khi caller write_text()
+
+
 def test_run_retries_channel_after_error_not_stuck_forever_nafoods_bug():
     """SỬA LỖI THẬT (2026-08-03, Lead báo qua ca "Nafoods Group") —
     existing_content_keys() TRƯỚC ĐÂY coi content_output ERROR/NEEDS_HUMAN là
@@ -9777,6 +9936,61 @@ def test_queue_worker_run_once_claims_processes_and_marks_done(monkeypatch, tmp_
     assert row["status"] == "done"
 
 
+def test_queue_worker_run_once_passes_force_when_job_payload_has_it(monkeypatch, tmp_path):
+    """TASK-031 — job mang payload {"force": true} (gắn bởi ingest_context_
+    from_sheet() khi người chọn "Xử lý lại") -> run_once() PHẢI truyền
+    force={topic_key} xuống produce_from_sheet.run(). Đây là chỗ DUY NHẤT nối
+    tín hiệu force từ hàng đợi sang run() thật."""
+    from store import document_store as ds
+    from store import queue_store as qs
+    from twmkt.config import Settings
+
+    qw = _queue_worker_module()
+    db_path = tmp_path / "store.db"
+    monkeypatch.setenv("DOCUMENT_STORE_PATH", str(db_path))
+    ds.init_db(db_path)
+    qs.enqueue("tk-1", payload={"force": True}, db_path=db_path)
+
+    called = []
+
+    def _fake_run(*, topic_keys, limit, force=None):
+        called.append((topic_keys, limit, force))
+        return {"approved": 1, "produced": 1}
+
+    monkeypatch.setattr(qw.produce_from_sheet, "run", _fake_run)
+
+    handled = qw.run_once(settings=Settings({}), worker_id="test-worker")
+    assert handled is True
+    assert called == [(["tk-1"], 1, {"tk-1"})]
+
+
+def test_queue_worker_run_once_omits_force_kwarg_for_normal_job(monkeypatch, tmp_path):
+    """ĐỐI CHỨNG: job KHÔNG mang force (rerun bình thường/APPROVE lại) -> lời
+    gọi run() GIỮ NGUYÊN chữ ký cũ (topic_keys, limit) — KHÔNG kèm kwarg
+    `force` -- tránh mọi hiểu lầm ngầm định "hễ có job là ép chạy lại"."""
+    from store import document_store as ds
+    from store import queue_store as qs
+    from twmkt.config import Settings
+
+    qw = _queue_worker_module()
+    db_path = tmp_path / "store.db"
+    monkeypatch.setenv("DOCUMENT_STORE_PATH", str(db_path))
+    ds.init_db(db_path)
+    qs.enqueue("tk-1", db_path=db_path)
+
+    called = []
+
+    def _fake_run(*, topic_keys, limit):   # KHÔNG chấp nhận `force` -- lỗi ngay nếu bị truyền
+        called.append((topic_keys, limit))
+        return {"approved": 1, "produced": 1}
+
+    monkeypatch.setattr(qw.produce_from_sheet, "run", _fake_run)
+
+    handled = qw.run_once(settings=Settings({}), worker_id="test-worker")
+    assert handled is True
+    assert called == [(["tk-1"], 1)]
+
+
 def test_queue_worker_run_once_marks_failed_when_run_raises(monkeypatch, tmp_path):
     """Crash HẠ TẦNG thật sự (run() raise, không tự bắt gọn được) -> job hàng
     đợi 'failed', KHÁC hẳn NEEDS_HUMAN/FAILED nghiệp vụ (cái đó run() tự ghi
@@ -12354,3 +12568,253 @@ def test_aigen_seam_missing_npm_gives_actionable_error(tmp_path, monkeypatch):
 
     res = seam.run_aigen_pipeline(tmp_path / "content-output.json", aigen_repo_path=tmp_path)
     assert not res.ok and "PATH" in res.error
+
+
+# --- TASK-027 — Guardrail HAI TẦNG (Tầng 1 CHẶN toàn văn + Tầng 2 CẢNH BÁO ---
+# neo câu qua fact.source). Fixture DƯỚI ĐÂY lấy TỪ BÀI THẬT trong store
+# (D:/trung-temp/marketing-database/marketing-automation/documents/...) —
+# xem docs/hypotheses/2026-08-12-guardrail-hai-tang.md cho nguồn gốc + đo
+# TRƯỚC/SAU đầy đủ (4 ô). Ca "sai ngữ cảnh" (bắt buộc dựng tay theo contract)
+# lấy SỐ THẬT từ 2 bài trên nhưng TỰ VIẾT câu gắn sai ngữ cảnh.
+
+# Excerpt THẬT (rút gọn, giữ NGUYÊN VĂN từng ký tự) từ cafef.vn — BSR xuất bán
+# diesel sinh học B5 + KQKD 6 tháng đầu năm 2026 (documents/2026-08-08/
+# 7def460f581a318c.json).
+_BSR_EVIDENCE_REAL = (
+    "Hoạt động mở rộng danh mục sản phẩm diễn ra trong bối cảnh kết quả kinh "
+    "doanh của BSR tăng mạnh. Trong 6 tháng đầu năm 2026, BSR ghi nhận doanh "
+    "thu hợp nhất 100.922 tỷ đồng, tăng 47% so với cùng kỳ năm trước. Lợi "
+    "nhuận sau thuế đạt 12.636 tỷ đồng, gấp gần 7 lần mức 1.884 tỷ đồng của "
+    "cùng kỳ năm 2025. Doanh nghiệp cũng nộp ngân sách Nhà nước 5.871 tỷ "
+    "đồng. Riêng quý II/2026, BSR đạt doanh thu hơn 55.000 tỷ đồng, tăng 50% "
+    "so với cùng kỳ; lợi nhuận sau thuế đạt 4.097 tỷ đồng, tăng hơn 384%. "
+    "Năm 2026, doanh nghiệp đặt kế hoạch doanh thu hợp nhất 154.140 tỷ đồng "
+    "và lợi nhuận sau thuế 2.162 tỷ đồng."
+)
+_BSR_TITLE_REAL = ("Nhà máy lọc dầu doanh thu hơn 100.000 tỷ của Việt Nam lần "
+                   "đầu tiên xuất bán một loại nhiên liệu mới")
+
+# Excerpt THẬT (rút gọn, giữ NGUYÊN VĂN — kể cả khoảng trắng LẠC bên trong cụm
+# số "7 , 7 7"/"41 ,7", lỗi trích xuất HTML->markdown THẬT gặp trên
+# vietnambiz.vn) — documents/2026-08-07/a83da1256c1b951d.json.
+_CTG_EVIDENCE_REAL = (
+    "Theo cơ cấu cổ đông tại ngày 15/1/2026, cổ đông Nhà nước, với Ngân hàng "
+    "Nhà nước là cơ quan đại diện chủ sở hữu, nắm hơn 5 tỷ cổ phiếu CTG, "
+    "tương ứng 64,46% vốn VietinBank. Ngân hàng có tổng cộng 7 , 7 7 tỷ cổ "
+    "phiếu. Trên cơ cấu vốn hiện tại, để nâng tỷ lệ vốn N hà nước lên tối "
+    "thiểu 65%, lượng cổ phiếu thuộc sở hữu của cổ đông Nhà nước cần tăng "
+    "thêm 41 ,7 triệu đơn vị. Trên thị trường, cổ phiếu CTG kết phiên 7/8 "
+    "tại 32.500 đồng/cp, tăng 3,7% so với tham chiếu. Khối lượng khớp lệnh "
+    "đạt gần 15 triệu đơn vị. Tạm tính theo giá đóng cửa, lượng cổ phiếu "
+    "trên có giá trị quy đổi hơn 1.354 tỷ đồng. Bên cạnh cổ đông Nhà nước, "
+    "MUFG Bank đang sở hữu 1.228.981.747 cổ phiếu CTG, tương ứng 15,82% vốn "
+    "điều lệ."
+)
+
+
+# --- Tầng 1 — chuẩn hoá khoảng trắng nội bộ cụm số (_normalize_number) -----
+def test_normalize_number_strips_internal_whitespace():
+    from twmkt.agents.production import _normalize_number
+
+    assert _normalize_number("7 , 7 7 tỷ") == _normalize_number("7,77 tỷ") == "777tỷ"
+    assert _normalize_number("41 ,7 triệu") == _normalize_number("41,7 triệu") == "417triệu"
+
+
+def test_spaced_magnitude_re_does_not_merge_enumeration_across_words():
+    """AN TOÀN: enumeration THẬT ("Phân khu 2, 4 và 9, cùng 350 tỷ đồng" —
+    excerpt thật khác trong store) KHÔNG được gộp "2, 4" hay "9," thành 1 số —
+    chữ "và"/"cùng" xen giữa phải CHẶN _SPACED_MAGNITUDE_RE, chỉ "350 tỷ đồng"
+    (liền mạch, đơn giản) mới khớp."""
+    from twmkt.agents.production import _SPACED_MAGNITUDE_RE
+
+    text = "tại các Phân khu 2, 4 và 9, cùng 350 tỷ đồng vốn đầu tư."
+    toks = [m.group(0) for m in _SPACED_MAGNITUDE_RE.finditer(text)]
+    assert toks == ["350 tỷ đồng"]
+
+
+# --- Tầng 1 — báo động giả (ca THẬT, xem docs/hypotheses/...) --------------
+def test_unsupported_numbers_accepts_real_evidence_with_stray_whitespace_inside_digits():
+    """FP1 (THẬT, TASK-027): evidence CTG thật bị chèn khoảng trắng lạc giữa
+    ký tự số ("7 , 7 7 tỷ", "41 ,7 triệu") — TRƯỚC khi có _SPACED_MAGNITUDE_RE,
+    Composer viết ĐÚNG "7,77 tỷ"/"41,7 triệu" (liền mạch, chuẩn) vẫn bị báo
+    ĐỘNG GIẢ bịa số vì _MAGNITUDE_RE cũ không khớp qua khoảng trắng."""
+    from twmkt.agents.production import unsupported_numbers
+
+    body = ("VietinBank hiện có tổng cộng 7,77 tỷ cổ phiếu lưu hành. Để nâng "
+           "tỷ lệ sở hữu Nhà nước lên tối thiểu 65%, lượng cổ phiếu thuộc sở "
+           "hữu Nhà nước cần tăng thêm 41,7 triệu đơn vị.")
+    assert unsupported_numbers(body, _CTG_EVIDENCE_REAL) == []
+
+
+def test_apply_guardrails_title_param_covers_headline_only_figures():
+    """FP2 (THẬT, TASK-027): output video THẬT (2026-08-08) tái dùng NGUYÊN VĂN
+    tiêu đề bài gốc làm hero/narration — tiêu đề làm tròn "hơn 100.000 tỷ"
+    trong khi THÂN BÀI chỉ có số CHÍNH XÁC "100.922 tỷ đồng" (content_units
+    rỗng — đường LEGACY, không có canonical để vớt). Thiếu tiêu đề trong
+    source_text -> báo ĐỘNG GIẢ; nối tiêu đề vào (`title=`) -> sạch."""
+    from twmkt.agents.production import apply_guardrails
+    from twmkt.models import ContentDraft, ContentFormat
+
+    body = _BSR_TITLE_REAL   # đúng NGUYÊN VĂN hero/narration trong output THẬT
+    without_title = ContentDraft(fmt=ContentFormat.INFOGRAPHIC, title="t", body=body)
+    apply_guardrails(without_title, _BSR_EVIDENCE_REAL, content_units=[])
+    assert not without_title.is_clean
+    assert any("100.000" in i for i in without_title.compliance_issues)
+
+    with_title = ContentDraft(fmt=ContentFormat.INFOGRAPHIC, title="t", body=body)
+    apply_guardrails(with_title, _BSR_EVIDENCE_REAL, content_units=[], title=_BSR_TITLE_REAL)
+    assert with_title.is_clean
+
+
+def test_unsupported_numbers_stays_clean_on_real_bsr_quarterly_figures_control():
+    """FP3 (THẬT, kiểm soát KHÔNG hồi quy) — số liệu quý II BSR viết lại đúng,
+    liền mạch (không dính lỗi khoảng trắng) — PHẢI sạch cả TRƯỚC lẫn SAU."""
+    from twmkt.agents.production import unsupported_numbers
+
+    body = ("BSR ghi nhận doanh thu quý II/2026 hơn 55.000 tỷ đồng, tăng 50% "
+           "so với cùng kỳ; lợi nhuận sau thuế 4.097 tỷ đồng, tăng hơn 384%.")
+    assert unsupported_numbers(body, _BSR_EVIDENCE_REAL) == []
+
+
+def test_unsupported_numbers_stays_clean_on_real_ctg_price_figures_control():
+    """FP4 (THẬT, kiểm soát KHÔNG hồi quy) — số liệu giá CTG viết lại đúng,
+    liền mạch — PHẢI sạch cả TRƯỚC lẫn SAU."""
+    from twmkt.agents.production import unsupported_numbers
+
+    body = ("Cổ phiếu CTG đóng cửa phiên 7/8 ở mức 32.500 đồng, tăng 3,7% so "
+           "với tham chiếu, khối lượng khớp lệnh gần 15 triệu đơn vị, giá trị "
+           "giao dịch quy đổi hơn 1.354 tỷ đồng.")
+    assert unsupported_numbers(body, _CTG_EVIDENCE_REAL) == []
+
+
+# --- Tầng 2 — cảnh báo neo câu qua fact.source (ca DỰNG TAY, BẮT BUỘC) -----
+def _src_fact(canonical, source, label="y", value="x"):
+    from twmkt.models import ContentUnit
+    return ContentUnit(value=value, label=label, canonical_value=canonical, source=source)
+
+
+def test_unanchored_numbers_catches_number_never_extracted_as_any_fact_wc1():
+    """WC1 (sai ngữ cảnh, dựng tay — số THẬT từ bài BSR): content_units chỉ
+    trích lợi nhuận 6 tháng (12.636 tỷ) + nộp ngân sách (5.871 tỷ) — Composer
+    gán NHẦM số mục tiêu CẢ NĂM 2026 (2.162 tỷ, KHÔNG được trích thành fact
+    nào) làm lợi nhuận 6 tháng. Tầng 1 (toàn văn) cho qua vì "2.162 tỷ đồng"
+    LÀ substring thật của bài gốc (ở câu khác) -> Tầng 2 PHẢI bắt (neo 0 câu)."""
+    from twmkt.agents.production import unanchored_numbers, unsupported_numbers
+
+    content_units = [
+        _src_fact(12.636e9, "Lợi nhuận sau thuế đạt 12.636 tỷ đồng.", label="LNST BSR 6T/2026"),
+        _src_fact(5.871e9, "Doanh nghiệp cũng nộp ngân sách Nhà nước 5.871 tỷ đồng.",
+                 label="Nộp ngân sách NN BSR 6T/2026"),
+    ]
+    body = "Trong 6 tháng đầu năm 2026, BSR ghi nhận lợi nhuận sau thuế 2.162 tỷ đồng."
+    assert unsupported_numbers(body, _BSR_EVIDENCE_REAL, content_units) == []   # Tầng 1 cho qua (đúng thiết kế)
+    warn = unanchored_numbers(body, content_units)
+    assert any("2.162" in w for w in warn)   # Tầng 2 bắt được
+
+
+def test_unanchored_numbers_catches_number_never_extracted_as_any_fact_wc3():
+    """WC3 (sai ngữ cảnh, dựng tay — số THẬT từ bài BSR) — cùng dạng lỗi WC1
+    nhưng ở cặp doanh thu: gán số MỤC TIÊU CẢ NĂM (154.140 tỷ, không có fact)
+    làm doanh thu 6 tháng THẬT. "47%" dùng ĐÚNG ngữ cảnh trong cùng câu vẫn
+    PHẢI sạch (không lây báo động giả sang số dùng đúng)."""
+    from twmkt.agents.production import unanchored_numbers, unsupported_numbers
+
+    content_units = [
+        _src_fact(100.922e9, "BSR ghi nhận doanh thu hợp nhất 100.922 tỷ đồng, tăng 47% so với cùng "
+                            "kỳ năm trước.", label="Doanh thu hợp nhất BSR 6T/2026"),
+        _src_fact(55e9, "Riêng quý II/2026, BSR đạt doanh thu hơn 55.000 tỷ đồng, tăng 50% so với "
+                       "cùng kỳ.", label="Doanh thu BSR quý II/2026"),
+    ]
+    body = "BSR ghi nhận doanh thu hợp nhất 154.140 tỷ đồng trong 6 tháng đầu năm 2026, tăng 47% so với cùng kỳ."
+    assert unsupported_numbers(body, _BSR_EVIDENCE_REAL, content_units) == []
+    warn = unanchored_numbers(body, content_units)
+    assert any("154.140" in w for w in warn)   # số sai ngữ cảnh -> cảnh báo
+    assert not any("47%" in w for w in warn)   # số dùng ĐÚNG (khớp fact doanh thu 6T) -> KHÔNG cảnh báo oan
+
+
+def test_unanchored_numbers_known_gap_same_sentence_entity_swap_wc2():
+    """WC2 (sai ngữ cảnh, dựng tay — số THẬT từ bài CTG) — GIỚI HẠN ĐÃ BIẾT
+    (ghi vào docs/hypotheses/...): Composer gán nhầm số sở hữu của CỔ ĐÔNG NHÀ
+    NƯỚC (5 tỷ cp, 64,46%) cho MUFG — cả 2 số đều neo ĐÚNG 1 câu (câu của fact
+    Nhà nước) nên Tầng 2 (chỉ đếm SỐ câu neo, không so khớp nhãn/thực thể)
+    KHÔNG bắt được — test này XÁC NHẬN giới hạn, không phải regression."""
+    from twmkt.agents.production import unanchored_numbers
+
+    content_units = [
+        _src_fact(5e9, "cổ đông Nhà nước, với Ngân hàng Nhà nước là cơ quan đại diện chủ sở hữu, "
+                     "nắm hơn 5 tỷ cổ phiếu CTG, tương ứng 64,46% vốn VietinBank.",
+                 label="Sở hữu Nhà nước tại VietinBank"),
+        _src_fact(1228981747, "MUFG Bank đang sở hữu 1.228.981.747 cổ phiếu CTG, tương ứng 15,82% "
+                            "vốn điều lệ.", label="Sở hữu MUFG tại VietinBank"),
+    ]
+    body = "MUFG Bank hiện nắm hơn 5 tỷ cổ phiếu CTG, tương ứng 64,46% vốn điều lệ VietinBank."
+    warn = unanchored_numbers(body, content_units)
+    assert warn == []   # GIỚI HẠN ĐÃ BIẾT: neo đúng 1 câu (đúng SỐ, sai THỰC THỂ) -> lọt
+
+
+def test_unanchored_numbers_known_gap_same_sentence_period_swap_wc4():
+    """WC4 (sai ngữ cảnh, dựng tay — số THẬT từ bài BSR) — cùng nhóm giới hạn
+    WC2: gán %tăng trưởng 6 tháng (47%) cho câu nói về quý II (đáng lẽ 50%) —
+    "47%" vẫn neo đúng 1 câu (câu 6 tháng) nên KHÔNG bị cảnh báo."""
+    from twmkt.agents.production import unanchored_numbers
+
+    content_units = [
+        _src_fact(47, "BSR ghi nhận doanh thu hợp nhất 100.922 tỷ đồng, tăng 47% so với cùng kỳ "
+                    "năm trước.", label="Tăng trưởng doanh thu BSR 6T/2026"),
+        _src_fact(50, "Riêng quý II/2026, BSR đạt doanh thu hơn 55.000 tỷ đồng, tăng 50% so với "
+                    "cùng kỳ.", label="Tăng trưởng doanh thu BSR quý II/2026"),
+    ]
+    body = "Quý II/2026, BSR ghi nhận doanh thu tăng 47% so với cùng kỳ."
+    warn = unanchored_numbers(body, content_units)
+    assert warn == []   # GIỚI HẠN ĐÃ BIẾT — xem WC2
+
+
+def test_unanchored_numbers_noop_when_content_units_empty():
+    """content_units rỗng/None -> [] (không có fact nào để neo, tránh ngập
+    cảnh báo vô nghĩa khi Brief chưa/không trích được content_units — cùng
+    triết lý no-op của _matches_canonical_fact khi content_units rỗng)."""
+    from twmkt.agents.production import unanchored_numbers
+
+    assert unanchored_numbers("Lãi tăng 40% so với cùng kỳ.", []) == []
+    assert unanchored_numbers("Lãi tăng 40% so với cùng kỳ.", None) == []
+
+
+def test_apply_guardrails_tier2_warns_but_never_blocks_cam_ket():
+    """Cam kết TASK-027: 'KHÔNG để tầng 2 chặn'. draft.numeric_anchor_warnings
+    (attribute ĐỘNG — models.ContentDraft KHÔNG khai báo field này, NGOÀI
+    scope.allowed_paths TASK-027) PHẢI khác rỗng ở ca WC1, nhưng draft.is_clean
+    vẫn PHẢI True (compliance_issues KHÔNG được nhận thêm gì từ Tầng 2)."""
+    from twmkt.agents.production import apply_guardrails
+    from twmkt.models import ContentDraft, ContentFormat
+
+    content_units = [
+        _src_fact(12.636e9, "Lợi nhuận sau thuế đạt 12.636 tỷ đồng.", label="LNST BSR 6T/2026"),
+        _src_fact(5.871e9, "Doanh nghiệp cũng nộp ngân sách Nhà nước 5.871 tỷ đồng.",
+                 label="Nộp ngân sách NN BSR 6T/2026"),
+    ]
+    body = "Trong 6 tháng đầu năm 2026, BSR ghi nhận lợi nhuận sau thuế 2.162 tỷ đồng."
+    draft = ContentDraft(fmt=ContentFormat.INFOGRAPHIC, title="t", body=body)
+    apply_guardrails(draft, _BSR_EVIDENCE_REAL, content_units=content_units)
+    assert draft.is_clean   # Tầng 2 KHÔNG được chặn
+    assert draft.numeric_anchor_warnings and any("2.162" in w for w in draft.numeric_anchor_warnings)
+
+
+# --- sheets_board.py — chuẩn bị Notes/Vietnamese cho Tầng 2 (chưa wire vào
+# scripts/produce_from_sheet.py — ngoài scope TASK-027, xem contract) --------
+def test_append_anchor_warnings_merges_into_notes_string_only():
+    from twmkt.sheets_board import append_anchor_warnings
+
+    assert append_anchor_warnings("", []) == ""
+    assert append_anchor_warnings("Đã có lỗi khác", []) == "Đã có lỗi khác"
+    assert append_anchor_warnings("", ["2.162 tỷ đồng"]) == "CẢNH BÁO neo câu (không chặn): 2.162 tỷ đồng"
+    merged = append_anchor_warnings("Đã có lỗi khác", ["2.162 tỷ đồng"])
+    assert merged == "Đã có lỗi khác; CẢNH BÁO neo câu (không chặn): 2.162 tỷ đồng"
+
+
+def test_display_notes_business_translates_anchor_warning_to_editor_vietnamese():
+    from twmkt.sheets_board import _display_notes_business, append_anchor_warnings
+
+    notes = append_anchor_warnings("", ["2.162 tỷ đồng"])
+    shown = _display_notes_business(notes)
+    assert "2.162 tỷ đồng" in shown and "CẢNH BÁO" in shown
+    assert "fact.source" not in shown and "compliance_issues" not in shown   # không lộ thuật ngữ kỹ thuật
