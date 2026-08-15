@@ -3,19 +3,24 @@
     python scripts/sync_store_sheet.py                # đồng bộ 2 chiều (mặc định)
     python scripts/sync_store_sheet.py --from-store   # CHỈ 1 chiều: store -> Sheet
 
-HAI CHẾ ĐỘ, CHỌN ĐÚNG CÁI:
+HAI CHẾ ĐỘ, CHỌN ĐÚNG CÁI (TASK-035 -- đọc kỹ, ý nghĩa 2 chế độ đã đổi so với
+trước: KHÔNG còn CAS đoán ghi đè, ranh giới giờ RÕ theo TÊN HÀM):
 
-  (mặc định) 2 CHIỀU — ingest thao tác người TRƯỚC, rồi render lại từ store.
-    Dùng cho vận hành bình thường và "lỡ xoá vài dòng Sheet, muốn phục hồi":
-    thao tác duyệt bạn vừa bấm được nạp vào store trước khi tab bị dựng lại
-    nên KHÔNG mất.
+  (mặc định) 2 CHIỀU — ingest thao tác người TRƯỚC, rồi `render_*_to_sheet()`
+    (`store/sync_service.py`) CHỈ ghi lại dải cột MÁY-SỞ-HỮU cho dòng đã tồn
+    tại (KHÔNG BAO GIỜ đụng Duyệt Context/Content/Public, Notes, Output Type,
+    Social Link, Posting Status, "Người thực hiện"); dòng CHƯA có trên Sheet
+    (topic mới, hoặc dòng vừa bị xoá tay lẻ tẻ) được thêm mới đầy đủ. Dùng cho
+    vận hành THƯỜNG NGÀY. KHÔNG tự sắp lại/ẩn dòng cũ theo display_days.
 
-  --from-store — 1 CHIỀU, BỎ QUA ingest, dựng lại Sheet ĐÚNG y như store.
-    Dùng khi SHEET ĐANG SAI và bạn muốn store thắng tuyệt đối: dòng thừa do
-    bug cũ, ô bị sửa tay nhầm, định dạng loạn. ⚠️ Chế độ này VỨT BỎ mọi thay
-    đổi trên Sheet chưa kịp ingest (vd vừa bấm APPROVE 5 giây trước) — đó là
-    ĐIỂM KHÁC BIỆT DUY NHẤT nhưng quan trọng giữa 2 chế độ. Không chắc thì
-    dùng mặc định.
+  --from-store — 1 CHIỀU, BỎ QUA ingest, `restore_*_from_store()` dựng lại
+    TOÀN BỘ tab ĐÚNG y như store (kể cả cột người, sắp lại thứ tự, áp
+    display_days). Dùng khi SHEET ĐANG SAI (ô bị sửa tay nhầm mà KHÔNG phải
+    thao tác hợp lệ, dòng thừa do bug cũ, định dạng loạn, cần sắp lại thứ tự/
+    ẩn dòng cũ) và bạn muốn store thắng TUYỆT ĐỐI, kể cả với dòng ĐÃ TỒN TẠI.
+    ⚠️ VỨT BỎ mọi thay đổi trên Sheet chưa kịp ingest (vd vừa bấm APPROVE 5
+    giây trước) — ĐIỂM KHÁC BIỆT DUY NHẤT nhưng quan trọng giữa 2 chế độ.
+    Không chắc thì dùng mặc định.
 
 Cả hai đều idempotent: chạy lại nhiều lần cho cùng kết quả.
 """
@@ -40,7 +45,7 @@ from twmkt.config import load_settings  # noqa: E402
 from twmkt.sheets_board import SheetsBoard  # noqa: E402
 
 from store.sync_service import (  # noqa: E402
-    render_content_to_sheet, render_context_to_sheet, sync_all,
+    restore_content_from_store, restore_context_from_store, sync_all,
 )
 
 
@@ -62,11 +67,13 @@ def main(argv: list[str] | None = None) -> dict:
     if from_store_only:
         print("[reload] CHỈ 1 CHIỀU store -> Sheet (bỏ qua ingest — mọi thay đổi "
               "trên Sheet chưa ingest sẽ bị ghi đè).")
-        # rebuild=True (TASK-032, tường minh dù trùng default) -- ĐÂY CHÍNH LÀ
-        # lệnh phục hồi Bước 5.4 "Sheet đang sai, muốn store thắng tuyệt đối":
-        # bỏ qua CAS, không có ingest trước nên không có gì để CAS bảo vệ.
-        n_ctx = render_context_to_sheet(board, rebuild=True)
-        n_content = render_content_to_sheet(board)
+        # TASK-035 -- ĐÂY CHÍNH LÀ lệnh phục hồi Bước 5.4 "Sheet đang sai,
+        # muốn store thắng tuyệt đối": restore_*_from_store() là NƠI DUY NHẤT
+        # còn ghi cả cột người-sở-hữu (dựng lại toàn bộ tab, sắp lại thứ tự,
+        # áp display_days) -- render_*_to_sheet() (dùng ở nhánh mặc định bên
+        # dưới) không còn làm việc này nữa, xem docstring store/sync_service.py.
+        n_ctx = restore_context_from_store(board)
+        n_content = restore_content_from_store(board)
         board.set_machine_columns_hidden(hidden=True)   # giữ cột máy-ghi luôn ẩn sau khi dựng lại
         print(f"[reload] Đã dựng lại: CONTEXT={n_ctx} dòng, CONTENT={n_content} dòng.")
         return {"ingested_context": 0, "ingested_content": 0,

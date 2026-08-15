@@ -9683,6 +9683,25 @@ def test_render_production_assets_run_ranking_guard_notes_survive_resync(monkeyp
                 m = _re.match(r"A(\d+):", rng)
                 if m:
                     self._v = self._v[: int(m.group(1)) - 1]
+        def batch_update(self, data, value_input_option="RAW"):
+            # TASK-035 -- render_content_to_sheet() ghi dải cột máy qua đây
+            # cho dòng ĐÃ CÓ (không dùng trong test này, tab bắt đầu rỗng nên
+            # mọi dòng đều là dòng MỚI qua append_rows() -- vẫn cần method này
+            # để không AttributeError nếu logic đổi).
+            import re as _re
+            for entry in data:
+                m = _re.match(r"([A-Z]+)(\d+):", entry["range"])
+                col0 = sum((ord(c) - 64) * 26 ** i for i, c in enumerate(reversed(m.group(1)))) - 1
+                row0 = int(m.group(2)) - 1
+                for i, vals in enumerate(entry["values"]):
+                    r = self._v[row0 + i]
+                    if len(r) < col0 + len(vals):
+                        r.extend([""] * (col0 + len(vals) - len(r)))
+                    for j, v in enumerate(vals):
+                        r[col0 + j] = str(v)
+        def append_rows(self, rows, value_input_option="RAW"):
+            for row in rows:
+                self._v.append([str(c) for c in row])
 
     class _FakeSyncBoard:
         def __init__(self):
@@ -9729,6 +9748,23 @@ class _FakeSyncWS:
             m = _re.match(r"A(\d+):", rng)
             if m:
                 self._v = self._v[: int(m.group(1)) - 1]
+
+    def batch_update(self, data, value_input_option="RAW"):
+        import re as _re
+        for entry in data:
+            m = _re.match(r"([A-Z]+)(\d+):", entry["range"])
+            col0 = sum((ord(c) - 64) * 26 ** i for i, c in enumerate(reversed(m.group(1)))) - 1
+            row0 = int(m.group(2)) - 1
+            for i, vals in enumerate(entry["values"]):
+                r = self._v[row0 + i]
+                if len(r) < col0 + len(vals):
+                    r.extend([""] * (col0 + len(vals) - len(r)))
+                for j, v in enumerate(vals):
+                    r[col0 + j] = str(v)
+
+    def append_rows(self, rows, value_input_option="RAW"):
+        for row in rows:
+            self._v.append([str(c) for c in row])
 
 
 class _FakeSyncBoard:
@@ -10097,6 +10133,25 @@ def test_queue_worker_run_once_ingests_sheet_approval_before_claiming(monkeypatc
                 m = _re.match(r"A(\d+):", rng)
                 if m:
                     self._v = self._v[: int(m.group(1)) - 1]
+
+        def batch_update(self, data, value_input_option="RAW"):
+            # TASK-035 -- render_context_to_sheet() ghi dải cột máy (vd
+            # Execute) cho dòng ĐÃ CÓ qua đây, thay vì update() cả hàng.
+            import re as _re
+            for entry in data:
+                m = _re.match(r"([A-Z]+)(\d+):", entry["range"])
+                col0 = sum((ord(c) - 64) * 26 ** i for i, c in enumerate(reversed(m.group(1)))) - 1
+                row0 = int(m.group(2)) - 1
+                for i, vals in enumerate(entry["values"]):
+                    r = self._v[row0 + i]
+                    if len(r) < col0 + len(vals):
+                        r.extend([""] * (col0 + len(vals) - len(r)))
+                    for j, v in enumerate(vals):
+                        r[col0 + j] = str(v)
+
+        def append_rows(self, rows, value_input_option="RAW"):
+            for row in rows:
+                self._v.append([str(c) for c in row])
 
     class _FakeBoard:
         def __init__(self, context_rows):
@@ -11450,12 +11505,9 @@ def test_queue_worker_sync_sheet_ingests_before_render_never_loses_approval(monk
     order = []
     monkeypatch.setattr(qw.ss, "ingest_context_from_sheet", lambda b: order.append("ingest_ctx"))
     monkeypatch.setattr(qw.ss, "ingest_content_from_sheet", lambda b: order.append("ingest_content"))
-    # rebuild=False -- TASK-032 đổi _sync_sheet() để truyền tường minh tham số
-    # này (mặc định render_context_to_sheet() giờ là rebuild=True, xem docstring
-    # hàm đó); double ở đây chỉ khoá THỨ TỰ gọi, không khoá giá trị rebuild,
-    # nên chỉ cần mở rộng chữ ký cho khớp, không đổi assertion nào.
-    monkeypatch.setattr(qw.ss, "render_context_to_sheet",
-                        lambda b, rebuild=False: order.append("render_ctx"))
+    # TASK-035 -- render_context_to_sheet()/render_content_to_sheet() không
+    # còn tham số rebuild (CAS đã gỡ hẳn, xem docstring store/sync_service.py).
+    monkeypatch.setattr(qw.ss, "render_context_to_sheet", lambda b: order.append("render_ctx"))
     monkeypatch.setattr(qw.ss, "render_content_to_sheet", lambda b: order.append("render_content"))
 
     qw._sync_sheet(object())

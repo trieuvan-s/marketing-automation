@@ -59,18 +59,25 @@ python tests/test_pipeline.py       # full suite (hoặc python -m pytest)
    "cùng sự kiện, nhiều nguồn" vào 1 khoá — đó là tầng StoryKey CAO HƠN, CHƯA
    XÂY. `cluster_by_event()` (`curation/enrich.py`) chỉ gộp CÙNG LƯỢT crawl
    chéo nguồn, không phải danh tính bền theo thời gian.
-5. **VPS đã chạy (từ 2026-08-12), TOCTOU giải bằng CAS theo timestamp, không
-   phải distributed lock.** Hệ thống nay chạy trên VPS/máy chủ luôn bật — điều
-   kiện "chờ VPS" của mục này đã thoả. Giả định cũ "VPS = 1 nguồn ghi = hết
-   TOCTOU" đã bị BÁC BỎ bằng dữ liệu thật (TASK-028/029): race render/ingest
-   xảy ra giữa NHIỀU TIẾN TRÌNH cùng 1 máy (`queue_worker.py` + lượt ingest kế
-   tiếp tranh nhau ghi cột người-sở-hữu của CONTEXT), không cần 2 máy —
+5. **VPS đã chạy (từ 2026-08-12), TOCTOU giải bằng "máy không bao giờ ghi cột
+   người", không phải CAS/distributed lock.** Hệ thống nay chạy trên VPS/máy
+   chủ luôn bật — điều kiện "chờ VPS" của mục này đã thoả. Giả định cũ "VPS =
+   1 nguồn ghi = hết TOCTOU" đã bị BÁC BỎ bằng dữ liệu thật (TASK-028/029):
+   race render/ingest xảy ra giữa NHIỀU TIẾN TRÌNH cùng 1 máy (`queue_worker.py`
+   + lượt ingest kế tiếp tranh nhau ghi cột người-sở-hữu), không cần 2 máy —
    `system_power_on.py` (thư mục gốc dự án, trước đây `scripts/power_on.py`)
-   vẫn chỉ chặn khởi động trùng, không chặn race này. Cách giải đã chốt
-   (TASK-030): compare-and-swap theo timestamp trên gate_status
-   (`store/sync_service.py::_cas_user_value()`) — `render_context_to_sheet()`
-   chỉ ghi đè cột người-sở-hữu khi CHỨNG MINH ĐƯỢC store mới hơn giá trị đang
-   có trên Sheet, không thì giữ nguyên. KHÔNG xây distributed lock.
+   vẫn chỉ chặn khởi động trùng, không chặn race này. CAS theo timestamp
+   (TASK-030/032, `_cas_user_value()`) chỉ vá được CONTEXT rồi tái phát Y HỆT
+   ở Gate 2 CONTENT (15/08) — thêm 1 lớp đoán "ghi đè có an toàn không" là vá
+   thêm lên hành vi sai gốc, bị chủ dự án bác. Cách giải TẬN GỐC đã chốt
+   (TASK-035, GỠ HẲN CAS): `render_context_to_sheet()`/`render_content_to_
+   sheet()` (`store/sync_service.py`) KHÔNG BAO GIỜ đưa cột NGƯỜI-SỞ-HỮU vào
+   payload ghi cho dòng ĐÃ TỒN TẠI (dải cột suy từ header qua
+   `_machine_col_ranges()`, không hard-code) — không có gì để đoán vì máy đơn
+   giản không chạm ô đó. Đường phục hồi toàn bộ (Sheet xoá/hỏng, ghi cả cột
+   người) tách thành lệnh riêng NGƯỜI chủ động gọi: `restore_context_from_
+   store()`/`restore_content_from_store()`, qua `scripts/sync_store_sheet.py
+   --from-store`. KHÔNG xây distributed lock.
 6. **Production Factory = code tất định SAU Gate 2, không phải LLM thêm 1
    vòng.** `media_factory/spec.py: verify_spec()` là guardrail số LẦN 2 (đối
    chiếu `facts[]`), chạy TRƯỚC render — không sinh nội dung mới, chỉ kiểm.

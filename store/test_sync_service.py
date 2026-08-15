@@ -1,11 +1,14 @@
 """Test store/sync_service.py -- dùng FAKE board/worksheet trong bộ nhớ (KHÔNG
-chạm Google Sheet thật, KHÔNG cần credential/mạng). Fake worksheet chỉ implement
-đúng 2 method sync_service.py thực sự gọi qua board._tab(...): get_all_values()/
-clear()/update() -- đủ mô phỏng hành vi gspread cần cho test này. Tự thêm src/
-vào sys.path (KHÔNG dựa side-effect import-order từ tests/test_pipeline.py) --
+chạm Google Sheet thật, KHÔNG cần credential/mạng). Fake worksheet implement
+ĐÚNG các method sync_service.py thực sự gọi qua board._tab(...): get_all_values/
+update/batch_clear/batch_update/append_rows -- đủ mô phỏng hành vi gspread cần
+cho test này (TASK-035 thêm batch_update/append_rows -- đường ghi mới chỉ ghi
+dải cột máy + thêm dòng mới, xem store/sync_service.py). Tự thêm src/ vào
+sys.path (KHÔNG dựa side-effect import-order từ tests/test_pipeline.py) --
 chạy standalone (python -m pytest store/test_sync_service.py) hay cùng bộ đều
 được, cùng nếp tests/test_pipeline.py."""
 import os
+import re as _re
 import sys
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -43,16 +46,60 @@ class _FakeWorksheet:
     def batch_clear(self, ranges: list[str]) -> None:
         """Fake `batch_clear` — chỉ cần cắt phần ĐUÔI (dòng thừa khi bảng co
         lại). Parse "A<start>:<col><end>" lấy start, xoá từ đó tới hết."""
-        import re as _re
         for rng in ranges:
             m = _re.match(r"A(\d+):", rng)
             if m:
                 self._grid = self._grid[: int(m.group(1)) - 1]
 
+    def batch_update(self, data: list[dict], value_input_option: str = "RAW") -> None:
+        """Fake `values.batchUpdate` (TASK-035, `_write_machine_col_ranges()`)
+        -- mỗi entry {'range': 'K5:L7', 'values': [[...], ...]}, ghi ĐÚNG dải
+        cột/dòng chỉ định, KHÔNG đụng cột/dòng khác (khác `update()` ở trên,
+        vốn giả định range luôn bắt đầu cột A)."""
+        for entry in data:
+            col0, row0, _col1, _row1 = _a1_range_bounds(entry["range"])
+            values = entry["values"]
+            needed_rows = row0 + len(values)
+            while len(self._grid) < needed_rows:
+                self._grid.append([])
+            for i, vals in enumerate(values):
+                r = self._grid[row0 + i]
+                needed_len = col0 + len(vals)
+                if len(r) < needed_len:
+                    r.extend([""] * (needed_len - len(r)))
+                for j, v in enumerate(vals):
+                    r[col0 + j] = str(v)
+
+    def append_rows(self, rows: list[list], value_input_option: str = "RAW") -> None:
+        """Fake `append_rows` (TASK-035) -- nối thêm CUỐI bảng, không đụng
+        dòng đã có (đúng ngữ nghĩa gspread thật/`InsertDimensionRequest`)."""
+        for row in rows:
+            self._grid.append([str(c) for c in row])
+
     def set_rows(self, rows: list[list[str]]) -> None:
         """Helper CHỈ dùng trong test -- mô phỏng trạng thái Sheet SẴN CÓ
         (bao gồm header) trước khi gọi hàm sync -- KHÔNG có trong gspread thật."""
         self._grid = [list(r) for r in rows]
+
+
+def _col_letters_to_idx(letters: str) -> int:
+    """"A"->0, "K"->10 -- 0-based, cùng chiều ngược với sheets_board._col_a1()."""
+    n = 0
+    for ch in letters:
+        n = n * 26 + (ord(ch) - 64)
+    return n - 1
+
+
+def _a1_range_bounds(rng: str) -> tuple[int, int, int, int]:
+    """"K5:L7" -> (col0, row0, col1, row1) 0-based, nửa-mở -- dùng bởi fake
+    `batch_update()` ở TRÊN VÀ dưới (test_sync_service.py, test_pipeline.py,
+    test_race_render_ingest.py đều cần parser này, mỗi file tự copy 1 bản nhỏ
+    -- cùng nếp các fake khác trong repo, không dựng module test dùng chung)."""
+    m = _re.match(r"([A-Z]+)(\d+):([A-Z]+)(\d+)", rng)
+    if not m:
+        raise ValueError(f"range không hợp lệ trong fake: {rng!r}")
+    c0, r0, c1, r1 = m.groups()
+    return _col_letters_to_idx(c0), int(r0) - 1, _col_letters_to_idx(c1) + 1, int(r1)
 
 
 class _FakeSyncBoard:
@@ -61,6 +108,16 @@ class _FakeSyncBoard:
 
     def _tab(self, name: str) -> _FakeWorksheet:
         return self._tabs[name]
+
+    def delete_row(self, tab_name: str, row: int) -> None:
+        """Fake `deleteDimension` (TASK-035) -- render_*_to_sheet() không còn
+        tự loại dòng thiếu trong store, ingest_context_from_sheet() phải xoá
+        TƯỜNG MINH dòng CONTEXT/CONTENT của topic vừa Gate1=DELETE qua đường
+        này (xem docstring hàm đó)."""
+        grid = self._tabs[tab_name]._grid
+        idx = row - 1
+        if 0 <= idx < len(grid):
+            del grid[idx]
 
 
 @pytest.fixture()
@@ -154,37 +211,51 @@ def test_render_context_to_sheet_reflects_gate1_and_notes_after_ingest(board, db
     assert row[_header_index(header, "Notes")] == "ghi chú người"
 
 
-def test_render_context_to_sheet_without_prior_ingest_reflects_store_not_sheet(board, db_path):
-    """Ngược lại: KHÔNG ingest trước -- render dùng ĐÚNG giá trị TRONG STORE
-    (PENDING), bỏ qua APPROVE đang nằm trên Sheet chưa được nạp. Đây là hành
-    vi ĐÚNG THIẾT KẾ (store là nguồn sự thật), không phải bug."""
+def test_render_context_to_sheet_without_prior_ingest_never_overwrites_gate1(board, db_path):
+    """TASK-035 (thay test CAS cũ -- trước đây kỳ vọng NGƯỢC LẠI: "không ingest
+    trước thì store thắng, Sheet bị ghi đè về PENDING", coi đó là hành vi ĐÚNG
+    THIẾT KẾ. Nguyên tắc mới đã BÁC BỎ điều đó: cột NGƯỜI-SỞ-HỮU của 1 dòng ĐÃ
+    TỒN TẠI trên Sheet KHÔNG BAO GIỜ nằm trong payload máy ghi -- bất kể ingest
+    có chạy trước hay không, bất kể store nói gì. Đây CHÍNH LÀ hình dạng đơn
+    giản hoá của bug 15/08 (Gate 2 CONTENT) cho Gate 1 CONTEXT: 1 lượt render
+    TỰ ĐỘNG chen vào TRƯỚC khi ingest kịp bắt APPROVE người vừa bấm."""
     ps.write_raw("tk-1", {"context": "Bài 1", "hook": "h", "source": "u1",
                           "tickers": [], "group": "", "topic": ""}, db_path=db_path)
     ps.write_gate_status("tk-1", gate1="PENDING", db_path=db_path)
-    board._tab("CONTEXT").set_rows([
-        CONTEXT_HEADER,
-        ["24/07/2026", "0.0", "0", "", "", "Bài 1", "h", "u1", "APPROVE", "", "", "", "", "tk-1"],
-    ])
+    ss.render_context_to_sheet(board, db_path=db_path)   # dựng dòng lần đầu (PENDING)
+
+    # "Người bấm Duyệt Context trên Sheet" -- sửa trực tiếp ô, CHƯA ingest.
+    grid0 = board._tab("CONTEXT").get_all_values()
+    header = grid0[0]
+    grid0[1][_header_index(header, GATE1_COL)] = "APPROVE"
+    board._tab("CONTEXT").set_rows(grid0)
 
     ss.render_context_to_sheet(board, db_path=db_path)   # KHÔNG gọi ingest trước
 
     grid = board._tab("CONTEXT").get_all_values()
     header, row = grid[0], grid[1]
-    assert row[_header_index(header, GATE1_COL)] == "PENDING"
+    assert row[_header_index(header, GATE1_COL)] == "APPROVE", (
+        "render KHÔNG được ghi đè Duyệt Context của dòng ĐÃ TỒN TẠI, dù store "
+        "còn PENDING và ingest chưa kịp chạy -- cột người-sở-hữu không bao giờ "
+        "nằm trong payload máy ghi cho dòng đã có (TASK-035)."
+    )
 
 
-def test_render_context_to_sheet_is_idempotent_recovery(board, db_path):
-    """LỆNH PHỤC HỒI (Bước 5.4): render 2 lần liên tiếp -> kết quả GIỐNG HỆT."""
+def test_restore_context_from_store_is_idempotent_recovery(board, db_path):
+    """LỆNH PHỤC HỒI (Bước 5.4, TASK-035: `restore_context_from_store()`, gọi
+    qua `scripts/sync_store_sheet.py --from-store` -- KHÔNG PHẢI render_context_
+    to_sheet() nữa, xem docstring module): dựng lại 2 lần liên tiếp -> kết quả
+    GIỐNG HỆT."""
     ps.write_raw("tk-1", {"context": "Bài 1", "hook": "h", "source": "u1",
                           "tickers": [], "group": "", "topic": ""}, db_path=db_path)
     ps.write_gate_status("tk-1", gate1="APPROVE", execute="DONE", db_path=db_path)
 
-    ss.render_context_to_sheet(board, db_path=db_path)
+    ss.restore_context_from_store(board, db_path=db_path)
     first = board._tab("CONTEXT").get_all_values()
 
     # Mô phỏng "xoá nhầm" -- người lỡ xoá sạch dòng dữ liệu trên Sheet.
     board._tab("CONTEXT").set_rows([CONTEXT_HEADER])
-    ss.render_context_to_sheet(board, db_path=db_path)
+    ss.restore_context_from_store(board, db_path=db_path)
     second = board._tab("CONTEXT").get_all_values()
 
     assert first == second   # phục hồi ĐÚNG NGUYÊN, không lệch 1 ô nào
@@ -707,91 +778,83 @@ def test_sync_all_full_recovery_after_accidental_deletion(board, db_path):
 
 
 # =============================================================================
-# CAS theo timestamp cho cột người-sở-hữu (TASK-030) -- chiều NGƯỢC LẠI: store
-# THẬT SỰ mới hơn Sheet thì render vẫn phải ghi đè bình thường. Bài test race
-# (tests/test_race_render_ingest.py) chỉ kiểm chiều "KHÔNG chứng minh được ->
-# giữ nguyên" -- thiếu chiều này thì `_cas_user_value()` có thể bị vá quá tay
-# thành "không bao giờ ghi", âm thầm phá đường phục hồi Bước 5.4.
+# TASK-035 -- tái lập NGUYÊN VẸN sự cố THẬT 15/08 (Gate 2 tab CONTENT) + đường
+# phục hồi (restore_*_from_store()) vẫn được phép ghi đè cột người-sở-hữu.
 # =============================================================================
 
-def test_cas_overwrites_when_sheet_value_matches_an_older_store_version(board, db_path):
-    """Sheet đang hiện 1 giá trị CŨ (khớp đúng 1 version quá khứ trong lịch sử
-    gate_status) trong khi store đã tiến xa hơn (version mới nhất khác) --
-    đây CHÍNH LÀ bằng chứng CAS cần để ghi đè an toàn: giá trị Sheet không
-    phải "người vừa sửa tay, chưa kịp ingest" mà là "Sheet chưa bắt kịp store"
-    (đúng cơ chế Bước 5.4: Sheet bị xoá/reset về giá trị quá khứ, render dựng
-    lại đúng). Nếu `_cas_user_value()` bị vá quá tay thành luôn giữ nguyên khi
-    khác Sheet, test này ĐỎ."""
+def test_regression_2026_08_15_gate2_approve_survives_automatic_render_and_enqueues_render_assets(
+        board, db_path):
+    """Tái lập NGUYÊN VẸN sự cố THẬT ngày 15/08 (hợp đồng TASK-035): Lead duyệt
+    Gate 2 trên tab CONTENT (dòng 40 thật), đọc lại thấy APPROVE, 15 phút sau
+    đọc lại: PENDING -- store CHƯA BAO GIỜ thấy APPROVE, KHÔNG job render_assets
+    nào được tạo. Cơ chế xác nhận qua code: `render_content_to_sheet()` (bản
+    TRƯỚC TASK-035) dựng lại TOÀN BỘ tab CONTENT từ store MỖI LƯỢT SYNC TỰ ĐỘNG
+    (`queue_worker.py::_sync_sheet()`, chạy sau MỌI job worker xử lý xong,
+    không riêng job của topic đang xét) -- KHÔNG CAS nào bảo vệ tab này (CAS
+    TASK-030/032 chỉ áp cho 3 cột của CONTEXT). Tái lập: dòng CONTENT đã tồn
+    tại (PENDING) -> Lead bấm APPROVE trực tiếp trên Sheet -> 1 lượt render TỰ
+    ĐỘNG chen vào (mô phỏng: job KHÁC xử lý xong, worker gọi render_content_
+    to_sheet() -- KHÔNG ingest trước, đúng cửa sổ race đã xảy ra thật) -> giá
+    trị NGƯỜI phải CÒN NGUYÊN trên Sheet ngay sau lượt render đó (không phải
+    "chưa kịp mất, đợi ingest kế tiếp mới lộ" -- TASK-035 chặn TẠI NGUỒN, xem
+    docstring module), rồi ingest chạy (lượt kế tiếp) phải bắt được APPROVE +
+    enqueue job render_assets -- KHÔNG được coi nhầm thành "rút duyệt"."""
+    ps.write_raw("tk-1", {"context": "Bài 1"}, db_path=db_path)
+    ps.write_content_output("tk-1", "article", {"status": "DONE", "output": "x",
+                                                "notes": "", "facts": "[]"}, db_path=db_path)
+    ps.write_content_status("tk-1", "article", gate2="PENDING", db_path=db_path)
+    ss.render_content_to_sheet(board, db_path=db_path)   # dòng CONTENT xuất hiện lần đầu
+
+    # "Lead duyệt Gate 2 trên tab CONTENT" -- sửa trực tiếp ô, CHƯA ingest.
+    grid = board._tab("CONTENT").get_all_values()
+    header = grid[0]
+    grid[1][_header_index(header, GATE2_COL)] = "APPROVE"
+    board._tab("CONTENT").set_rows(grid)
+
+    # "1 lượt render tự động chen vào" -- job KHÁC xử lý xong, worker render
+    # lại CONTENT (KHÔNG ingest trước -- đúng cửa sổ race thật đã xảy ra).
+    ss.render_content_to_sheet(board, db_path=db_path)
+
+    grid_after = board._tab("CONTENT").get_all_values()
+    row_after = grid_after[1]
+    assert row_after[_header_index(header, GATE2_COL)] == "APPROVE", (
+        "BUG THẬT 15/08 nếu fail: lượt render tự động đã ghi đè APPROVE người "
+        "vừa bấm về PENDING (từ store cũ)."
+    )
+
+    # Lượt ingest kế tiếp phải bắt được APPROVE + enqueue render_assets.
+    ss.ingest_content_from_sheet(board, db_path=db_path)
+    assert ps.read_content_status("tk-1", "article", db_path=db_path)["gate2"] == "APPROVE"
+    jobs = [j for j in qs.list_queue(db_path=db_path) if j["job_type"] == "render_assets"]
+    assert len(jobs) == 1 and jobs[0]["topic_key"] == "tk-1", (
+        "job render_assets PHẢI được enqueue -- APPROVE không được coi nhầm là "
+        "đã tồn tại sẵn / bị mất."
+    )
+
+
+def test_restore_context_from_store_overwrites_existing_wrong_value(board, db_path):
+    """TASK-035 (thay 2 test CAS/`rebuild` cũ đã GỠ hẳn -- không còn tham số/
+    cơ chế đó để khoá ngữ nghĩa nữa). `restore_context_from_store()` là NƠI
+    DUY NHẤT còn ghi đè cột người-sở-hữu của dòng ĐÃ TỒN TẠI -- kể cả khi Sheet
+    đang SAI (ô Duyệt Context không khớp store, không phải do người vừa thao
+    tác mà do dữ liệu cũ/lỗi) -- phải GHI ĐÈ về đúng giá trị store, KHÁC hẳn
+    render_context_to_sheet() (không bao giờ đụng, xem test_render_context_
+    to_sheet_without_prior_ingest_never_overwrites_gate1)."""
     ps.write_raw("tk-1", {"context": "Bài 1", "hook": "h", "source": "u1",
                           "tickers": [], "group": "", "topic": ""}, db_path=db_path)
-    ps.write_gate_status("tk-1", gate1="PENDING", db_path=db_path)   # version 1
-    ss.render_context_to_sheet(board, db_path=db_path)   # Sheet hiện PENDING
-
-    grid = board._tab("CONTEXT").get_all_values()
-    header = grid[0]
-    assert grid[1][_header_index(header, GATE1_COL)] == "PENDING"
-
-    # store tiến thêm 1 bước (vd worker/ingest khác ghi APPROVE) -- Sheet
-    # KHÔNG được đụng tới (mô phỏng chưa render lại), vẫn còn "PENDING" cũ.
-    ps.write_gate_status("tk-1", gate1="APPROVE", db_path=db_path)   # version 2 (mới nhất)
-
-    ss.render_context_to_sheet(board, db_path=db_path)
-
-    grid_after = board._tab("CONTEXT").get_all_values()
-    row_after = grid_after[1]
-    assert row_after[_header_index(header, GATE1_COL)] == "APPROVE", (
-        "store MỚI HƠN Sheet (Sheet khớp đúng version CŨ trong lịch sử) -- "
-        "render phải ghi đè bình thường, không được vá CAS quá tay thành "
-        "'không bao giờ ghi' (sẽ phá đường phục hồi Bước 5.4)."
-    )
-
-
-def test_rebuild_flag_switches_between_keep_and_overwrite_for_same_cell_state(board, db_path):
-    """KHOÁ NGỮ NGHĨA (TASK-032) -- CÙNG 1 trạng thái ô (Sheet=APPROVE hiện có
-    nhưng KHÔNG khớp version nào trong lịch sử gate_status, store=PENDING duy
-    nhất): `rebuild=False` (lượt sync tự động, CAS bảo vệ -- kịch bản race
-    TASK-029) phải GIỮ NGUYÊN "APPROVE"; `rebuild=True` (lượt gọi trực tiếp/
-    thủ công, mặc định của render_context_to_sheet() -- kịch bản "chưa từng
-    ingest" test_render_context_to_sheet_without_prior_ingest_reflects_store_
-    not_sheet) phải GHI ĐÈ về "PENDING". Đây CHÍNH LÀ cặp kịch bản dữ liệu
-    Y HỆT NHAU mà chỉ tham số `rebuild` phân biệt được -- ai đổi lại thành suy
-    luận từ dữ liệu (bỏ tham số này, hoặc để 2 nhánh cho cùng kết quả) sẽ làm
-    test này ĐỎ ngay."""
-    def _seed(tk):
-        ps.write_raw(tk, {"context": "Bài 1", "hook": "h", "source": "u1",
-                          "tickers": [], "group": "", "topic": ""}, db_path=db_path)
-        ps.write_gate_status(tk, gate1="PENDING", db_path=db_path)   # ĐÚNG 1 version
-
-    def _sheet_showing_approve():
-        return [
-            CONTEXT_HEADER,
-            ["24/07/2026", "0.0", "0", "", "", "Bài 1", "h", "u1", "APPROVE", "", "", "", "", "tk-x"],
-        ]
-
-    # rebuild=False -- CAS bảo vệ, giữ nguyên Sheet (không version nào chứng
-    # minh được store đã tiến xa hơn "APPROVE" đang hiện).
-    _seed("tk-x")
-    board._tab("CONTEXT").set_rows(_sheet_showing_approve())
-    ss.render_context_to_sheet(board, db_path=db_path, rebuild=False)
-    grid = board._tab("CONTEXT").get_all_values()
-    assert grid[1][_header_index(grid[0], GATE1_COL)] == "APPROVE", (
-        "rebuild=False phải GIỮ giá trị Sheet khi không chứng minh được store "
-        "mới hơn (bảo vệ thao tác người, TASK-029)."
-    )
-
-    # rebuild=True -- bỏ qua CAS, store thắng tuyệt đối (topic KHÁC, tránh
-    # version gate_status của tk-x ở trên làm nhiễu phép so sánh).
-    _seed("tk-y")
+    ps.write_gate_status("tk-1", gate1="PENDING", db_path=db_path)
     board._tab("CONTEXT").set_rows([
         CONTEXT_HEADER,
-        ["24/07/2026", "0.0", "0", "", "", "Bài 1", "h", "u1", "APPROVE", "", "", "", "", "tk-y"],
+        ["24/07/2026", "0.0", "0", "", "", "Bài 1", "h", "u1", "APPROVE", "", "", "", "", "tk-1"],
     ])
-    ss.render_context_to_sheet(board, db_path=db_path, rebuild=True)
-    grid2 = board._tab("CONTEXT").get_all_values()
-    row_y = next(r for r in grid2[1:] if r[_header_index(grid2[0], "TopicKey")] == "tk-y")
-    assert row_y[_header_index(grid2[0], GATE1_COL)] == "PENDING", (
-        "rebuild=True phải GHI ĐÈ Sheet bằng giá trị store, kể cả khi Sheet "
-        "chưa từng ingest (đường phục hồi Bước 5.4 / lối gọi trực tiếp)."
+
+    ss.restore_context_from_store(board, db_path=db_path)
+
+    grid = board._tab("CONTEXT").get_all_values()
+    row = grid[1]
+    assert row[_header_index(grid[0], GATE1_COL)] == "PENDING", (
+        "restore_context_from_store() phải ghi đè Sheet bằng store TUYỆT ĐỐI, "
+        "kể cả cột người-sở-hữu của dòng đã tồn tại."
     )
 
 
@@ -809,13 +872,13 @@ def test_render_context_to_sheet_includes_output_type(board, db_path):
     assert row[_header_index(header, OUTPUT_TYPE_COL)] == "Infographic, Video"
 
 
-def test_write_rows_skips_unchanged_rows_touches_only_changed_ones(board, db_path):
-    """Lead 02/08 ("Output Type bị khoá") — `_write_rows()` giờ SO KHỚP từng
-    dòng với Sheet hiện tại, CHỈ gọi update() cho dòng THẬT SỰ đổi. Dòng không
-    đổi giữa 2 lần render KHÔNG được đụng tới ô nào (tránh ghi đè ô "dropdown
-    chip multi-select" Output Type Lead tự bật tay qua UI — mỗi lần ghi giá
-    trị thô qua API vào ô chip, kể cả giá trị giống hệt, có thể làm rớt trạng
-    thái UI chip đó, xem docstring _write_rows())."""
+def test_render_context_to_sheet_touches_only_changed_rows_machine_cols(board, db_path):
+    """TASK-035 (thay bản cũ dựa trên `_write_rows()`/`update()` — đường ghi
+    giờ là `_write_machine_col_ranges()`/`batch_update()`, xem docstring
+    module): dòng không đổi giữa 2 lần render KHÔNG được đụng tới Ô NÀO (dải
+    cột máy cũng vậy — không chỉ tránh phá "dropdown chip" Output Type như
+    trước, còn là hệ quả trực tiếp của "không có gì thay đổi thì không có gì
+    để ghi")."""
     ps.write_raw("tk-1", {"context": "Bài 1", "hook": "h", "source": "u1",
                           "tickers": [], "group": "", "topic": ""}, db_path=db_path)
     ps.write_gate_status("tk-1", gate1="APPROVE", output_type=["Article"], db_path=db_path)
@@ -828,13 +891,13 @@ def test_write_rows_skips_unchanged_rows_touches_only_changed_ones(board, db_pat
     baseline = ws.get_all_values()
 
     calls: list[str] = []
-    orig_update = ws.update
+    orig_batch_update = ws.batch_update
 
-    def _spy_update(range_str, values, value_input_option="RAW"):
-        calls.append(range_str)
-        return orig_update(range_str, values, value_input_option=value_input_option)
+    def _spy_batch_update(data, value_input_option="RAW"):
+        calls.extend(entry["range"] for entry in data)
+        return orig_batch_update(data, value_input_option=value_input_option)
 
-    ws.update = _spy_update
+    ws.batch_update = _spy_batch_update
 
     # Chỉ đổi tk-2 (Execute) -- tk-1 giữ nguyên hệt.
     ps.write_gate_status("tk-2", execute="DONE", db_path=db_path)
@@ -844,15 +907,18 @@ def test_write_rows_skips_unchanged_rows_touches_only_changed_ones(board, db_pat
     i_key = _header_index(header, "TopicKey")
     row_of = {r[i_key]: i for i, r in enumerate(baseline[1:], start=2)}   # +2 = số dòng Sheet (1-based, có header)
 
-    # KHÔNG lệnh update() nào chạm dòng tk-1 (không đổi).
+    def _touches_row(rng: str, sheet_row_num: int) -> bool:
+        _c0, r0, _c1, r1 = _a1_range_bounds(rng)
+        return r0 < sheet_row_num <= r1   # r0 0-based, sheet_row_num 1-based (có header)
+
+    # KHÔNG lệnh batch_update() nào chạm dòng tk-1 (không đổi).
     tk1_row_num = row_of["tk-1"]
     for rng in calls:
-        start = int(rng[1:])
-        assert start != tk1_row_num, f"dòng tk-1 (không đổi) bị đụng: {rng}"
+        assert not _touches_row(rng, tk1_row_num), f"dòng tk-1 (không đổi) bị đụng: {rng}"
 
     # Dòng tk-2 (CÓ đổi) phải được ghi lại.
     tk2_row_num = row_of["tk-2"]
-    assert any(int(rng[1:]) == tk2_row_num for rng in calls), \
+    assert any(_touches_row(rng, tk2_row_num) for rng in calls), \
         f"dòng tk-2 (có đổi) PHẢI được ghi, calls={calls}"
 
     grid = ws.get_all_values()
@@ -1479,12 +1545,14 @@ def _seed_full_state(db_path):
 
 
 def test_full_restore_after_wiping_both_tabs(board, db_path):
-    """KỊCH BẢN LEAD: xoá TOÀN BỘ dữ liệu 2 tab -> render lại từ store -> phải
-    khớp TỪNG Ô với trước khi xoá. Đây là thước đo "DB đủ tin cậy": bất kỳ
-    trường nào chỉ sống trên Sheet mà không vào store sẽ làm test này đỏ."""
+    """KỊCH BẢN LEAD: xoá TOÀN BỘ dữ liệu 2 tab -> `restore_*_from_store()`
+    (TASK-035 -- đường phục hồi `scripts/sync_store_sheet.py --from-store`,
+    KHÔNG PHẢI render_*_to_sheet() nữa, xem docstring module) -> phải khớp
+    TỪNG Ô với trước khi xoá. Đây là thước đo "DB đủ tin cậy": bất kỳ trường
+    nào chỉ sống trên Sheet mà không vào store sẽ làm test này đỏ."""
     _seed_full_state(db_path)
-    ss.render_context_to_sheet(board, db_path=db_path)
-    ss.render_content_to_sheet(board, db_path=db_path)
+    ss.restore_context_from_store(board, db_path=db_path)
+    ss.restore_content_from_store(board, db_path=db_path)
     before_ctx = board._tab("CONTEXT").get_all_values()
     before_con = board._tab("CONTENT").get_all_values()
 
@@ -1492,8 +1560,8 @@ def test_full_restore_after_wiping_both_tabs(board, db_path):
     board._tab("CONTEXT").set_rows([CONTEXT_HEADER])
     board._tab("CONTENT").set_rows([CONTENT_HEADER])
 
-    ss.render_context_to_sheet(board, db_path=db_path)
-    ss.render_content_to_sheet(board, db_path=db_path)
+    ss.restore_context_from_store(board, db_path=db_path)
+    ss.restore_content_from_store(board, db_path=db_path)
 
     assert board._tab("CONTEXT").get_all_values() == before_ctx
     assert board._tab("CONTENT").get_all_values() == before_con
@@ -1505,8 +1573,8 @@ def test_restore_keeps_every_user_owned_field(board, db_path):
     _seed_full_state(db_path)
     board._tab("CONTEXT").set_rows([CONTEXT_HEADER])
     board._tab("CONTENT").set_rows([CONTENT_HEADER])
-    ss.render_context_to_sheet(board, db_path=db_path)
-    ss.render_content_to_sheet(board, db_path=db_path)
+    ss.restore_context_from_store(board, db_path=db_path)
+    ss.restore_content_from_store(board, db_path=db_path)
 
     ctx = board._tab("CONTEXT").get_all_values()
     row_a = next(r for r in ctx[1:] if r[_header_index(ctx[0], "TopicKey")] == "tk-a")
@@ -1539,13 +1607,13 @@ def test_store_keeps_both_publish_and_produce_dates(db_path):
 
 
 def test_restore_is_idempotent_across_repeated_renders(board, db_path):
-    """Render nhiều lần liên tiếp KHÔNG được làm trôi giá trị nào (đây chính
+    """Phục hồi nhiều lần liên tiếp KHÔNG được làm trôi giá trị nào (đây chính
     là bug Timestamp 2026-07-29: mỗi lượt render ghi đè ngày thành hôm nay)."""
     _seed_full_state(db_path)
-    ss.render_context_to_sheet(board, db_path=db_path)
+    ss.restore_context_from_store(board, db_path=db_path)
     first = board._tab("CONTEXT").get_all_values()
     for _ in range(3):
-        ss.render_context_to_sheet(board, db_path=db_path)
+        ss.restore_context_from_store(board, db_path=db_path)
     assert board._tab("CONTEXT").get_all_values() == first
 
 
@@ -1578,6 +1646,37 @@ def test_gate1_delete_removes_topic_from_db_and_sheet(board, db_path):
     grid = board._tab("CONTEXT").get_all_values()
     keys = [r[_header_index(grid[0], "TopicKey")] for r in grid[1:]]
     assert keys == ["tk-giu"]
+
+
+def test_gate1_delete_removes_content_rows_immediately(board, db_path):
+    """TASK-035 -- render_content_to_sheet() không còn tự loại dòng THIẾU
+    trong store (đường ghi mới chỉ update/append, không suy luận "topic mất
+    khỏi store nghĩa là phải xoá dòng"), nên xoá chủ đề (Gate1=DELETE) phải
+    xoá TƯỜNG MINH luôn dòng CONTENT cùng TopicKey NGAY LÚC INGEST (đối xứng
+    CONTEXT) -- không đợi lượt render_content_to_sheet() chạy lại mới biến
+    mất, và KHÔNG cần gọi render_content_to_sheet() sau đó để thấy hiệu lực."""
+    ps.write_raw("tk-xoa", {"context": "Bài bỏ"}, db_path=db_path)
+    ps.write_gate_status("tk-xoa", gate1="APPROVE", execute="DONE", db_path=db_path)
+    ps.write_content_output("tk-xoa", "article", {"status": "DONE", "output": "x",
+                                                  "notes": "", "facts": "[]"}, db_path=db_path)
+    ps.write_content_status("tk-xoa", "article", gate2="PENDING", db_path=db_path)
+    ps.write_raw("tk-giu", {"context": "Bài giữ"}, db_path=db_path)
+    ps.write_content_output("tk-giu", "article", {"status": "DONE", "output": "y",
+                                                  "notes": "", "facts": "[]"}, db_path=db_path)
+    ss.render_content_to_sheet(board, db_path=db_path)   # dựng 2 dòng CONTENT
+
+    board._tab("CONTEXT").set_rows([
+        CONTEXT_HEADER,
+        ["29/07/2026", "0", "0", "", "", "Bài bỏ", "h", "u", "DELETE", "", "", "", "", "tk-xoa"],
+    ])
+    ss.ingest_context_from_sheet(board, db_path=db_path)   # KHÔNG gọi render nào sau đó
+
+    grid = board._tab("CONTENT").get_all_values()
+    keys = [r[_header_index(grid[0], "TopicKey")] for r in grid[1:]]
+    assert keys == ["tk-giu"], (
+        f"dòng CONTENT của topic đã xoá PHẢI biến mất NGAY lúc ingest, không "
+        f"chờ render_content_to_sheet() chạy lại: {keys!r}"
+    )
 
 
 def test_gate1_delete_cancels_pending_jobs(board, db_path):

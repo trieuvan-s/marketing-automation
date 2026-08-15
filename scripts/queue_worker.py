@@ -79,25 +79,18 @@ def _sync_sheet(board) -> None:
     """INGEST TRƯỚC, RENDER SAU — LUÔN LUÔN, không bao giờ render trần.
 
     BUG THẬT (2026-07-28, bắt được ở lượt e2e đầu tiên — Lead duyệt 5 chủ đề,
-    hệ thống chỉ nhận 1, 4 lượt duyệt BỊ XOÁ SẠCH): `render_*_to_sheet()` dựng
-    lại TOÀN BỘ tab từ store, kể cả các cột NGƯỜI-SỞ-HỮU (Duyệt Context/Notes/
-    Output Type). Một lượt `run()` chạy hàng phút (gọi LLM); người duyệt thêm
-    chủ đề TRONG quãng đó; xong việc, worker render từ store — store chưa biết
-    những lượt duyệt mới nên ghi đè PENDING lên chúng. Thao tác người biến mất
-    KHÔNG một tiếng báo.
-
-    Ingest ngay trước mỗi lần render thu hẹp cửa sổ mất mát từ "cả lượt chạy
-    job" (phút) xuống "giữa 2 lệnh gọi API liền nhau" (giây). CỬA SỔ NÀY VẪN
-    CÒN — đóng hẳn cần render CHỈ các cột máy-sở-hữu thay vì clear+ghi cả tab,
-    xem ghi chú trong docs/VPS_MIGRATION_BACKLOG.md.
-
-    `rebuild=False` (TASK-032) -- lượt gọi này lặp lại SAU MỖI job, đúng kịch
-    bản có race thật giữa job KHÁC và ingest (TASK-029) nên PHẢI qua CAS
-    (`render_context_to_sheet()` mặc định BỎ QUA CAS từ TASK-032, xem docstring
-    hàm đó -- lối gọi trực tiếp/thủ công KHÔNG ingest trước mới dùng default)."""
+    hệ thống chỉ nhận 1, 4 lượt duyệt BỊ XOÁ SẠCH) VÀ LẠI TÁI PHÁT ở Gate 2
+    tab CONTENT ngày 15/08 (TASK-035): `render_*_to_sheet()` từng dựng lại
+    TOÀN BỘ tab từ store, kể cả cột NGƯỜI-SỞ-HỮU. TASK-035 sửa TẬN GỐC (không
+    còn vá kiểu CAS/rebuild) -- `render_context_to_sheet()`/`render_content_
+    to_sheet()` giờ CHỈ ghi dải cột MÁY-SỞ-HỮU cho dòng đã tồn tại, KHÔNG BAO
+    GIỜ đụng cột người dù ingest có chạy trước hay không -- xem docstring
+    module `store/sync_service.py`. Ingest TRƯỚC render ở đây vẫn giữ (cột
+    "Output" của CONTENT là ngoại lệ hybrid cần ingest trước để không mất bản
+    sửa tay -- xem `_CONTENT_USER_COLS`)."""
     ss.ingest_context_from_sheet(board)
     ss.ingest_content_from_sheet(board)
-    ss.render_context_to_sheet(board, rebuild=False)
+    ss.render_context_to_sheet(board)
     ss.render_content_to_sheet(board)
 
 

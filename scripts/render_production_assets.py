@@ -94,8 +94,9 @@ def _append_notes(topic_key: str, content_type: str, note: str) -> int | None:
     content_output.notes TRONG STORE, KHÔNG ghi thẳng ô Sheet. Trước bản vá
     này, renderer gọi `board.set_content_cell(row, "Notes", ...)` ghi THẲNG
     lên Sheet — giá trị đó KHÔNG ingest ngược vào store, nên lượt
-    render_content_to_sheet() kế tiếp (dựng lại TOÀN BỘ tab từ store, xem
-    store/sync_service.py) XOÁ MẤT cảnh báo vừa ghi mà không ai biết.
+    render_content_to_sheet() kế tiếp (đọc lại "Notes" từ content_output, xem
+    store/sync_service.py) GHI ĐÈ mất cảnh báo vừa ghi thẳng mà không ai biết
+    ("Notes" của CONTENT là cột MÁY-SỞ-HỮU, luôn phản ánh store).
 
     content_output là APPEND-ONLY (document_store.write_document — KHÔNG
     merge-on-write như content_status/gate_status), nên phải đọc bản MỚI
