@@ -573,6 +573,97 @@ def unsupported_numbers(body: str, source_text: str, content_units: list[Content
     return bad
 
 
+_TICKER_RE = re.compile(r"\b[A-ZĐ]{2,6}\b")
+# Số La Mã trong "quý II/2026" khớp CHÍNH XÁC khuôn mã CK viết HOA liền
+# (2-6 ký tự) -> phải loại, không thì "quý II" bị hiểu nhầm là 1 THỰC THỂ.
+_ROMAN_NUMERAL_STOPWORDS = {"I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"}
+
+_PERIOD_RE = re.compile(
+    r"quý\s*(?:[IVX]+|[1-4])(?:\s*/\s*\d{4})?"
+    r"|\d{1,2}\s*tháng(?:\s+đầu\s+năm)?(?:\s+\d{4})?"
+    r"|tháng\s*\d{1,2}(?:\s*/\s*\d{4})?"
+    r"|năm\s*\d{4}",
+    re.IGNORECASE)
+_QUARTER_ROMAN = {"i": "1", "ii": "2", "iii": "3", "iv": "4"}
+# Tách CÂU (kết thúc .!?…) — phạm vi cục bộ để trích token chủ thể/kỳ quanh 1
+# số trong body, tránh quét CẢ bài (nhiễu từ câu khác không liên quan).
+_SENT_RE = re.compile(r"[^.!?…]*[.!?…]+|[^.!?…]+$")
+
+
+def _entity_tokens(text: str) -> set[str]:
+    """TASK-036 (Tầng 2 mở rộng) — token CHỦ THỂ tất định trích từ `text`: mã
+    CK/tên viết HOA LIỀN (2-6 ký tự, vd "BSR"/"CTG"/"MUFG") — KHÔNG cần danh
+    sách ticker cấu hình sẵn (brief.tickers là mã CK CỦA TOPIC, không phải mã
+    CK nhắc tới TRONG 1 câu cụ thể). Loại số La Mã (_ROMAN_NUMERAL_STOPWORDS)
+    để "quý II" không bị hiểu nhầm 1 thực thể. Không bắt tên tổ chức không
+    viết HOA-liền kiểu "Ngân hàng Nhà nước"/"VietinBank" — GIỚI HẠN ĐÃ BIẾT,
+    xem docs/hypotheses/2026-08-16-guardrail-tang-2-entity-period.md."""
+    return {t for t in _TICKER_RE.findall(text or "") if t not in _ROMAN_NUMERAL_STOPWORDS}
+
+
+def _normalize_period(raw: str) -> str:
+    """TASK-036 — chuẩn hoá 1 cụm KỲ khớp bởi _PERIOD_RE: số La Mã "quý II" ==
+    "quý 2" (khớp _QUARTER_ROMAN), gộp khoảng trắng thừa."""
+    text = re.sub(r"\s+", " ", raw.strip().lower())
+    m = re.match(r"quý\s*([ivx]+|[1-4])(?:\s*/\s*(\d{4}))?", text)
+    if m:
+        quarter = _QUARTER_ROMAN.get(m.group(1), m.group(1))
+        year = m.group(2)
+        return f"quý {quarter}/{year}" if year else f"quý {quarter}"
+    return text
+
+
+def _period_tokens(text: str) -> set[str]:
+    """TASK-036 (Tầng 2 mở rộng) — token KỲ tất định trích từ `text` (quý/
+    tháng/năm), chuẩn hoá qua _normalize_period để so khớp ổn định bất kể
+    viết số La Mã hay số thường."""
+    return {_normalize_period(m.group(0)) for m in _PERIOD_RE.finditer(text or "")}
+
+
+def _sentence_containing(body: str, pos: int) -> str:
+    """TASK-036 — câu (kết thúc .!?…) bao quanh vị trí `pos` trong `body`."""
+    for m in _SENT_RE.finditer(body):
+        if m.start() <= pos < m.end():
+            return m.group(0)
+    return body
+
+
+def _context_conflict(local_tokens: set[str], anchor_tokens: set[str], other_tokens: set[str]) -> bool:
+    """TASK-036 — nghi hoán chủ thể/kỳ: đúng 1 token cục bộ quanh số trong
+    body (`local_tokens`) VẮNG MẶT khỏi câu nguồn ĐÃ neo (`anchor_tokens`)
+    NHƯNG CÓ MẶT ở câu nguồn của fact KHÁC (`other_tokens`). Đòi hỏi diff
+    ĐÚNG 1 phần tử (không phải >=1): câu liệt kê nhiều chủ thể/kỳ trong 1 câu
+    ("VCB, CTG và BID lần lượt đạt...") luôn để lại diff >=2 token (mỗi thực
+    thể/kỳ KHÁC trong câu đều lọt vào diff so với câu nguồn ĐÃ bị Brief cắt
+    gọn còn 1 thực thể) — CHỦ ĐỘNG bỏ qua khi mơ hồ, tránh báo động giả hàng
+    loạt (rang_buoc_thiet_ke.khong_duoc_danh_doi, TASK-036 contract)."""
+    diff = local_tokens - anchor_tokens
+    return len(diff) == 1 and bool(diff & other_tokens)
+
+
+def _context_mismatch(tok: str, start: int, body: str, content_units: list[ContentUnit],
+                      anchored: list[ContentUnit]) -> bool:
+    """TASK-036 — Tầng 2 mở rộng: dù `tok` neo ĐÚNG 1 câu nguồn (`anchored`),
+    câu ĐÓ có thể bị Composer gán NHẦM chủ thể/kỳ khi CÙNG 1 con số (trùng
+    hợp thật) hiện diện ở NHIỀU câu nguồn khác nhau trong content_units, mỗi
+    câu 1 chủ thể/kỳ khác (WC2/WC4, TASK-027 known_gap — báo động giả 2/4 ->
+    0/4, bỏ sót 4/4 -> 2/4, đây là 2 ca bỏ sót còn lại). CODE TẤT ĐỊNH: so
+    token chủ thể (_entity_tokens)/kỳ (_period_tokens) trích từ CÂU BODY chứa
+    `tok` với câu nguồn ĐÃ neo — xem _context_conflict cho luật diff.
+    KHÔNG áp dụng khi `anchored` không ĐÚNG 1 fact (mơ hồ/không neo -> đã bị
+    unanchored_numbers bắt ở nhánh count!=1 rồi, không cần kiểm thêm) hay
+    content_units < 2 phần tử (không có fact NÀO KHÁC để nghi hoán sang)."""
+    if len(anchored) != 1 or len(content_units) < 2:
+        return False
+    f = anchored[0]
+    sentence = _sentence_containing(body, start)
+    others = [c for c in content_units if c is not f]
+    other_entities = set().union(*(_entity_tokens(c.source) for c in others))
+    other_periods = set().union(*(_period_tokens(c.source) for c in others))
+    return (_context_conflict(_entity_tokens(sentence), _entity_tokens(f.source), other_entities)
+            or _context_conflict(_period_tokens(sentence), _period_tokens(f.source), other_periods))
+
+
 def _fact_source_tokens(source_sentence: str) -> set[str]:
     """TASK-027 (Tầng 2) — set số CHUẨN HOÁ trích từ `source_sentence` (CÂU
     NGUYÊN VĂN của 1 ContentUnit, field `source` — xem models.ContentUnit).
@@ -584,36 +675,43 @@ def _fact_source_tokens(source_sentence: str) -> set[str]:
     return tokens
 
 
-def _anchor_fact_count(tok: str, start: int, body: str, content_units: list[ContentUnit],
-                       tolerance: float) -> int:
-    """TASK-027 (Tầng 2) — đếm SỐ content_units mà `tok` (số TRONG BODY, tại vị
-    trí `start`) neo được: literal (chuẩn hoá) trong CÂU NGUỒN của CHÍNH fact đó
-    (`f.source`, xem _fact_source_tokens) HOẶC khớp canonical số học CỦA RIÊNG
-    fact đó (tái dùng _matches_canonical_fact — NHƯNG xét TỪNG fact 1 LÚC, khác
-    _matches_canonical_fact gọi trực tiếp ở unsupported_numbers xét CẢ danh sách
-    cùng lúc). Xét riêng từng fact để phân biệt "neo ĐÚNG 1 câu" khỏi "khớp số
-    học trùng hợp ở NHIỀU fact khác nhau" — xem unanchored_numbers/vi_sao_hai_tang
-    trong TASK-027 contract."""
-    return sum(
-        1 for f in content_units
+def _anchored_facts(tok: str, start: int, body: str, content_units: list[ContentUnit],
+                    tolerance: float) -> list[ContentUnit]:
+    """TASK-027 (Tầng 2) — DANH SÁCH content_units mà `tok` (số TRONG BODY, tại
+    vị trí `start`) neo được: literal (chuẩn hoá) trong CÂU NGUỒN của CHÍNH
+    fact đó (`f.source`, xem _fact_source_tokens) HOẶC khớp canonical số học
+    CỦA RIÊNG fact đó (tái dùng _matches_canonical_fact — NHƯNG xét TỪNG fact 1
+    LÚC, khác _matches_canonical_fact gọi trực tiếp ở unsupported_numbers xét
+    CẢ danh sách cùng lúc). Xét riêng từng fact để phân biệt "neo ĐÚNG 1 câu"
+    khỏi "khớp số học trùng hợp ở NHIỀU fact khác nhau" — xem unanchored_
+    numbers/vi_sao_hai_tang trong TASK-027 contract. TASK-036: trả DANH SÁCH
+    (không phải đếm) để _context_mismatch xem được CHÍNH XÁC fact nào đã neo,
+    phục vụ kiểm chủ thể/kỳ bên trong câu đó."""
+    return [
+        f for f in content_units
         if _normalize_number(tok) in _fact_source_tokens(f.source)
         or _matches_canonical_fact(tok, body, start, [f], tolerance)
-    )
+    ]
 
 
 def unanchored_numbers(body: str, content_units: list[ContentUnit] | None = None, *,
                        approx_tolerance: float = _DEFAULT_APPROX_TOLERANCE) -> list[str]:
-    """TẦNG 2 (TASK-027) — CẢNH BÁO, KHÔNG chặn. Số liệu trong `body` KHÔNG neo
-    được về ĐÚNG MỘT CÂU nguồn qua content_units[].source: 0 câu = không fact
-    nào trích ra số này (dù có mặt đâu đó trong toàn văn bài gốc — lỗ hổng Tầng
-    1 sau khi nới sang toàn văn, xem module docstring "vi_sao_hai_tang" +
-    docs/hypotheses/2026-08-12-guardrail-hai-tang.md); >1 câu KHÁC NHAU = mơ
-    hồ, không rõ số đang neo vào dữ kiện nào. Hàm THUẦN, dùng bởi apply_
-    guardrails() — kết quả trả về đây TUYỆT ĐỐI KHÔNG được gộp vào
-    compliance_issues/draft.is_clean (cam kết TASK-027: 'KHÔNG để tầng 2 chặn').
-    `content_units` rỗng/None -> [] (không có fact nào để neo, không có cơ sở
-    để cảnh báo — tránh ngập cảnh báo vô nghĩa khi Brief chưa/không trích
-    được content_units)."""
+    """TẦNG 2 (TASK-027, mở rộng TASK-036) — CẢNH BÁO, KHÔNG chặn. Số liệu
+    trong `body` bị nghi gán sai khi:
+      1. KHÔNG neo được về ĐÚNG MỘT CÂU nguồn qua content_units[].source: 0
+         câu = không fact nào trích ra số này (dù có mặt đâu đó trong toàn văn
+         bài gốc — lỗ hổng Tầng 1 sau khi nới sang toàn văn, xem module
+         docstring "vi_sao_hai_tang" + docs/hypotheses/2026-08-12-guardrail-
+         hai-tang.md); >1 câu KHÁC NHAU = mơ hồ, không rõ số đang neo vào dữ
+         kiện nào.
+      2. TASK-036: neo ĐÚNG 1 câu NHƯNG câu đó bị hoán CHỦ THỂ/KỲ so với câu
+         nguồn thật của số — xem _context_mismatch (bịt 2 known_gap của
+         TASK-027: entity_swap/period_swap trong CÙNG 1 câu).
+    Hàm THUẦN, dùng bởi apply_guardrails() — kết quả trả về đây TUYỆT ĐỐI
+    KHÔNG được gộp vào compliance_issues/draft.is_clean (cam kết TASK-027:
+    'KHÔNG để tầng 2 chặn'). `content_units` rỗng/None -> [] (không có fact
+    nào để neo, không có cơ sở để cảnh báo — tránh ngập cảnh báo vô nghĩa khi
+    Brief chưa/không trích được content_units)."""
     content_units = content_units or []
     if not content_units:
         return []
@@ -623,7 +721,8 @@ def unanchored_numbers(body: str, content_units: list[ContentUnit] | None = None
         key = tok.lower().strip()
         if key in seen:
             continue
-        if _anchor_fact_count(tok, m.start(), body, content_units, approx_tolerance) != 1:
+        anchored = _anchored_facts(tok, m.start(), body, content_units, approx_tolerance)
+        if len(anchored) != 1 or _context_mismatch(tok, m.start(), body, content_units, anchored):
             seen.add(key)
             warn.append(tok)
     return warn
