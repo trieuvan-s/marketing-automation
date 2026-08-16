@@ -10581,7 +10581,8 @@ def test_llm_status_banner_mock_when_provider_not_anthropic():
     st = factory.llm_status(Settings({"llm": {"provider": "mock"}}))
     assert st.use_llm is False
     assert "provider" in st.reason.lower() or "mock" in st.reason.lower()
-    assert st.banner == "LLM active: MOCK ($0 fallback) — lý do: llm.provider='mock' (không phải anthropic)"
+    assert st.banner == ("LLM active: MOCK ($0 fallback) — lý do: "
+                         "llm.provider='mock' (không phải anthropic/claude_code)")
 
 
 def test_llm_status_banner_mock_when_anthropic_unavailable():
@@ -10613,6 +10614,29 @@ def test_llm_status_banner_active_when_key_present():
         if old is None:
             os.environ.pop("ANTHROPIC_API_KEY", None)
         else:
+            os.environ["ANTHROPIC_API_KEY"] = old
+
+
+def test_llm_status_banner_active_for_claude_code_no_key_needed():
+    """TASK-015 (2026-08-16): claude_code là provider THẬT (CLI `claude -p`, gói
+    Pro/Max hiện có) -- use_llm=True KHÔNG cần ANTHROPIC_API_KEY (khác nhánh
+    anthropic), và banner phải nói ĐÚNG 'claude_code', không được in MOCK. Trước
+    bản vá này llm_status() chỉ chấp nhận 'anthropic' -> content_llm (Producers,
+    xem test_build_content_llm_uses_claude_code_when_provider_claude_code) âm
+    thầm lùi về MockLLM dù _build_llm() đã hỗ trợ claude_code từ 2026-07-27."""
+    old = os.environ.pop("ANTHROPIC_API_KEY", None)
+    try:
+        st = factory.llm_status(Settings({"llm": {
+            "provider": "claude_code", "triage_model": "claude-haiku-4-5-20251001",
+            "hook_model": "claude-sonnet-4-6",
+        }}))
+        assert st.use_llm is True
+        assert st.reason == ""
+        assert st.banner == ("LLM active: claude_code (hook=claude-sonnet-4-6, "
+                             "researcher=claude-haiku-4-5-20251001)")
+        assert "MOCK" not in st.banner
+    finally:
+        if old is not None:
             os.environ["ANTHROPIC_API_KEY"] = old
 
 
