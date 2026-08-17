@@ -411,10 +411,14 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
         `limit`. Scheduler 30' (system_power_on) KHÔNG phải sửa — tương thích ngược.
       - list -> CHỈ xử lý các topic có TopicKey nằm trong danh sách (user bấm
         Execute qua webhook). `limit` BỊ BỎ QUA để không âm thầm cắt cụt danh sách.
-    Trả dict tổng hợp {approved, produced, skipped}. `run()` là NƠI DUY NHẤT ghi
-    cờ Execute (DONE/FAILED/NEEDS_HUMAN) vào STORE — webhook chỉ đọc lại để trả
-    trạng thái (xem api/, VIỆC 5.2-5.5), KHÔNG tự ghi Execute (tránh 2 nguồn
-    trạng thái, VIỆC 5.2/5.3)."""
+    Trả dict tổng hợp {approved, produced, skipped, ..., failed_details}. `run()`
+    là NƠI DUY NHẤT ghi cờ Execute (DONE/FAILED/NEEDS_HUMAN) vào STORE — webhook
+    chỉ đọc lại để trả trạng thái (xem api/, VIỆC 5.2-5.5), KHÔNG tự ghi Execute
+    (tránh 2 nguồn trạng thái, VIỆC 5.2/5.3). `failed_details` (TASK-037) —
+    dict {topic_key: {"title", "reason"}} CHỈ cho topic kết thúc WriterOutcome.
+    FAILED (lỗi tạm thời hạ tầng) — dùng bởi scripts/queue_worker.py để tự
+    enqueue lại + báo Telegram đúng lý do thật khi hết trần retry, xem
+    _handle_produce_business_outcome() ở đó."""
     settings = load_settings()
     # LAZY-LOAD (2026-07-24, theo chỉ đạo Lead): board CHỈ còn cần cho
     # read_sources()/read_prompt_versions() (2 việc Sheet-native còn lại) —
@@ -514,6 +518,13 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
     done_topics: list[str] = []          # đủ CẢ 3 loại -> Execute=DONE
     failed_topics: list[str] = []        # Phase 4.9: article FAILED (lỗi tạm thời) -> Execute=FAILED
     needs_human_topics: list[str] = []   # Phase 4.9: article NEEDS_HUMAN (guardrail reject) -> chờ người
+    # TASK-037: chi tiết (tiêu đề + lý do thật từ writer) cho từng topic FAILED
+    # -- run() chỉ trả AGGREGATE count ("failed": len(failed_topics)) từ trước,
+    # KHÔNG đủ cho queue_worker.py báo Telegram đúng lý do khi hết trần tự
+    # retry (xem docstring _handle_produce_business_outcome ở đó). Dict, KHÔNG
+    # phải list, để tra theo topic_key O(1) — caller (queue_worker) luôn biết
+    # ĐÚNG 1 topic_key của job đang xử lý.
+    failed_details: dict[str, dict] = {}
     written = produced = skipped = flagged = 0
     for item in approved:
         topic_key = item["topic_key"]
@@ -892,6 +903,7 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
         # True (Phase 4.13 — tuyến router chủ động tắt KHÔNG chặn DONE nữa).
         if article_outcome == WriterOutcome.FAILED:
             failed_topics.append(topic_key)
+            failed_details[topic_key] = {"title": item["context"], "reason": r.reason}
         elif article_outcome == WriterOutcome.NEEDS_HUMAN:
             needs_human_topics.append(topic_key)
         elif _is_fully_produced_channels(topic_key, seen, channels):
@@ -923,7 +935,8 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
     _summary(len(approved), produced, skipped, flagged, use_llm, u, out_dir)
     return {"approved": len(approved), "produced": produced, "skipped": skipped,
             "flagged": flagged, "llm": u, "use_llm": use_llm, "written": written,
-            "failed": len(failed_topics), "needs_human": len(needs_human_topics)}
+            "failed": len(failed_topics), "needs_human": len(needs_human_topics),
+            "failed_details": failed_details}
 
 
 def _today() -> str:

@@ -50,6 +50,7 @@ import produce_from_sheet  # noqa: E402
 import render_production_assets  # noqa: E402 -- job "render_assets" (Gate 2)
 from twmkt.config import data_path, load_settings  # noqa: E402
 from twmkt.sheets_board import EXECUTE_FAILED, EXECUTE_RUNNING, SheetsBoard  # noqa: E402
+from twmkt.utils.telegram_notifier import make_notifier  # noqa: E402 -- TASK-037
 
 from store import pipeline_store as ps  # noqa: E402
 from store import queue_store as qs  # noqa: E402
@@ -92,6 +93,75 @@ def _sync_sheet(board) -> None:
     ss.ingest_content_from_sheet(board)
     ss.render_context_to_sheet(board)
     ss.render_content_to_sheet(board)
+
+
+def _handle_produce_business_outcome(job: dict, result: dict, *, settings) -> None:
+    """TASK-037 (2026-08-17) — đóng lỗ hổng "Execute=FAILED nằm im vô thời
+    hạn" (Lead đo trực tiếp 14-15/08). Gọi SAU khi `produce_from_sheet.run()`
+    dispatch job "produce" THÀNH CÔNG (không raise — crash hạ tầng thật đã có
+    nhánh except riêng ở run_once(), KHÔNG đi qua đây).
+
+    `result["failed"]` > 0 nghĩa là ĐÚNG topic của job này (run_once() luôn
+    gọi run() với topic_keys=[job['topic_key']], limit=1 — CHỈ 1 topic có thể
+    khớp) kết thúc agents.writer.WriterOutcome.FAILED (lỗi TẠM THỜI hạ tầng
+    gọi LLM — writer ĐÃ tự retry NỘI BỘ hết `writer.max_retries` lần rồi mới
+    tới đây). WriterOutcome.NEEDS_HUMAN (guardrail reject — lỗi VĨNH VIỄN)
+    rơi vào `result["needs_human"]`, KHÔNG BAO GIỜ vào `result["failed"]` —
+    hàm này do đó KHÔNG BAO GIỜ retry ca NEEDS_HUMAN, đúng ranh giới
+    agents/writer.py đã định nghĩa (xem CLAUDE.md "AI hiểu ở Brief, CODE phán
+    ở Guardrail" — hàm này chỉ ĐỌC lại ranh giới đó, không tự vẽ thêm).
+
+    ĐẾM BỀN qua `payload_json` của chính job (KHÔNG đổi schema execution_queue
+    — cột đã có sẵn, chỉ dùng thêm 1 khoá JSON `produce_retry_attempt`): job
+    tự retry MANG payload này sang job MỚI khi enqueue lại, nên số lần đã thử
+    sống sót qua khởi động lại worker (dữ liệu nằm trong SQLite trên đĩa,
+    KHÔNG phải biến RAM của tiến trình worker). Hết trần
+    (`queue.produce_retry_max_attempts`, mặc định 1 theo quyết định chủ dự án
+    "retry ít nhất 1 lần") -> KHÔNG enqueue nữa (chặn lặp vô hạn/đốt ngân
+    sách) -> báo Telegram kèm lý do THẬT lấy từ `result["failed_details"]`
+    (agents/writer.WriterResult.reason, xem produce_from_sheet.py)."""
+    failed = int(result.get("failed") or 0)
+    topic_key = job["topic_key"]
+    prior_attempts = int((job.get("payload") or {}).get("produce_retry_attempt", 0))
+
+    if failed <= 0:
+        # KHÔNG FAILED lần này -- nếu bản thân job NÀY là 1 lần tự retry
+        # (prior_attempts > 0) thì đây là "tự phục hồi" -- báo (tuỳ chọn, mặc
+        # định TẮT, xem settings.yaml queue.notify_on_retry_success) để Lead
+        # biết cơ chế retry có tác dụng thật, KHÔNG chỉ im lặng.
+        if prior_attempts > 0 and bool(settings.get("queue.notify_on_retry_success", False)):
+            print(f"[queue-worker] Job #{job['id']} topic_key={topic_key!r} PHỤC HỒI sau "
+                 f"{prior_attempts} lần tự retry trước đó — báo Telegram "
+                 f"(queue.notify_on_retry_success=true).")
+            make_notifier(settings).notify(
+                "produce_retry_recovered", topic_key=topic_key, attempts=prior_attempts + 1)
+        return
+
+    detail = (result.get("failed_details") or {}).get(topic_key, {})
+    reason = detail.get("reason") or "(không rõ lý do — run() không trả chi tiết)"
+    title = detail.get("title") or topic_key
+    max_attempts = int(settings.get("queue.produce_retry_max_attempts", 1))
+    backoff_s = float(settings.get("queue.produce_retry_backoff_s", 60))
+
+    if prior_attempts < max_attempts:
+        next_attempt = prior_attempts + 1
+        print(f"[queue-worker] Job #{job['id']} topic_key={topic_key!r} Execute=FAILED "
+             f"(lỗi tạm thời hạ tầng) — TỰ tạo lại job, lần thử {next_attempt}/{max_attempts}, "
+             f"chờ {backoff_s:.0f}s trước khi enqueue. Lý do: {reason}")
+        time.sleep(backoff_s)
+        new_job_id = qs.enqueue(topic_key, job_type="produce",
+                                payload={"produce_retry_attempt": next_attempt})
+        print(f"[queue-worker] Đã tạo lại job #{new_job_id} cho topic_key={topic_key!r} "
+             f"(lần tự động {next_attempt}/{max_attempts}).")
+    else:
+        total_attempts = prior_attempts + 1
+        print(f"[queue-worker] Job #{job['id']} topic_key={topic_key!r} Execute=FAILED "
+             f"HẾT TRẦN tự retry ({total_attempts} lần đã thử, giới hạn queue."
+             f"produce_retry_max_attempts={max_attempts}) — CHỐT trạng thái, KHÔNG thử nữa. "
+             f"Báo Telegram. Lý do: {reason}")
+        make_notifier(settings).notify(
+            "produce_retry_exhausted", topic=title, topic_key=topic_key,
+            attempts=total_attempts, reason=reason)
 
 
 def run_once(*, settings, worker_id: str, board=None) -> bool:
@@ -144,6 +214,7 @@ def run_once(*, settings, worker_id: str, board=None) -> bool:
         if board is not None:
             _sync_sheet(board)
 
+    produce_result = None
     try:
         if job_type == "render_assets":
             # run() tự quét CONTENT tìm dòng Gate2=APPROVE chưa có AssetPath và
@@ -156,11 +227,16 @@ def run_once(*, settings, worker_id: str, board=None) -> bool:
             # -> truyền `force` xuống run() để BỎ QUA existing_content_keys()
             # cho ĐÚNG topic này. KHÔNG truyền kwarg `force` khi job KHÔNG có
             # cờ này (tường minh — giữ nguyên chữ ký gọi cũ cho rerun bình
-            # thường, tránh mọi hiểu lầm "APPROVE lại là ép chạy lại").
+            # thường, tránh mọi hiểu lầm "APPROVE lại là ép chạy lại"). KHÔNG
+            # áp cho job re-enqueue tự động của TASK-037 (payload chỉ mang
+            # "produce_retry_attempt", KHÔNG mang "force") — retry tự động
+            # PHẢI giữ hành vi idempotent bình thường (existing_content_keys()
+            # vẫn chặn ghi trùng nếu vì lý do gì đó đã có CONTENT), KHÁC hẳn
+            # luồng "Xử lý lại" chủ động của người (TASK-031).
             run_kwargs = {"topic_keys": [job["topic_key"]], "limit": 1}
             if (job.get("payload") or {}).get("force"):
                 run_kwargs["force"] = {job["topic_key"]}
-            produce_from_sheet.run(**run_kwargs)
+            produce_result = produce_from_sheet.run(**run_kwargs)
         qs.mark_done(job["id"])
         print(f"[queue-worker] Job #{job['id']} DONE (dispatch) — xem gate_status.execute "
              f"trên Sheet cho kết quả NGHIỆP VỤ thật (DONE/FAILED/NEEDS_HUMAN).")
@@ -173,6 +249,15 @@ def run_once(*, settings, worker_id: str, board=None) -> bool:
             ps.mark_execute(job["topic_key"], EXECUTE_FAILED)
         print(f"[queue-worker] Job #{job['id']} FAILED (crash hạ tầng, không phải NEEDS_HUMAN "
              f"nghiệp vụ — cái đó run() tự bắt gọn): {e!r}")
+
+    # TASK-037 -- NGOÀI try/except phía trên có chủ ý: job này ĐÃ được chốt
+    # done/failed rồi (dòng trên) -- 1 lỗi ở BƯỚC RETRY (vd qs.
+    # enqueue() DB lỗi) không được phép lật ngược trạng thái job GỐC vừa ghi
+    # (mark_done rồi lại bị except phía trên đè thành 'failed' là SAI, đánh
+    # lừa lịch sử dispatch thật). Cùng nếp KHÔNG bọc try như _sync_sheet() bên
+    # dưới -- lỗi ở đây (hiếm, chỉ khi SQLite hỏng) được phép nổ rõ.
+    if job_type == "produce" and produce_result is not None:
+        _handle_produce_business_outcome(job, produce_result, settings=settings)
 
     if board is not None:
         _sync_sheet(board)

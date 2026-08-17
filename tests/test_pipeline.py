@@ -10231,6 +10231,301 @@ def test_queue_worker_run_once_ingests_sheet_approval_before_claiming(monkeypatc
 
 
 # =============================================================================
+# TASK-037 (2026-08-17) — Execute=FAILED (WriterOutcome.FAILED, lỗi TẠM THỜI
+# hạ tầng gọi LLM) trước đây NẰM IM VÔ THỜI HẠN vì không có gì tự enqueue lại
+# job "produce". queue_worker.py::_handle_produce_business_outcome() đóng lỗ
+# hổng này: tự tạo lại job (đếm bền qua payload_json, KHÔNG đổi schema), chặn
+# lặp vô hạn bằng trần queue.produce_retry_max_attempts, báo Telegram (double,
+# KHÔNG gửi thật) khi hết trần vẫn hỏng. NEEDS_HUMAN (guardrail reject)
+# TUYỆT ĐỐI không đi qua nhánh này (result["failed"]==0 cho ca đó).
+# =============================================================================
+
+def _fake_produce_run_failed(*, topic_keys, limit, force=None):
+    """Giả lập produce_from_sheet.run() TRẢ VỀ bình thường (không raise) với
+    ĐÚNG topic khớp topic_keys[0] kết thúc WriterOutcome.FAILED -- shape
+    return dict PHẢI khớp thật (xem produce_from_sheet.run(), field
+    "failed_details" thêm ở TASK-037) để test khoá đúng hợp đồng dữ liệu."""
+    tk = topic_keys[0]
+    return {
+        "approved": 1, "produced": 0, "skipped": 0, "flagged": 1, "written": 0,
+        "failed": 1, "needs_human": 0,
+        "failed_details": {tk: {"title": "Bai viet loi tam thoi", "reason": "LLMCallError: timeout"}},
+    }
+
+
+def _fake_produce_run_needs_human(*, topic_keys, limit, force=None):
+    tk = topic_keys[0]
+    return {
+        "approved": 1, "produced": 0, "skipped": 0, "flagged": 1, "written": 1,
+        "failed": 0, "needs_human": 1, "failed_details": {},
+    }
+
+
+def _fake_produce_run_done(*, topic_keys, limit, force=None):
+    return {
+        "approved": 1, "produced": 1, "skipped": 0, "flagged": 0, "written": 1,
+        "failed": 0, "needs_human": 0, "failed_details": {},
+    }
+
+
+class _SpyNotifier:
+    def __init__(self):
+        self.calls: list[tuple[str, dict]] = []
+
+    def notify(self, event, **ctx):
+        self.calls.append((event, ctx))
+        return True
+
+
+def test_queue_worker_failed_job_auto_reenqueues_exactly_once(monkeypatch, tmp_path):
+    """Ca FAILED -> tự tạo lại job đúng 1 lần: max_attempts=1 -> lượt ĐẦU
+    FAILED phải sinh ĐÚNG 1 job mới (payload produce_retry_attempt=1)."""
+    import json
+
+    from store import document_store as ds
+    from store import queue_store as qs
+    from twmkt.config import Settings
+
+    qw = _queue_worker_module()
+    db_path = tmp_path / "store.db"
+    monkeypatch.setenv("DOCUMENT_STORE_PATH", str(db_path))
+    ds.init_db(db_path)
+    qs.enqueue("tk-1", db_path=db_path)
+
+    monkeypatch.setattr(qw.produce_from_sheet, "run", _fake_produce_run_failed)
+    monkeypatch.setattr(qw, "make_notifier", lambda settings: _SpyNotifier())
+
+    settings = Settings({"queue": {"produce_retry_max_attempts": 1, "produce_retry_backoff_s": 0}})
+    handled = qw.run_once(settings=settings, worker_id="test-worker")
+    assert handled is True
+
+    rows = qs.list_queue(db_path=db_path)
+    assert len(rows) == 2, "phải có đúng 2 job: bản gốc (done) + 1 lần tạo lại (queued)"
+    original, retry = rows[0], rows[1]
+    assert original["status"] == "done"
+    assert retry["status"] == "queued"
+    assert retry["topic_key"] == "tk-1"
+    assert json.loads(retry["payload_json"]) == {"produce_retry_attempt": 1}
+
+
+def test_queue_worker_failed_job_stops_retrying_after_second_attempt(monkeypatch, tmp_path):
+    """'lần 2 xong thì KHÔNG tạo nữa' -- lượt retry (payload produce_retry_
+    attempt=1) THẤT BẠI tiếp -> đã chạm trần (max_attempts=1) -> KHÔNG tạo
+    job thứ 3."""
+    from store import document_store as ds
+    from store import queue_store as qs
+    from twmkt.config import Settings
+
+    qw = _queue_worker_module()
+    db_path = tmp_path / "store.db"
+    monkeypatch.setenv("DOCUMENT_STORE_PATH", str(db_path))
+    ds.init_db(db_path)
+    # Job hàng đợi Ở TRẠNG THÁI "đã retry 1 lần" -- mô phỏng ĐÚNG job mà
+    # _handle_produce_business_outcome() TỰ tạo ra ở lượt trước (không phải
+    # setup giả tạo -- đây là shape thật payload_json sẽ mang).
+    qs.enqueue("tk-1", payload={"produce_retry_attempt": 1}, db_path=db_path)
+
+    monkeypatch.setattr(qw.produce_from_sheet, "run", _fake_produce_run_failed)
+    spy = _SpyNotifier()
+    monkeypatch.setattr(qw, "make_notifier", lambda settings: spy)
+
+    settings = Settings({"queue": {"produce_retry_max_attempts": 1, "produce_retry_backoff_s": 0}})
+    handled = qw.run_once(settings=settings, worker_id="test-worker")
+    assert handled is True
+
+    rows = qs.list_queue(db_path=db_path)
+    assert len(rows) == 1, "hết trần -> KHÔNG được tạo job thứ 3"
+    assert rows[0]["status"] == "done"
+
+
+def test_queue_worker_failed_job_exhausted_notifies_with_real_reason_and_attempts(monkeypatch, tmp_path):
+    """Ca FAILED tới trần -> chốt trạng thái + gọi notifier (double, KHÔNG gửi
+    Telegram thật) kèm topic/tiêu đề, số lần đã thử, LÝ DO THẬT lấy từ writer
+    (produce_from_sheet.run()["failed_details"])."""
+    from store import document_store as ds
+    from store import queue_store as qs
+    from twmkt.config import Settings
+
+    qw = _queue_worker_module()
+    db_path = tmp_path / "store.db"
+    monkeypatch.setenv("DOCUMENT_STORE_PATH", str(db_path))
+    ds.init_db(db_path)
+    qs.enqueue("tk-1", payload={"produce_retry_attempt": 1}, db_path=db_path)
+
+    monkeypatch.setattr(qw.produce_from_sheet, "run", _fake_produce_run_failed)
+    spy = _SpyNotifier()
+    monkeypatch.setattr(qw, "make_notifier", lambda settings: spy)
+
+    settings = Settings({"queue": {"produce_retry_max_attempts": 1, "produce_retry_backoff_s": 0}})
+    qw.run_once(settings=settings, worker_id="test-worker")
+
+    assert len(spy.calls) == 1
+    event, ctx = spy.calls[0]
+    assert event == "produce_retry_exhausted"
+    assert ctx["topic_key"] == "tk-1"
+    assert ctx["topic"] == "Bai viet loi tam thoi"
+    assert ctx["attempts"] == 2   # lượt gốc + 1 lần retry = 2 lần đã thử
+    assert ctx["reason"] == "LLMCallError: timeout"
+
+
+def test_queue_worker_needs_human_job_never_retries(monkeypatch, tmp_path):
+    """Ca NEEDS_HUMAN -> TUYỆT ĐỐI không retry (guardrail reject -- thử lại
+    vô nghĩa, đốt tiền LLM). result["failed"]==0 cho ca này -- production code
+    KHÔNG được suy luận nhầm từ result["needs_human"]."""
+    from store import document_store as ds
+    from store import queue_store as qs
+    from twmkt.config import Settings
+
+    qw = _queue_worker_module()
+    db_path = tmp_path / "store.db"
+    monkeypatch.setenv("DOCUMENT_STORE_PATH", str(db_path))
+    ds.init_db(db_path)
+    qs.enqueue("tk-1", db_path=db_path)
+
+    monkeypatch.setattr(qw.produce_from_sheet, "run", _fake_produce_run_needs_human)
+    spy = _SpyNotifier()
+    monkeypatch.setattr(qw, "make_notifier", lambda settings: spy)
+
+    settings = Settings({"queue": {"produce_retry_max_attempts": 3, "produce_retry_backoff_s": 0}})
+    handled = qw.run_once(settings=settings, worker_id="test-worker")
+    assert handled is True
+
+    rows = qs.list_queue(db_path=db_path)
+    assert len(rows) == 1, "NEEDS_HUMAN KHÔNG được tạo job mới"
+    assert rows[0]["status"] == "done"
+    assert spy.calls == []   # không báo gì ở nhánh này (đó là việc của notify("needs_human") trong run() thật)
+
+
+def test_queue_worker_retry_attempt_count_survives_worker_restart(monkeypatch, tmp_path):
+    """'số lần thử SỐNG SÓT qua khởi động lại worker' -- đếm nằm trong
+    payload_json (SQLite trên đĩa), KHÔNG trong biến RAM của tiến trình.
+    Mô phỏng khởi động lại bằng cách RELOAD lại module queue_worker giữa 2
+    lượt gọi (xoá sạch mọi state Python-level module có thể còn giữ) -- nếu
+    counter sống trong RAM, module reload sẽ làm mất nó và test SẼ đỏ."""
+    import importlib
+    import json
+
+    from store import document_store as ds
+    from store import queue_store as qs
+    from twmkt.config import Settings
+
+    qw = _queue_worker_module()
+    db_path = tmp_path / "store.db"
+    monkeypatch.setenv("DOCUMENT_STORE_PATH", str(db_path))
+    ds.init_db(db_path)
+    qs.enqueue("tk-1", db_path=db_path)
+
+    settings = Settings({"queue": {"produce_retry_max_attempts": 2, "produce_retry_backoff_s": 0}})
+
+    # Lượt 1 ("worker" thứ nhất): FAILED -> tạo lại job produce_retry_attempt=1.
+    monkeypatch.setattr(qw.produce_from_sheet, "run", _fake_produce_run_failed)
+    monkeypatch.setattr(qw, "make_notifier", lambda settings: _SpyNotifier())
+    qw.run_once(settings=settings, worker_id="worker-A")
+    rows = qs.list_queue(db_path=db_path)
+    assert len(rows) == 2
+    assert json.loads(rows[1]["payload_json"]) == {"produce_retry_attempt": 1}
+
+    # "KHỞI ĐỘNG LẠI WORKER" -- reload module (mô phỏng tiến trình mới), rồi
+    # monkeypatch lại (attribute mới toanh sau reload).
+    qw = importlib.reload(qw)
+    monkeypatch.setattr(qw.produce_from_sheet, "run", _fake_produce_run_failed)
+    spy2 = _SpyNotifier()
+    monkeypatch.setattr(qw, "make_notifier", lambda settings: spy2)
+
+    # Lượt 2 ("worker" thứ hai, sau "khởi động lại"): claim job produce_retry_
+    # attempt=1 -> FAILED tiếp -> PHẢI biết đây là lần thứ 2 (đọc từ payload
+    # trên đĩa, không phải RAM) -> còn dưới trần (max=2) -> tạo lại lần 3.
+    qw.run_once(settings=settings, worker_id="worker-B")
+    rows = qs.list_queue(db_path=db_path)
+    assert len(rows) == 3
+    assert json.loads(rows[2]["payload_json"]) == {"produce_retry_attempt": 2}
+    assert spy2.calls == []   # còn dưới trần -- chưa báo Telegram
+
+
+def test_queue_worker_retry_success_notifies_only_when_config_enabled(monkeypatch, tmp_path):
+    """'Cân nhắc báo cả lúc retry THÀNH CÔNG' -- mặc định TẮT (queue.notify_
+    on_retry_success=false, xem settings.yaml), KHÔNG tự ý làm ồn hộp thư."""
+    from store import document_store as ds
+    from store import queue_store as qs
+    from twmkt.config import Settings
+
+    qw = _queue_worker_module()
+    db_path = tmp_path / "store.db"
+    monkeypatch.setenv("DOCUMENT_STORE_PATH", str(db_path))
+    ds.init_db(db_path)
+    qs.enqueue("tk-1", payload={"produce_retry_attempt": 1}, db_path=db_path)
+
+    monkeypatch.setattr(qw.produce_from_sheet, "run", _fake_produce_run_done)
+    spy = _SpyNotifier()
+    monkeypatch.setattr(qw, "make_notifier", lambda settings: spy)
+
+    settings_off = Settings({"queue": {"notify_on_retry_success": False}})
+    qw.run_once(settings=settings_off, worker_id="test-worker")
+    assert spy.calls == []
+
+    # Job đã 'done' ở lượt trên -- enqueue lại 1 job "đã từng retry" mới để đo
+    # nhánh BẬT, tránh đụng job cũ (đã claim/done, claim_next() không thấy nữa).
+    qs.enqueue("tk-2", payload={"produce_retry_attempt": 1}, db_path=db_path)
+    settings_on = Settings({"queue": {"notify_on_retry_success": True}})
+    qw.run_once(settings=settings_on, worker_id="test-worker")
+    assert len(spy.calls) == 1
+    event, ctx = spy.calls[0]
+    assert event == "produce_retry_recovered"
+    assert ctx["topic_key"] == "tk-2"
+    assert ctx["attempts"] == 2
+
+
+def test_queue_worker_backoff_sleeps_before_reenqueue(monkeypatch, tmp_path):
+    """'Phải có khoảng chờ trước khi thử lại' -- xác nhận time.sleep() THẬT SỰ
+    được gọi với ĐÚNG giá trị queue.produce_retry_backoff_s (double time.sleep
+    để test không tốn thời gian chờ thật)."""
+    from store import document_store as ds
+    from store import queue_store as qs
+    from twmkt.config import Settings
+
+    qw = _queue_worker_module()
+    db_path = tmp_path / "store.db"
+    monkeypatch.setenv("DOCUMENT_STORE_PATH", str(db_path))
+    ds.init_db(db_path)
+    qs.enqueue("tk-1", db_path=db_path)
+
+    monkeypatch.setattr(qw.produce_from_sheet, "run", _fake_produce_run_failed)
+    monkeypatch.setattr(qw, "make_notifier", lambda settings: _SpyNotifier())
+
+    slept = []
+    monkeypatch.setattr(qw.time, "sleep", lambda s: slept.append(s))
+
+    settings = Settings({"queue": {"produce_retry_max_attempts": 1, "produce_retry_backoff_s": 42}})
+    qw.run_once(settings=settings, worker_id="test-worker")
+    assert slept == [42.0]
+
+
+def test_queue_worker_exhausted_retry_uses_real_notifier_without_crashing(monkeypatch, tmp_path):
+    """Nối vào make_notifier() THẬT (KHÔNG monkeypatch) — settings không có
+    `notifications.telegram.*` -> NullNotifier, no-op êm (KHÔNG BAO GIỜ raise,
+    xem docstring telegram_notifier.py). Test này khoá đúng thuộc tính đó vẫn
+    giữ nguyên qua đường nối MỚI của TASK-037 -- không chỉ qua double."""
+    from store import document_store as ds
+    from store import queue_store as qs
+    from twmkt.config import Settings
+
+    qw = _queue_worker_module()
+    db_path = tmp_path / "store.db"
+    monkeypatch.setenv("DOCUMENT_STORE_PATH", str(db_path))
+    ds.init_db(db_path)
+    qs.enqueue("tk-1", payload={"produce_retry_attempt": 1}, db_path=db_path)
+
+    monkeypatch.setattr(qw.produce_from_sheet, "run", _fake_produce_run_failed)
+
+    settings = Settings({"queue": {"produce_retry_max_attempts": 1, "produce_retry_backoff_s": 0}})
+    handled = qw.run_once(settings=settings, worker_id="test-worker")   # KHÔNG được raise
+    assert handled is True
+
+    rows = qs.list_queue(db_path=db_path)
+    assert len(rows) == 1 and rows[0]["status"] == "done"
+
+
+# =============================================================================
 # scripts/queue_worker_watchdog.py (2026-08-04, Lead: "hệ thống chạy full
 # tính năng mà không cần thông qua agent") — Task Scheduler từ chối đăng ký
 # trigger "At log on"/"At startup" trên máy này (Access is denied, cần quyền
