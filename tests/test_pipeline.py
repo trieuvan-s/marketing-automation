@@ -4049,6 +4049,9 @@ def _run_produce_scenario(writer_llm, approved_row: dict | None = None, route_ll
     data["router"] = {"decisions_path": str(decisions_path)}
     test_settings = Settings(data)
 
+    from twmkt.agents.base import MockLLM as _DefaultContentMockLLM
+    from twmkt.agents.router import LLMRouter as _DefaultContentLLMRouter, Tier as _DefaultContentTier
+
     rows = approved_rows if approved_rows is not None else [approved_row]
     db_path = Path(tempfile.mkdtemp()) / "test_store.db"
     ds.init_db(db_path)
@@ -4075,8 +4078,19 @@ def _run_produce_scenario(writer_llm, approved_row: dict | None = None, route_ll
     pfs.make_notifier = lambda settings: notifier
     pfs.factory.make_llm = lambda settings: route_llm
     pfs.factory.build_writer_llm = lambda settings: writer_llm
-    if content_llm is not None:
-        pfs.factory.build_content_llm = lambda settings, **kw: content_llm
+    # TASK-015 VIỆC 2 (2026-08-16): LUÔN patch build_content_llm (trước đây
+    # chỉ patch khi `content_llm` được truyền — "KHÔNG patch" tưởng vô hại vì
+    # test_settings dùng real_load_settings(), và llm_status() TRƯỚC ĐÂY coi
+    # claude_code là mock -> build_content_llm() thật tình cờ trả MockLLM.
+    # Bug đó đã sửa (factory.llm_status, commit 447cfd3) -> build_content_llm()
+    # thật giờ trả ClaudeCodeLLM THẬT cho mọi test_run_*() không truyền
+    # content_llm -> gọi `claude -p` thật (đo được: suite 90s -> ~19 phút,
+    # tốn tiền thật). Mock hoá LUÔN Ở ĐÂY -- test KHÔNG được lệ thuộc
+    # llm_status()/provider trả gì (conftest.py có thêm lớp chặn cứng ở tầng
+    # LLMClient phòng khi có chỗ khác lỡ quên patch).
+    pfs.factory.build_content_llm = (
+        lambda settings, **kw: content_llm if content_llm is not None
+        else _DefaultContentLLMRouter(_DefaultContentMockLLM(), default_tier=_DefaultContentTier.SMART))
     try:
         for _ in range(run_times - 1):
             pfs.run(**(run_kwargs if run_kwargs is not None else {"limit": 5}))
