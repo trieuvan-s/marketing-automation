@@ -4049,6 +4049,9 @@ def _run_produce_scenario(writer_llm, approved_row: dict | None = None, route_ll
     data["router"] = {"decisions_path": str(decisions_path)}
     test_settings = Settings(data)
 
+    from twmkt.agents.base import MockLLM as _DefaultContentMockLLM
+    from twmkt.agents.router import LLMRouter as _DefaultContentLLMRouter, Tier as _DefaultContentTier
+
     rows = approved_rows if approved_rows is not None else [approved_row]
     db_path = Path(tempfile.mkdtemp()) / "test_store.db"
     ds.init_db(db_path)
@@ -4075,8 +4078,19 @@ def _run_produce_scenario(writer_llm, approved_row: dict | None = None, route_ll
     pfs.make_notifier = lambda settings: notifier
     pfs.factory.make_llm = lambda settings: route_llm
     pfs.factory.build_writer_llm = lambda settings: writer_llm
-    if content_llm is not None:
-        pfs.factory.build_content_llm = lambda settings, **kw: content_llm
+    # TASK-015 VIỆC 2 (2026-08-16): LUÔN patch build_content_llm (trước đây
+    # chỉ patch khi `content_llm` được truyền — "KHÔNG patch" tưởng vô hại vì
+    # test_settings dùng real_load_settings(), và llm_status() TRƯỚC ĐÂY coi
+    # claude_code là mock -> build_content_llm() thật tình cờ trả MockLLM.
+    # Bug đó đã sửa (factory.llm_status, commit 447cfd3) -> build_content_llm()
+    # thật giờ trả ClaudeCodeLLM THẬT cho mọi test_run_*() không truyền
+    # content_llm -> gọi `claude -p` thật (đo được: suite 90s -> ~19 phút,
+    # tốn tiền thật). Mock hoá LUÔN Ở ĐÂY -- test KHÔNG được lệ thuộc
+    # llm_status()/provider trả gì (conftest.py có thêm lớp chặn cứng ở tầng
+    # LLMClient phòng khi có chỗ khác lỡ quên patch).
+    pfs.factory.build_content_llm = (
+        lambda settings, **kw: content_llm if content_llm is not None
+        else _DefaultContentLLMRouter(_DefaultContentMockLLM(), default_tier=_DefaultContentTier.SMART))
     try:
         for _ in range(run_times - 1):
             pfs.run(**(run_kwargs if run_kwargs is not None else {"limit": 5}))
@@ -9683,6 +9697,25 @@ def test_render_production_assets_run_ranking_guard_notes_survive_resync(monkeyp
                 m = _re.match(r"A(\d+):", rng)
                 if m:
                     self._v = self._v[: int(m.group(1)) - 1]
+        def batch_update(self, data, value_input_option="RAW"):
+            # TASK-035 -- render_content_to_sheet() ghi dải cột máy qua đây
+            # cho dòng ĐÃ CÓ (không dùng trong test này, tab bắt đầu rỗng nên
+            # mọi dòng đều là dòng MỚI qua append_rows() -- vẫn cần method này
+            # để không AttributeError nếu logic đổi).
+            import re as _re
+            for entry in data:
+                m = _re.match(r"([A-Z]+)(\d+):", entry["range"])
+                col0 = sum((ord(c) - 64) * 26 ** i for i, c in enumerate(reversed(m.group(1)))) - 1
+                row0 = int(m.group(2)) - 1
+                for i, vals in enumerate(entry["values"]):
+                    r = self._v[row0 + i]
+                    if len(r) < col0 + len(vals):
+                        r.extend([""] * (col0 + len(vals) - len(r)))
+                    for j, v in enumerate(vals):
+                        r[col0 + j] = str(v)
+        def append_rows(self, rows, value_input_option="RAW"):
+            for row in rows:
+                self._v.append([str(c) for c in row])
 
     class _FakeSyncBoard:
         def __init__(self):
@@ -9729,6 +9762,23 @@ class _FakeSyncWS:
             m = _re.match(r"A(\d+):", rng)
             if m:
                 self._v = self._v[: int(m.group(1)) - 1]
+
+    def batch_update(self, data, value_input_option="RAW"):
+        import re as _re
+        for entry in data:
+            m = _re.match(r"([A-Z]+)(\d+):", entry["range"])
+            col0 = sum((ord(c) - 64) * 26 ** i for i, c in enumerate(reversed(m.group(1)))) - 1
+            row0 = int(m.group(2)) - 1
+            for i, vals in enumerate(entry["values"]):
+                r = self._v[row0 + i]
+                if len(r) < col0 + len(vals):
+                    r.extend([""] * (col0 + len(vals) - len(r)))
+                for j, v in enumerate(vals):
+                    r[col0 + j] = str(v)
+
+    def append_rows(self, rows, value_input_option="RAW"):
+        for row in rows:
+            self._v.append([str(c) for c in row])
 
 
 class _FakeSyncBoard:
@@ -10097,6 +10147,25 @@ def test_queue_worker_run_once_ingests_sheet_approval_before_claiming(monkeypatc
                 m = _re.match(r"A(\d+):", rng)
                 if m:
                     self._v = self._v[: int(m.group(1)) - 1]
+
+        def batch_update(self, data, value_input_option="RAW"):
+            # TASK-035 -- render_context_to_sheet() ghi dải cột máy (vd
+            # Execute) cho dòng ĐÃ CÓ qua đây, thay vì update() cả hàng.
+            import re as _re
+            for entry in data:
+                m = _re.match(r"([A-Z]+)(\d+):", entry["range"])
+                col0 = sum((ord(c) - 64) * 26 ** i for i, c in enumerate(reversed(m.group(1)))) - 1
+                row0 = int(m.group(2)) - 1
+                for i, vals in enumerate(entry["values"]):
+                    r = self._v[row0 + i]
+                    if len(r) < col0 + len(vals):
+                        r.extend([""] * (col0 + len(vals) - len(r)))
+                    for j, v in enumerate(vals):
+                        r[col0 + j] = str(v)
+
+        def append_rows(self, rows, value_input_option="RAW"):
+            for row in rows:
+                self._v.append([str(c) for c in row])
 
     class _FakeBoard:
         def __init__(self, context_rows):
@@ -10526,7 +10595,8 @@ def test_llm_status_banner_mock_when_provider_not_anthropic():
     st = factory.llm_status(Settings({"llm": {"provider": "mock"}}))
     assert st.use_llm is False
     assert "provider" in st.reason.lower() or "mock" in st.reason.lower()
-    assert st.banner == "LLM active: MOCK ($0 fallback) — lý do: llm.provider='mock' (không phải anthropic)"
+    assert st.banner == ("LLM active: MOCK ($0 fallback) — lý do: "
+                         "llm.provider='mock' (không phải anthropic/claude_code)")
 
 
 def test_llm_status_banner_mock_when_anthropic_unavailable():
@@ -10558,6 +10628,29 @@ def test_llm_status_banner_active_when_key_present():
         if old is None:
             os.environ.pop("ANTHROPIC_API_KEY", None)
         else:
+            os.environ["ANTHROPIC_API_KEY"] = old
+
+
+def test_llm_status_banner_active_for_claude_code_no_key_needed():
+    """TASK-015 (2026-08-16): claude_code là provider THẬT (CLI `claude -p`, gói
+    Pro/Max hiện có) -- use_llm=True KHÔNG cần ANTHROPIC_API_KEY (khác nhánh
+    anthropic), và banner phải nói ĐÚNG 'claude_code', không được in MOCK. Trước
+    bản vá này llm_status() chỉ chấp nhận 'anthropic' -> content_llm (Producers,
+    xem test_build_content_llm_uses_claude_code_when_provider_claude_code) âm
+    thầm lùi về MockLLM dù _build_llm() đã hỗ trợ claude_code từ 2026-07-27."""
+    old = os.environ.pop("ANTHROPIC_API_KEY", None)
+    try:
+        st = factory.llm_status(Settings({"llm": {
+            "provider": "claude_code", "triage_model": "claude-haiku-4-5-20251001",
+            "hook_model": "claude-sonnet-4-6",
+        }}))
+        assert st.use_llm is True
+        assert st.reason == ""
+        assert st.banner == ("LLM active: claude_code (hook=claude-sonnet-4-6, "
+                             "researcher=claude-haiku-4-5-20251001)")
+        assert "MOCK" not in st.banner
+    finally:
+        if old is not None:
             os.environ["ANTHROPIC_API_KEY"] = old
 
 
@@ -11450,12 +11543,9 @@ def test_queue_worker_sync_sheet_ingests_before_render_never_loses_approval(monk
     order = []
     monkeypatch.setattr(qw.ss, "ingest_context_from_sheet", lambda b: order.append("ingest_ctx"))
     monkeypatch.setattr(qw.ss, "ingest_content_from_sheet", lambda b: order.append("ingest_content"))
-    # rebuild=False -- TASK-032 đổi _sync_sheet() để truyền tường minh tham số
-    # này (mặc định render_context_to_sheet() giờ là rebuild=True, xem docstring
-    # hàm đó); double ở đây chỉ khoá THỨ TỰ gọi, không khoá giá trị rebuild,
-    # nên chỉ cần mở rộng chữ ký cho khớp, không đổi assertion nào.
-    monkeypatch.setattr(qw.ss, "render_context_to_sheet",
-                        lambda b, rebuild=False: order.append("render_ctx"))
+    # TASK-035 -- render_context_to_sheet()/render_content_to_sheet() không
+    # còn tham số rebuild (CAS đã gỡ hẳn, xem docstring store/sync_service.py).
+    monkeypatch.setattr(qw.ss, "render_context_to_sheet", lambda b: order.append("render_ctx"))
     monkeypatch.setattr(qw.ss, "render_content_to_sheet", lambda b: order.append("render_content"))
 
     qw._sync_sheet(object())

@@ -104,21 +104,36 @@ class LLMStatus:
     @property
     def banner(self) -> str:
         if self.use_llm:
-            return (f"LLM active: anthropic (hook={self.hook_model}, "
+            return (f"LLM active: {self.provider} (hook={self.hook_model}, "
                     f"researcher={self.researcher_model})")
         return f"LLM active: MOCK ($0 fallback) — lý do: {self.reason}"
 
 
 def llm_status(settings: Settings) -> LLMStatus:
-    """QUYẾT 1 LẦN xem lần chạy này dùng anthropic thật hay mock, kèm banner IN RÕ.
+    """QUYẾT 1 LẦN xem lần chạy này dùng LLM thật hay mock, kèm banner IN RÕ.
     Gọi hàm này ở đầu mỗi script rồi `print(status.banner)` — không được lùi mượt
-    trong im lặng. provider != anthropic hoặc thiếu SDK/ANTHROPIC_API_KEY -> mock."""
+    trong im lặng.
+
+    TASK-015 (2026-08-16): `claude_code` là provider THẬT (CLI `claude -p`, gói
+    Pro/Max hiện có, xem `_build_llm()` — đã hỗ trợ từ 2026-07-27), KHÔNG phải
+    mock. Trước bản vá này hàm chỉ chấp nhận `"anthropic"` -> mọi Producer dùng
+    `build_content_llm()` (đường VideoScriptAgent, xem scripts/produce_from_sheet.py)
+    âm thầm lùi về MockLLM dù `llm.provider="claude_code"` đã cấu hình LLM thật.
+    `claude_code` không có tiền kiểm khả dụng (không cần SDK/API key riêng,
+    ClaudeCodeLLM tự lùi mượt ở complete() nếu thiếu CLI/timeout) — CÙNG NẾP
+    `_build_llm()`, không thêm tầng đoán "gọi được không" ở đây.
+    provider ngoài `anthropic`/`claude_code` hoặc `anthropic` thiếu SDK/
+    ANTHROPIC_API_KEY -> mock."""
     provider = (settings.get("llm.provider", "mock") or "mock").lower()
     researcher_model = settings.get("llm.triage_model", "claude-haiku-4-5-20251001")
     content_model = settings.get("llm.content_model", "claude-sonnet-4-6")
     hook_model = _hook_model(settings)
+    if provider == "claude_code":
+        return LLMStatus(True, provider, hook_model=hook_model,
+                         researcher_model=researcher_model, content_model=content_model)
     if provider != "anthropic":
-        return LLMStatus(False, provider, reason=f"llm.provider={provider!r} (không phải anthropic)",
+        return LLMStatus(False, provider,
+                         reason=f"llm.provider={provider!r} (không phải anthropic/claude_code)",
                          hook_model=hook_model, researcher_model=researcher_model,
                          content_model=content_model)
     ok, why = AnthropicLLM.is_available()

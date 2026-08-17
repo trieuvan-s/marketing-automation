@@ -1,21 +1,33 @@
-"""P2 STORE-AS-TRUTH Bước 3 (2026-07-25, nhánh feature/store-as-truth) — cầu
-nối 2 CHIỀU giữa store (nguồn sự thật) và Sheet (VIEW thuần cho người xem/
-thao tác). Pipeline (produce_from_sheet.py) KHÔNG BIẾT tới module này —
-Nguyên tắc 3 ("Pipeline và Sheet KHÔNG BIẾT NHAU") — module này là adapter
-DUY NHẤT được phép đọc/ghi CẢ HAI phía.
+"""P2 STORE-AS-TRUTH Bước 3 (2026-07-25) -- cầu nối 2 CHIỀU giữa store (nguồn
+sự thật) và Sheet (VIEW cho người xem/thao tác). Pipeline (produce_from_sheet.py)
+KHÔNG BIẾT tới module này -- Nguyên tắc 3 ("Pipeline và Sheet KHÔNG BIẾT
+NHAU") -- module này là adapter DUY NHẤT được phép đọc/ghi CẢ HAI phía.
 
-BỐN HÀM CHÍNH:
-  render_context_to_sheet() / render_content_to_sheet() — store -> Sheet.
-    DỰNG LẠI TOÀN BỘ tab (clear + ghi lại từ đầu), IDEMPOTENT — đây CHÍNH LÀ
-    lệnh "phục hồi khi xoá nhầm" (xoá vài dòng Sheet, chạy lại hàm này, Sheet
-    trở về đúng như trước — vì store append-only, KHÔNG hề mất dữ liệu).
+SÁU HÀM CHÍNH:
+  render_context_to_sheet() / render_content_to_sheet() — store -> Sheet, lượt
+    TỰ ĐỘNG (mọi lượt sync sau ingest, sau mỗi job worker). CHỈ ghi các DẢI CỘT
+    MÁY-SỞ-HỮU (_CONTEXT_MACHINE_COLS/_CONTENT_MACHINE_COLS, suy ra từ header
+    trừ *_USER_COLS -- xem _machine_col_ranges()) cho dòng ĐÃ CÓ trên Sheet
+    (khớp theo TopicKey), KHÔNG BAO GIỜ đụng ô cột NGƯỜI-SỞ-HỮU của dòng đó.
+    Dòng CHƯA có trên Sheet -> append (dòng chưa tồn tại thì không có ô nào để
+    bảo vệ -- ghi cả hàng từ store là an toàn, không phải "đoán ghi đè có được
+    không"). KHÔNG tự sắp lại dòng đã có, KHÔNG tự ẩn dòng cũ theo display_days
+    -- xem TASK-035 (handoffs/TASK-035-agent-b.md) cho lý do đổi từ "dựng lại
+    TOÀN BỘ tab" (hành vi sai gốc: ghi đè cả cột người, 4 lần vá chồng lên
+    nhau trước khi sửa tận gốc ở đây) sang "chỉ ghi dải cột máy".
+  restore_context_from_store() / restore_content_from_store() — ĐƯỜNG PHỤC HỒI
+    DUY NHẤT còn ghi cả cột NGƯỜI-SỞ-HỮU: dựng lại TOÀN BỘ tab từ store (sắp
+    lại thứ tự, áp display_days, sửa mọi ô sai) -- CHỈ gọi từ
+    `scripts/sync_store_sheet.py --from-store`, do NGƯỜI chủ động chạy. KHÔNG
+    được gọi từ bất kỳ lượt sync tự động nào (worker, sync_all()).
   ingest_context_from_sheet() / ingest_content_from_sheet() — Sheet -> store.
     Đọc thao tác NGƯỜI vừa làm (Duyệt Context/Content/Public, Notes, Social
     Link, Posting Status) và topic MỚI (TopicKey có nhưng store chưa có raw —
     cầu nối tạm cho review_to_sheet.py, xem "CẦU NỐI TẠM" bên dưới), ghi
     version MỚI vào store.
-  sync_all() — orchestrator: ingest TRƯỚC render (không mất thao tác người
-    vừa bấm giữa 2 lượt gọi), rồi render lại từ store đã cập nhật.
+  sync_all() — orchestrator vận hành thường ngày: ingest TRƯỚC (không mất thao
+    tác người vừa bấm giữa 2 lượt gọi), rồi render_*_to_sheet() (KHÔNG phải
+    restore_*) từ store đã cập nhật.
 
 NGUYÊN TẮC 3.3 — KHÔNG CỘT NÀO 2 CHIỀU (xem _CONTEXT_MACHINE_COLS/
 _CONTEXT_USER_COLS/_CONTENT_MACHINE_COLS/_CONTENT_USER_COLS bên dưới cho danh
@@ -281,14 +293,22 @@ def _preview_output(output: str) -> str:
 # người gõ tay.
 _CONTEXT_MACHINE_COLS = ("Timestamp", "Hot%", "Score", "Group", "Topic", "Context",
                         "Hook", "Source", "Execute", "tickers", "TopicKey")
-# NGƯỜI-SỞ-HỮU (Sheet->store, ingest đọc, render đọc THẲNG từ store để phản
-# ánh lại — KHÔNG BAO GIỜ máy tự sinh nội dung các cột này). Output Type
-# (Bước 4) — người chọn giới hạn Content Factory, xem OUTPUT_TYPE_VALUES.
+# NGƯỜI-SỞ-HỮU (Sheet->store, ingest đọc; render_context_to_sheet() KHÔNG BAO
+# GIỜ đưa các cột này vào payload ghi cho dòng ĐÃ CÓ trên Sheet -- xem
+# _machine_col_ranges()/render_context_to_sheet(). Output Type (Bước 4) —
+# người chọn giới hạn Content Factory, xem OUTPUT_TYPE_VALUES.
 _CONTEXT_USER_COLS = (GATE1_COL, "Notes", OUTPUT_TYPE_COL)
 
 _CONTENT_MACHINE_COLS = ("Timestamp", "Context", "Type", "Status",
                          "Notes", "TopicKey", "Facts", "AssetPath")
-_CONTENT_USER_COLS = (GATE2_COL, "Social Link", GATE3_COL, "Posting Status")
+# "Người thực hiện" (VIỆC 3, 2026-08-04) KHÔNG có store backing (Lead tự gõ
+# tay qua Sheet UI) nhưng phải được bảo vệ Y HỆT cột người-sở-hữu thật --
+# render_content_to_sheet() không có gì để "phản ánh lại" cho cột này (không
+# đọc được từ store) nên đơn giản là KHÔNG BAO GIỜ đụng tới, cùng cơ chế với
+# GATE2_COL/GATE3_COL. Trước TASK-035, hàm này tự đọc lại giá trị hiện có trên
+# Sheet rồi "carry-forward" sang dòng mới mỗi lượt dựng lại toàn bảng -- không
+# còn cần nữa vì giờ ĐƠN GIẢN LÀ KHÔNG GHI cột này cho dòng đã tồn tại.
+_CONTENT_USER_COLS = (GATE2_COL, "Social Link", GATE3_COL, "Posting Status", "Người thực hiện")
 # "Output" -- NGOẠI LỆ CỐ Ý duy nhất khỏi "KHÔNG CỘT NÀO 2 CHIỀU" (Việc 2,
 # 2026-08-04, Lead): máy ghi TRƯỚC lúc sản xuất xong, nhưng người có thể sửa
 # tay TRÊN SHEET trước khi duyệt Gate 2 -- sửa PHẢI ghi ngược vào
@@ -296,7 +316,72 @@ _CONTENT_USER_COLS = (GATE2_COL, "Social Link", GATE3_COL, "Posting Status")
 # store <= _OUTPUT_PREVIEW ký tự (không bị _preview_output() cắt) -- so khớp
 # 1 bản Sheet đã cắt với bản store nguyên văn dài hơn sẽ luôn "khác nhau" giả,
 # nên ingest CHỦ ĐỘNG bỏ qua write-back khi phát hiện đã cắt (không đoán, không
-# ghi đè nhầm bài dài thành bản cụt).
+# ghi đè nhầm bài dài thành bản cụt). Output vẫn nằm TRONG dải cột MÁY (ghi lại
+# mỗi lượt render) -- an toàn vì mọi lượt gọi tự động đều ingest NGAY TRƯỚC
+# render (xem sync_all()/queue_worker._sync_sheet()), nên store đã phản ánh
+# đúng cái người sửa tay trước khi render đọc lại, không có gì để mất.
+
+
+def _machine_col_ranges(header: list[str], user_cols: tuple[str, ...]) -> list[tuple[int, int]]:
+    """Dải CỘT MÁY-SỞ-HỮU (0-based, nửa-mở) suy ra TỰ ĐỘNG từ thứ tự `header`
+    hiện có, trừ đi `user_cols` -- KHÔNG hard-code vị trí cột, tự thích ứng nếu
+    header đổi thứ tự (miễn tên cột user_cols vẫn đúng). Trả về các dải LIÊN
+    TỤC (vd CONTEXT hiện tại: [(0,8), (10,12), (13,14)]) để gộp thành ít lệnh
+    ghi nhất -- xem _write_machine_col_ranges()."""
+    user_set = set(user_cols)
+    ranges: list[tuple[int, int]] = []
+    start: int | None = None
+    for i, name in enumerate(header):
+        if name in user_set:
+            if start is not None:
+                ranges.append((start, i))
+                start = None
+        elif start is None:
+            start = i
+    if start is not None:
+        ranges.append((start, len(header)))
+    return ranges
+
+
+def _write_machine_col_ranges(board: SheetsBoard, tab: str, ranges: list[tuple[int, int]],
+                              updates: dict[int, list[str]]) -> None:
+    """Ghi CÁC DẢI CỘT MÁY-SỞ-HỮU cho các dòng ĐÃ CÓ trên Sheet -- `updates`
+    khoá = chỉ số dữ liệu 0-based (dòng Sheet = khoá + 2), giá trị = TOÀN BỘ
+    hàng mới tính (chỉ phần nằm trong `ranges` được lấy ra ghi, phần còn lại
+    -- cột NGƯỜI-SỞ-HỮU -- KHÔNG BAO GIỜ được đọc tới ở đây). Gộp dòng LIÊN
+    TIẾP × mọi dải cột vào 1 lệnh `values.batchUpdate` DUY NHẤT (yêu cầu hợp
+    đồng TASK-035: không tăng số lệnh gọi Sheets API so với bản ghi cả hàng
+    trước đây)."""
+    if not updates or not ranges:
+        return
+    ws = board._tab(tab)
+    row_indices = sorted(updates)
+    blocks: list[tuple[int, int]] = []
+    block_start = row_indices[0]
+    prev = row_indices[0]
+    for ri in row_indices[1:]:
+        if ri != prev + 1:
+            blocks.append((block_start, prev))
+            block_start = ri
+        prev = ri
+    blocks.append((block_start, prev))
+
+    data = []
+    for r0, r1 in blocks:
+        for s, e in ranges:
+            a1 = f"{_col_a1(s + 1)}{r0 + 2}:{_col_a1(e)}{r1 + 2}"
+            values = [updates[ri][s:e] for ri in range(r0, r1 + 1)]
+            data.append({"range": a1, "values": values})
+    ws.batch_update(data, value_input_option="USER_ENTERED")
+
+
+def _ensure_header(board: SheetsBoard, tab: str, header: list[str],
+                   existing_header: list[str]) -> None:
+    """Ghi header CHỈ khi THIẾU/SAI -- ghi đè vô cớ mỗi lượt tự xoá định dạng
+    hàng tiêu đề. Header là METADATA (không phải dữ liệu theo-topic của
+    NGƯỜI/MÁY), an toàn ghi lại toàn bộ khi cần."""
+    if not existing_header or [c.strip() for c in existing_header] != list(header):
+        board._tab(tab).update("A1", [list(header)], value_input_option="USER_ENTERED")
 
 
 def _read_sheet_rows(board: SheetsBoard, tab_name: str) -> tuple[list[str], list[list[str]]]:
@@ -319,155 +404,244 @@ def _cell(row: list[str], i: int | None) -> str:
     return row[i].strip() if i is not None and i < len(row) else ""
 
 
-# --- CAS theo timestamp cho cột NGƯỜI-SỞ-HỮU của CONTEXT (TASK-030) ---------
-# BUG THẬT đã tái lập (TASK-029, tests/test_race_render_ingest.py): render
-# đọc 1 ẢNH CHỤP store (vd store TẠM CŨ do 1 job KHÁC kích, đọc TRƯỚC khi
-# 1 lượt ingest khác kịp ghi APPROVE) rồi ghi đè VÔ ĐIỀU KIỆN 3 cột người-sở-
-# hữu (Duyệt Context/Notes/Output Type) — nuốt mất APPROVE người vừa bấm nếu
-# ảnh chụp đó cũ hơn. `gate_status` đã append-only + có `created_at` mỗi
-# version SẴN (document_store.py) -- không cần đổi schema để vá.
-_GATE1_CELL = lambda payload: payload.get("gate1", "PENDING")   # noqa: E731
-_NOTES_CELL = lambda payload: payload.get("notes", "")   # noqa: E731
-_OUTPUT_TYPE_CELL = lambda payload: ", ".join(payload.get("output_type") or ["AUTO"])   # noqa: E731
-
-
-def _cas_user_value(history: list[tuple[int, dict, str]], field_cell, sheet_current: str | None, store_latest: str) -> str:
-    """CAS THEO TIMESTAMP cho 1 cột NGƯỜI-SỞ-HỮU. `history` = `ds.read_history()`
-    của gate_status (version tăng dần, MỖI version có sẵn `created_at`).
-    `sheet_current=None` -- dòng CHƯA có trên Sheet (topic mới/dòng vừa mất)
-    -> ghi tự do, không có gì để bảo vệ. Giống `store_latest` -> không xung
-    đột. KHÁC NHAU -> CHỈ ghi đè khi CHỨNG MINH ĐƯỢC: giá trị hiện có trên
-    Sheet KHỚP đúng 1 version CŨ HƠN (created_at bé hơn) version mới nhất
-    trong lịch sử -- bằng chứng store đã tiến xa hơn giá trị Sheet đang hiện
-    (vd Sheet bị reset/xoá nhầm, đây CHÍNH LÀ đường phục hồi Bước 5.4). KHÔNG
-    khớp version nào (giá trị Sheet chưa từng xuất hiện trong lịch sử ẢNH
-    CHỤP đang đọc -- đúng kịch bản race TASK-029: ảnh chụp cũ chưa hề thấy
-    version APPROVE mà 1 tiến trình khác vừa ghi) -> KHÔNG chứng minh được
-    nguồn gốc -> GIỮ NGUYÊN ô Sheet (thiên lệch an toàn, xem docstring module:
-    ô chậm vài giây là phiền, thao tác người bị nuốt là mất dữ liệu)."""
-    if not history or sheet_current is None or sheet_current == store_latest:
-        return store_latest
-    latest_created_at = history[-1][2]
-    for _version, payload, created_at in reversed(history[:-1]):
-        if created_at <= latest_created_at and field_cell(payload) == sheet_current:
-            return store_latest
-    return sheet_current
-
-
 # =============================================================================
-# store -> Sheet (render, idempotent, = lệnh phục hồi)
+# store -> Sheet (render TỰ ĐỘNG -- chỉ ghi dải cột MÁY, xem docstring module)
 # =============================================================================
 
-def render_context_to_sheet(board: SheetsBoard, *, db_path=None, settings=None, rebuild: bool = True) -> int:
-    """Dựng lại TOÀN BỘ tab CONTEXT từ store — bao gồm CẢ Duyệt Context/Notes/
-    Output Type, đọc THẲNG từ gate_status. 3 cột NGƯỜI-SỞ-HỮU này KHÔNG còn
-    ghi đè vô điều kiện MẶC ĐỊNH (TASK-030, vá race render/ingest) -- khi
-    `rebuild=False` đi qua CAS theo timestamp (`_cas_user_value()`, xem
-    docstring): so giá trị store với giá trị HIỆN CÓ trên Sheet trước khi ghi,
-    chỉ ghi đè khi chứng minh được store mới hơn.
+def _context_row_from_store(topic_key: str, *, db_path=None) -> list[str]:
+    raw = ps.read_raw(topic_key, db_path=db_path) or {}
+    gate = ps.read_gate_status(topic_key, db_path=db_path)
+    return context_row(
+        title=raw.get("context", ""), hook_line=raw.get("hook", ""),
+        source_url=raw.get("source", ""),
+        score=int(raw.get("score", 0) or 0), hot_pct=float(raw.get("hot_pct", 0.0) or 0.0),
+        topic=raw.get("topic", ""), group=raw.get("group", ""),
+        tickers=raw.get("tickers", []), status=gate.get("gate1", "PENDING"),
+        # VIỆC Execute (2026-08-03, Lead) — ĐẢO LẠI quyết định 2026-07-28
+        # (khi đó ép "Waiting" cho MỌI Execute rỗng để tránh trông như "hệ
+        # thống chưa thấy dòng này"). Lead giờ muốn phân biệt RÕ 2 trạng
+        # thái: "" = mới crawl, CHƯA qua Gate 1 (chưa có gì để chờ) khác
+        # "Waiting" = ĐÃ duyệt, đang xếp hàng. Hiển thị ĐÚNG giá trị store
+        # (ingest_context_from_sheet() đã tự set "Waiting" đúng lúc Gate 1
+        # chuyển APPROVE — xem đó), không tự đoán/ép ở đây nữa.
+        execute=gate.get("execute", ""),
+        topic_key=topic_key, notes=gate.get("notes", ""),
+        output_type=gate.get("output_type") or [],
+        # BUG THẬT (Lead báo 2026-07-29): KHÔNG truyền `ts` thì context_row
+        # lấy _now_ddmmyyyy() -> MỖI LƯỢT RENDER ghi đè Timestamp thành
+        # HÔM NAY. `raw["timestamp"]` ghi MỘT LẦN lúc ingest đầu, không đổi.
+        ts=raw.get("timestamp") or None,
+    )
 
-    TASK-032 -- `rebuild` (mặc định True) LÀ TÍN HIỆU TƯỜNG MINH bắt buộc phải
-    có, không suy luận được từ dữ liệu ô. Lý do: TASK-030 để lộ 1 mâu thuẫn
-    ngữ nghĩa thật -- khi gate_status của 1 topic CHỈ CÓ ĐÚNG 1 version (chưa
-    từng qua ingest thật, vd topic nạp thẳng bằng script/test), Sheet hiện giá
-    trị KHÁC store rơi vào ĐÚNG 1 nhánh "không version nào chứng minh được" của
-    `_cas_user_value()` -- và XÉT THUẦN TỪ (history, sheet_current,
-    store_latest), nhánh đó Y HỆT kịch bản race thật (TASK-029, xem
-    tests/test_race_render_ingest.py::test_regression_stale_render_snapshot_
-    overwrites_approve_before_next_ingest) mà CAS phải BẢO VỆ (giữ nguyên Sheet).
-    2 kịch bản chỉ khác nhau ở Ý ĐỊNH của lượt gọi -- không có cách phân biệt
-    bằng dữ liệu, y hệt bằng chứng đã thấy ở test_render_context_to_sheet_
-    without_prior_ingest_reflects_store_not_sheet (store/test_sync_service.py)
-    kỳ vọng store thắng cho ĐÚNG kịch bản dữ liệu đó. Do đó:
 
-      rebuild=True (MẶC ĐỊNH, hành vi CŨ trước TASK-030) -- BỎ QUA CAS hoàn
-        toàn cho 3 cột người-sở-hữu, store LUÔN thắng. Đây là lựa chọn AN TOÀN
-        cho lối gọi TRỰC TIẾP/thủ công KHÔNG chủ động ingest trước (test, lệnh
-        `scripts/sync_store_sheet.py --from-store`, script vá tay) -- đúng
-        đường phục hồi Bước 5.4 ("Sheet đang sai, muốn store thắng tuyệt đối").
-      rebuild=False -- CAS áp dụng (`_cas_user_value()`), bảo vệ thao tác
-        người khỏi bị 1 ảnh chụp store CŨ ghi đè (TASK-029). CHỈ 2 nơi cần
-        truyền rebuild=False, cả 2 đều là lượt sync TỰ ĐỘNG lặp lại (có race
-        thật giữa nhiều tiến trình): `scripts/queue_worker.py::_sync_sheet()`
-        và `sync_all()` bên dưới.
+def render_context_to_sheet(board: SheetsBoard, *, db_path=None, settings=None) -> int:
+    """Lượt sync TỰ ĐỘNG cho tab CONTEXT (TASK-035 -- xem docstring module).
+    Dòng ĐÃ CÓ trên Sheet (khớp TopicKey) -> CHỈ ghi lại dải cột MÁY-SỞ-HỮU
+    (`_CONTEXT_MACHINE_COLS`, suy ra qua `_machine_col_ranges()`), TUYỆT ĐỐI
+    không đụng ô Duyệt Context/Notes/Output Type (`_CONTEXT_USER_COLS`) của
+    dòng đó -- dù store có gì, dù ingest đã chạy trước hay chưa, KHÔNG còn
+    "đoán ghi đè có an toàn không" (CAS TASK-030/032 đã GỠ, xem handoffs/
+    TASK-035-agent-b.md) vì đường ghi giờ đơn giản là KHÔNG BAO GIỜ chạm cột
+    đó với dòng đã tồn tại -- không có gì để đoán nữa.
 
-    Đường phục hồi Bước 5.4 khi Sheet bị XOÁ (không phải "giá trị sai") không
-    phụ thuộc `rebuild` -- `sheet_row is None` luôn để store thắng vô điều kiện
-    (xem nhánh `sheet_current is None` trong `_cas_user_value()`), kể cả khi
-    `rebuild=False` (xem test_sync_all_full_recovery_after_accidental_deletion)."""
+    Dòng CHƯA CÓ trên Sheet (TopicKey trong store nhưng chưa thấy trên Sheet)
+    -> `append_rows()` (thêm cuối bảng, KHÔNG chèn giữa/không đụng dòng khác)
+    với FULL hàng vừa tính (kể cả cột người, đọc từ store) -- an toàn vì dòng
+    chưa hề tồn tại nên không có ô nào bị ghi đè. Trong THỰC TẾ, tab CONTEXT
+    hiếm khi cần nhánh này: `review_to_sheet.py` (ngoài ranh giới module này)
+    luôn append dòng PENDING TRƯỚC khi topic vào store, nên tới lượt hàm này
+    chạy dòng thường ĐÃ tồn tại. Nhiều dòng mới trong CÙNG 1 lượt gọi được sắp
+    (ngày, first_created_at) NỘI BỘ trong lô chèn -- không đụng thứ tự dòng cũ
+    (xem "3 ca khó" trong handoff).
+
+    Dòng ngoài cửa sổ `sheets.display_days` KHÔNG được append (giữ Sheet gọn
+    cho lô chèn mới) nhưng dòng ĐÃ HIỆN SẴN không tự ẩn đi nữa khi già đi --
+    trade-off tường minh, phục hồi đầy đủ (kể cả ẩn dòng cũ) chỉ còn ở
+    `restore_context_from_store()` (`scripts/sync_store_sheet.py --from-store`)."""
     existing_header, existing_rows = _read_sheet_rows(board, "CONTEXT")
+    _ensure_header(board, "CONTEXT", CONTEXT_HEADER, existing_header)
     i_sheet_key = _col_index(existing_header, "TopicKey")
-    i_sheet_g1 = _col_index(existing_header, GATE1_COL)
-    i_sheet_notes = _col_index(existing_header, "Notes")
-    i_sheet_ot = _col_index(existing_header, OUTPUT_TYPE_COL)
-    sheet_by_key: dict[str, list[str]] = {}
+    row_by_key: dict[str, int] = {}
     if i_sheet_key is not None:
-        for r in existing_rows:
+        for i, r in enumerate(existing_rows):
             tk = _cell(r, i_sheet_key)
             if tk:
-                sheet_by_key[tk] = r
+                row_by_key[tk] = i
 
-    i_out_g1 = CONTEXT_HEADER.index(GATE1_COL)
-    i_out_notes = CONTEXT_HEADER.index("Notes")
-    i_out_ot = CONTEXT_HEADER.index(OUTPUT_TYPE_COL)
+    ranges = _machine_col_ranges(CONTEXT_HEADER, _CONTEXT_USER_COLS)
+    i_ts = CONTEXT_HEADER.index("Timestamp")
 
+    updates: dict[int, list[str]] = {}
+    new_rows: list[tuple[str, list[str]]] = []
+    for topic_key in ds.list_topics(layer="raw", db_path=db_path):
+        row = _context_row_from_store(topic_key, db_path=db_path)
+        row_idx = row_by_key.get(topic_key)
+        if row_idx is None:
+            new_rows.append((topic_key, row))
+            continue
+        old_row = existing_rows[row_idx]
+        padded_old = list(old_row) + [""] * max(0, len(CONTEXT_HEADER) - len(old_row))
+        if any(padded_old[s:e] != row[s:e] for s, e in ranges):
+            updates[row_idx] = row
+
+    n = len(updates)
+    if new_rows:
+        visible_ids = {id(r) for r in _visible_rows([r for _, r in new_rows], i_ts, settings=settings)}
+        visible_new = [(tk, r) for tk, r in new_rows if id(r) in visible_ids]
+        # VIỆC sắp xếp (2026-08-03, Lead, giữ nguyên tinh thần Task #75) --
+        # NGÀY tăng dần, first_created_at() làm khoá phụ trong cùng ngày --
+        # CHỈ áp cho LÔ ĐANG CHÈN (không đụng dòng cũ đã ở vị trí khác).
+        visible_new.sort(key=lambda tr: (
+            _day_key(tr[1][i_ts]),
+            ds.first_created_at(tr[0], "raw", "", db_path=db_path) or "",
+        ))
+        if visible_new:
+            board._tab("CONTEXT").append_rows(
+                [r for _, r in visible_new], value_input_option="USER_ENTERED")
+            n += len(visible_new)
+
+    _write_machine_col_ranges(board, "CONTEXT", ranges, updates)
+    _band_day(board, "band_context_by_day", "CONTEXT")
+    return n
+
+
+def _content_row_candidates(topic_key: str, *, db_path=None) -> list[tuple[str, str, list[str]]]:
+    """Trả `(match_type, sort_type, row)` cho MỌI dòng CONTENT của 1 topic --
+    `match_type` = giá trị content_type dùng để KHỚP với Sheet (raw_content_
+    type() của cột Type -- "AUTO" cho dòng gộp), `sort_type` = content_type
+    dùng để tra `first_created_at()` (tuyến ĐẦU TIÊN thử, cho ca AUTO gộp).
+    Logic GIỮ NGUYÊN VIỆC 4 (gộp AUTO thất bại toàn bộ thành 1 dòng ERROR)."""
+    raw = ps.read_raw(topic_key, db_path=db_path) or {}
+    context_title = raw.get("context", "")
+    gate = ps.read_gate_status(topic_key, db_path=db_path)
+    is_auto = _is_auto_output_type(gate.get("output_type"))
+
+    type_outs: list[tuple[str, dict]] = []
+    for type_ in _ALL_TYPES:
+        out = ps.read_content_output(topic_key, type_, db_path=db_path)
+        if out is not None:
+            type_outs.append((type_, out))
+
+    has_done = any(out.get("status") == "DONE" for _, out in type_outs)
+    if is_auto and not has_done and type_outs:
+        merged_notes = _auto_merge_notes(type_outs)
+        first_type, first_out = type_outs[0]
+        row = content_row(
+            context=context_title, type_="AUTO", status="ERROR",
+            output="", notes=merged_notes, approve="PENDING", topic_key=topic_key,
+            facts="", ts=first_out.get("published_at") or first_out.get("timestamp") or None,
+            asset_path="",
+        )
+        return [("AUTO", first_type, row)]
+
+    i_h_social = CONTENT_HEADER.index("Social Link")
+    i_h_g3 = CONTENT_HEADER.index(GATE3_COL)
+    i_h_posting = CONTENT_HEADER.index("Posting Status")
+    out_rows: list[tuple[str, str, list[str]]] = []
+    for type_, out in type_outs:
+        if is_auto and has_done and out.get("status") == "ERROR":
+            continue
+        status_data = ps.read_content_status(topic_key, type_, db_path=db_path)
+        row = content_row(
+            context=context_title, type_=type_, status=out.get("status", ""),
+            output=_preview_output(out.get("output", "")), notes=out.get("notes", ""),
+            approve=status_data.get("gate2", "PENDING"), topic_key=topic_key,
+            facts=out.get("facts", ""),
+            ts=out.get("published_at") or out.get("timestamp") or None,
+            asset_path=_asset_cell(status_data),
+        )
+        row[i_h_social] = status_data.get("social_link", "")
+        row[i_h_g3] = status_data.get("gate3", "PENDING")
+        row[i_h_posting] = status_data.get("posting_status", "")
+        out_rows.append((type_, type_, row))
+    return out_rows
+
+
+def render_content_to_sheet(board: SheetsBoard, *, db_path=None, settings=None) -> int:
+    """Lượt sync TỰ ĐỘNG cho tab CONTENT -- CÙNG nguyên tắc render_context_
+    to_sheet(): dòng ĐÃ CÓ (khớp `(TopicKey, raw_content_type(Type))`) chỉ ghi
+    dải cột MÁY (`_CONTENT_MACHINE_COLS`, gồm cả "Output" -- ngoại lệ hybrid,
+    xem ghi chú cạnh `_CONTENT_USER_COLS`), KHÔNG BAO GIỜ đụng Duyệt Content/
+    Social Link/Duyệt Public/Posting Status/"Người thực hiện". Dòng CHƯA CÓ ->
+    append full hàng (nhiều dòng mới CÙNG lượt sắp theo ngày+first_created_at
+    NỘI BỘ lô chèn, không đụng dòng cũ) -- KHÁC CONTEXT, đây là nhánh THƯỜNG
+    XUYÊN vì không có nguồn ngoài nào tạo trước dòng CONTENT (chỉ Production
+    Factory ghi content_output, không ai khác chạm tab này trước render).
+
+    "Người thực hiện" không có store backing -- content_row() luôn trả "" cho
+    cột này, dòng MỚI append "" (đúng, chưa ai gõ); dòng ĐÃ CÓ không bao giờ bị
+    đụng (nằm ngoài dải cột máy) nên giá trị người gõ tay GIỮ NGUYÊN qua mọi
+    lượt -- không cần đọc lại/carry-forward thủ công như trước TASK-035."""
+    existing_header, existing_rows = _read_sheet_rows(board, "CONTENT")
+    _ensure_header(board, "CONTENT", CONTENT_HEADER, existing_header)
+    j_tk = _col_index(existing_header, "TopicKey")
+    j_type = _col_index(existing_header, "Type")
+    row_by_key: dict[tuple[str, str], int] = {}
+    if j_tk is not None and j_type is not None:
+        for i, r in enumerate(existing_rows):
+            tk = _cell(r, j_tk)
+            if tk:
+                row_by_key[(tk, raw_content_type(_cell(r, j_type)))] = i
+
+    ranges = _machine_col_ranges(CONTENT_HEADER, _CONTENT_USER_COLS)
+    i_ts_c = CONTENT_HEADER.index("Timestamp")
+
+    updates: dict[int, list[str]] = {}
+    new_rows: list[tuple[str, str, list[str]]] = []
+    for topic_key in ds.list_topics(layer="content_output", db_path=db_path):
+        for match_type, sort_type, row in _content_row_candidates(topic_key, db_path=db_path):
+            row_idx = row_by_key.get((topic_key, match_type))
+            if row_idx is None:
+                new_rows.append((topic_key, sort_type, row))
+                continue
+            old_row = existing_rows[row_idx]
+            padded_old = list(old_row) + [""] * max(0, len(CONTENT_HEADER) - len(old_row))
+            if any(padded_old[s:e] != row[s:e] for s, e in ranges):
+                updates[row_idx] = row
+
+    n = len(updates)
+    if new_rows:
+        visible_ids = {id(r) for r in _visible_rows([r for _, _, r in new_rows], i_ts_c, settings=settings)}
+        visible_new = [(tk, st, r) for tk, st, r in new_rows if id(r) in visible_ids]
+        visible_new.sort(key=lambda tr: (
+            _day_key(tr[2][i_ts_c]),
+            ds.first_created_at(tr[0], "content_output", tr[1], db_path=db_path) or "",
+        ))
+        if visible_new:
+            board._tab("CONTENT").append_rows(
+                [r for _, _, r in visible_new], value_input_option="USER_ENTERED")
+            n += len(visible_new)
+
+    _write_machine_col_ranges(board, "CONTENT", ranges, updates)
+    # BĂNG MÀU theo TopicKey + viền theo NGÀY (Lead báo thiếu 2026-07-29) --
+    # đặt trong try bên trong _band_day(): lớp TRÌNH BÀY, hỏng không đáng làm
+    # hỏng cả lượt sync (dữ liệu đã ghi xong ở trên).
+    _band_day(board, "regroup_and_band_content", "CONTENT")
+    return n
+
+
+# =============================================================================
+# ĐƯỜNG PHỤC HỒI (TASK-035) -- NƠI DUY NHẤT còn dựng lại TOÀN BỘ tab từ store,
+# ghi cả cột NGƯỜI-SỞ-HỮU. CHỈ gọi từ `scripts/sync_store_sheet.py --from-store`
+# (người chủ động chạy) -- KHÔNG BAO GIỜ từ lượt sync tự động (worker,
+# sync_all()). "Store thắng tuyệt đối" -- không CAS, không đoán: đây CHÍNH LÀ
+# lượt gọi được phép ghi đè bất cứ gì trên Sheet bằng store.
+# =============================================================================
+
+def restore_context_from_store(board: SheetsBoard, *, db_path=None, settings=None) -> int:
+    """Dựng lại TOÀN BỘ tab CONTEXT từ store -- kể cả Duyệt Context/Notes/
+    Output Type, đọc THẲNG từ gate_status, KHÔNG đọc lại Sheet hiện có trước
+    khi ghi (khác `render_context_to_sheet()`: hàm đó BẢO VỆ ô người-sở-hữu
+    của dòng đã tồn tại, hàm NÀY GHI ĐÈ). Sắp lại TOÀN BỘ theo (ngày,
+    first_created_at), áp `sheets.display_days` cho MỌI dòng (kể cả dòng cũ đã
+    ẩn từ trước). Idempotent -- gọi lại nhiều lần cho CÙNG kết quả."""
     keyed_rows: list[tuple[str, list[str]]] = []
     for topic_key in ds.list_topics(layer="raw", db_path=db_path):
-        raw = ps.read_raw(topic_key, db_path=db_path) or {}
-        gate = ps.read_gate_status(topic_key, db_path=db_path)
-        row = context_row(
-            title=raw.get("context", ""), hook_line=raw.get("hook", ""),
-            source_url=raw.get("source", ""),
-            score=int(raw.get("score", 0) or 0), hot_pct=float(raw.get("hot_pct", 0.0) or 0.0),
-            topic=raw.get("topic", ""), group=raw.get("group", ""),
-            tickers=raw.get("tickers", []), status=gate.get("gate1", "PENDING"),
-            # VIỆC Execute (2026-08-03, Lead) — ĐẢO LẠI quyết định 2026-07-28
-            # (khi đó ép "Waiting" cho MỌI Execute rỗng để tránh trông như "hệ
-            # thống chưa thấy dòng này"). Lead giờ muốn phân biệt RÕ 2 trạng
-            # thái: "" = mới crawl, CHƯA qua Gate 1 (chưa có gì để chờ) khác
-            # "Waiting" = ĐÃ duyệt, đang xếp hàng. Hiển thị ĐÚNG giá trị store
-            # (ingest_context_from_sheet() đã tự set "Waiting" đúng lúc Gate 1
-            # chuyển APPROVE — xem đó), không tự đoán/ép ở đây nữa. Execute là
-            # cột HỆ THỐNG sở hữu hoàn toàn (worker ghi) -- KHÔNG qua CAS.
-            execute=gate.get("execute", ""),
-            topic_key=topic_key, notes=gate.get("notes", ""),
-            output_type=gate.get("output_type") or [],
-            # BUG THẬT (Lead báo 2026-07-29): KHÔNG truyền `ts` thì context_row
-            # lấy _now_ddmmyyyy() -> MỖI LƯỢT RENDER ghi đè Timestamp thành
-            # HÔM NAY. Mọi dòng crawl 28/07 hoá thành 29/07, không còn phân
-            # biệt được tin ngày nào — đúng thứ Lead cần để lọc/nhóm theo ngày.
-            # `raw["timestamp"]` ghi MỘT LẦN lúc ingest đầu, không đổi về sau.
-            ts=raw.get("timestamp") or None,
-        )
-
-        # rebuild=True (mặc định) -- BỎ QUA CAS, giữ nguyên giá trị store vừa
-        # tính ở row[...] (đã đúng "store thắng"). Chỉ khi rebuild=False (lượt
-        # sync tự động, có race thật) mới đọc lịch sử + so khớp CAS.
-        if not rebuild:
-            sheet_row = sheet_by_key.get(topic_key)
-            gate_history = ds.read_history(topic_key, "gate_status", "", db_path=db_path)
-            row[i_out_g1] = _cas_user_value(
-                gate_history, _GATE1_CELL,
-                _cell(sheet_row, i_sheet_g1) if sheet_row is not None else None, row[i_out_g1])
-            row[i_out_notes] = _cas_user_value(
-                gate_history, _NOTES_CELL,
-                _cell(sheet_row, i_sheet_notes) if sheet_row is not None else None, row[i_out_notes])
-            row[i_out_ot] = _cas_user_value(
-                gate_history, _OUTPUT_TYPE_CELL,
-                _cell(sheet_row, i_sheet_ot) if sheet_row is not None else None, row[i_out_ot])
-
-        keyed_rows.append((topic_key, row))
+        keyed_rows.append((topic_key, _context_row_from_store(topic_key, db_path=db_path)))
 
     i_ts = CONTEXT_HEADER.index("Timestamp")
     visible = {id(r) for r in _visible_rows([r for _, r in keyed_rows], i_ts, settings=settings)}
     keyed_visible = [(tk, r) for tk, r in keyed_rows if id(r) in visible]
-    # VIỆC sắp xếp (2026-08-03, Lead) — BỎ tie-break theo Hot% (dữ liệu mới
-    # crawl cùng ngày bị xếp lẫn lộn vì Hot% không phản ánh THỨ TỰ VÀO HỆ
-    # THỐNG). Thay bằng first_created_at() (thời điểm bản ghi "raw" ĐẦU TIÊN
-    # của topic — xem docstring document_store.first_created_at) làm khoá phụ:
-    # NGÀY TĂNG DẦN, trong cùng ngày THEO ĐÚNG THỨ TỰ CRAWL -> tin mới nhất
-    # luôn nằm dưới cùng, không còn xáo trộn theo alphabet của topic_key (thứ
-    # tự list_topics() trả về, vốn KHÔNG có ý nghĩa thời gian).
     keyed_visible.sort(key=lambda tr: (
         _day_key(tr[1][i_ts]),
         ds.first_created_at(tr[0], "raw", "", db_path=db_path) or "",
@@ -479,141 +653,27 @@ def render_context_to_sheet(board: SheetsBoard, *, db_path=None, settings=None, 
     return len(out_rows)
 
 
-def render_content_to_sheet(board: SheetsBoard, *, db_path=None, settings=None) -> int:
-    """Dựng lại TOÀN BỘ tab CONTENT từ store. Đọc TRƯỚC giá trị NGƯỜI-SỞ-HỮU
-    hiện có — bao gồm CẢ Duyệt Content/Social Link/Duyệt Public/Posting
-    Status, đọc THẲNG từ content_status (KHÔNG đọc lại Sheet hiện tại trước
-    khi xoá — cùng lý do render_context_to_sheet(), xem docstring đó).
-    content_row() hard-code Duyệt Public="PENDING" (INVARIANT — KHÔNG luồng
-    máy nào được ghi Gate3, xem docstring content_row()) nên override 3 cột
-    người-sở-hữu SAU khi gọi, bằng giá trị đọc từ content_status — vẫn KHÔNG
-    máy TỰ SINH giá trị, chỉ phản ánh lại cái người đã ghi (qua ingest).
-
-    Cột Output ghi lên Sheet đi qua `_preview_output()` (cắt ở _OUTPUT_PREVIEW
-    ký tự, hiện 5000 — Việc 2, 2026-08-04). Bài NGẮN hơn ngưỡng hiện NGUYÊN
-    VĂN (không cắt) — người có thể sửa tay ô này, `ingest_content_from_sheet()`
-    đọc lại và ghi ngược vào content_output (xem ghi chú _CONTENT_USER_COLS).
-
-    VIỆC 3 (2026-08-04, Lead):
-    (a) Timestamp hiển thị đổi sang `published_at` (ngày ĐĂNG BÀI GỐC, cùng ý
-        nghĩa cột Timestamp bên tab CONTEXT), lùi về `timestamp` (ngày XỬ LÝ)
-        khi bản ghi cũ chưa có published_at.
-    (b) Thứ tự dòng: NGÀY tăng dần, trong cùng ngày theo `first_created_at()`
-        của chính bản ghi content_output đó (KHÔNG theo alphabet topic_key) —
-        cùng cách CONTEXT đã sửa (Task #75).
-    (c) "Người thực hiện" — đọc giá trị HIỆN CÓ trên Sheet (không có store
-        backing, người tự gõ tay) TRƯỚC khi dựng lại, khoá theo (TopicKey,
-        Type hiển thị) vì thứ tự dòng đổi mỗi lượt sort, rồi carry-forward
-        sang dòng mới — máy KHÔNG được tự xoá giá trị người gõ."""
-    i_h_type = CONTENT_HEADER.index("Type")
-    i_h_social = CONTENT_HEADER.index("Social Link")
-    i_h_g3 = CONTENT_HEADER.index(GATE3_COL)
-    i_h_posting = CONTENT_HEADER.index("Posting Status")
-    i_h_nguoi = CONTENT_HEADER.index("Người thực hiện")
-
-    existing_header, existing_rows = _read_sheet_rows(board, "CONTENT")
-    nguoi_thuc_hien_by_key: dict[tuple[str, str], str] = {}
-    if existing_header:
-        j_tk = _col_index(existing_header, "TopicKey")
-        j_type = _col_index(existing_header, "Type")
-        j_nguoi = _col_index(existing_header, "Người thực hiện")
-        if j_tk is not None and j_type is not None and j_nguoi is not None:
-            for r in existing_rows:
-                tk = _cell(r, j_tk)
-                if tk:
-                    nguoi_thuc_hien_by_key[(tk, _cell(r, j_type))] = _cell(r, j_nguoi)
-
-    # (topic_key, content_type dùng để tra first_created_at(), row) — content_type
-    # riêng vì AUTO gộp vẫn cần khoá theo tuyến ĐẦU TIÊN thử (type_outs[0]) để
-    # sắp xếp có ý nghĩa (topic_key một mình không đủ phân biệt các dòng khác
-    # type cùng topic_key).
+def restore_content_from_store(board: SheetsBoard, *, db_path=None, settings=None) -> int:
+    """Dựng lại TOÀN BỘ tab CONTENT từ store -- kể cả Duyệt Content/Social
+    Link/Duyệt Public/Posting Status, đọc THẲNG từ content_status (KHÁC
+    `render_content_to_sheet()`, xem docstring `restore_context_from_store()`).
+    "Người thực hiện" KHÔNG có store backing -- dòng dựng lại từ store CHẮC
+    CHẮN "" (không có gì để phục hồi cho cột này, người phải gõ lại tay sau
+    khi chạy lệnh này -- đã tài liệu hoá ở `scripts/sync_store_sheet.py`)."""
     keyed_rows: list[tuple[str, str, list[str]]] = []
     for topic_key in ds.list_topics(layer="content_output", db_path=db_path):
-        raw = ps.read_raw(topic_key, db_path=db_path) or {}
-        context_title = raw.get("context", "")
-        gate = ps.read_gate_status(topic_key, db_path=db_path)
-        is_auto = _is_auto_output_type(gate.get("output_type"))
-
-        type_outs: list[tuple[str, dict]] = []
-        for type_ in _ALL_TYPES:
-            out = ps.read_content_output(topic_key, type_, db_path=db_path)
-            if out is not None:
-                type_outs.append((type_, out))
-
-        # VIỆC 4.1 — CHỈ áp gộp khi AUTO. Output Type tường minh (Article/
-        # Long-Article/Infographic/Video) GIỮ NGUYÊN hành vi cũ: mỗi loại 1
-        # dòng, kể cả ERROR (người CHỌN loại đó, hỏng thì phải thấy Status=
-        # ERROR đúng loại đã chọn — che thành AUTO là giấu việc hệ thống không
-        # làm được điều người yêu cầu).
-        has_done = any(out.get("status") == "DONE" for _, out in type_outs)
-        if is_auto and not has_done and type_outs:
-            # VIỆC 4.2 — định tuyến AUTO thất bại HOÀN TOÀN (0 DONE trong mọi
-            # tuyến đã thử) -> ĐÚNG 1 dòng Type=AUTO/Status=ERROR/Notes gộp đủ
-            # nguyên nhân từng loại (VIỆC 4.3: GỘP Ở TẦNG HIỂN THỊ, store vẫn
-            # giữ nguyên `type_outs` từng bản ghi — không đụng gì ở đây).
-            merged_notes = _auto_merge_notes(type_outs)
-            first_type, first_out = type_outs[0]
-            row = content_row(
-                context=context_title, type_="AUTO", status="ERROR",
-                output="", notes=merged_notes, approve="PENDING", topic_key=topic_key,
-                facts="", ts=first_out.get("published_at") or first_out.get("timestamp") or None,
-                asset_path="",
-            )
-            row[i_h_nguoi] = nguoi_thuc_hien_by_key.get((topic_key, row[i_h_type]), "")
-            keyed_rows.append((topic_key, first_type, row))
-            continue
-
-        for type_, out in type_outs:
-            if is_auto and has_done and out.get("status") == "ERROR":
-                # VIỆC 4.2 — AUTO định tuyến THÀNH CÔNG (≥1 tuyến DONE): BỎ
-                # dòng của loại LỖI (Status=ERROR) — SKIPPED (Router chủ động
-                # từ chối, đã có Notes giải thích riêng, KHÔNG PHẢI lỗi) vẫn
-                # hiện bình thường, không đụng.
-                continue
-            status_data = ps.read_content_status(topic_key, type_, db_path=db_path)
-            row = content_row(
-                context=context_title, type_=type_, status=out.get("status", ""),
-                output=_preview_output(out.get("output", "")), notes=out.get("notes", ""),
-                approve=status_data.get("gate2", "PENDING"), topic_key=topic_key,
-                facts=out.get("facts", ""),
-                # VIỆC 3.1 (2026-08-04) — Timestamp CONTENT giờ ưu tiên ngày
-                # ĐĂNG BÀI GỐC (published_at, cùng ý nghĩa cột CONTEXT), lùi về
-                # ngày XỬ LÝ (timestamp) cho bản ghi cũ chưa có published_at.
-                ts=out.get("published_at") or out.get("timestamp") or None,
-                # Store giữ URL THUẦN (asset_url) — bọc thành công thức
-                # HYPERLINK ở ĐÚNG biên đẩy sang Sheet, cùng nếp
-                # `_preview_output()`: định dạng cho người xem là việc của lớp
-                # hiển thị, không phải của kho dữ liệu. Trùng khớp cái
-                # render_production_assets.py ghi thẳng ô Sheet cho đường chạy
-                # tay, nên 2 lối cho ra CÙNG 1 giá trị.
-                asset_path=_asset_cell(status_data),
-            )
-            row[i_h_social] = status_data.get("social_link", "")
-            row[i_h_g3] = status_data.get("gate3", "PENDING")
-            row[i_h_posting] = status_data.get("posting_status", "")
-            row[i_h_nguoi] = nguoi_thuc_hien_by_key.get((topic_key, row[i_h_type]), "")
-            keyed_rows.append((topic_key, type_, row))
+        for _match_type, sort_type, row in _content_row_candidates(topic_key, db_path=db_path):
+            keyed_rows.append((topic_key, sort_type, row))
 
     i_ts_c = CONTENT_HEADER.index("Timestamp")
     visible = {id(r) for r in _visible_rows([r for _, _, r in keyed_rows], i_ts_c, settings=settings)}
     keyed_visible = [(tk, ct, r) for tk, ct, r in keyed_rows if id(r) in visible]
-    # VIỆC 3.2/3.3 — cùng cách CONTEXT (Task #75): NGÀY tăng dần, trong cùng
-    # ngày theo first_created_at() của CHÍNH bản ghi content_output (không
-    # theo alphabet topic_key) -> "mới nhất luôn dưới cùng" đúng nghĩa CRAWL/
-    # XỬ LÝ, không lẫn lộn trong 1 ngày.
     keyed_visible.sort(key=lambda tr: (
         _day_key(tr[2][i_ts_c]),
         ds.first_created_at(tr[0], "content_output", tr[1], db_path=db_path) or "",
     ))
     out_rows = [r for _, _, r in keyed_visible]
     _write_rows(board, "CONTENT", CONTENT_HEADER, out_rows)
-
-    # BĂNG MÀU theo TopicKey + viền theo NGÀY (Lead báo thiếu 2026-07-29).
-    # `clear()` xoá cả nền/viền nên PHẢI tô lại sau MỖI lần dựng tab, không thì
-    # tab CONTENT trắng trơn, nhìn không ra đâu là nhóm của cùng 1 chủ đề.
-    # Đặt trong try: đây là lớp TRÌNH BÀY — hỏng nó không đáng làm hỏng cả lượt
-    # sync (dữ liệu đã ghi xong ở trên rồi). Fake board trong test không có
-    # method này -> bỏ qua êm, không cần fake thêm.
     _band_day(board, "regroup_and_band_content", "CONTENT")
     return len(out_rows)
 
@@ -656,6 +716,11 @@ def ingest_context_from_sheet(board: SheetsBoard, *, db_path=None) -> int:
 
     writes = 0
     deleted_rows: list[int] = []
+    content_deleted_rows: list[int] = []
+    # Đọc CONTENT LƯỜI (chỉ khi gặp DELETE đầu tiên) -- đa số lượt ingest
+    # không có dòng nào bị xoá, tránh tốn 1 lượt get_all_values() vô ích.
+    content_rows_cache: list[list[str]] | None = None
+    j_tk: int | None = None
     for row_i, row in enumerate(rows, start=2):   # +2: hàng 1 là header
         topic_key = _cell(row, i_key)
         if not topic_key:
@@ -707,6 +772,20 @@ def ingest_context_from_sheet(board: SheetsBoard, *, db_path=None) -> int:
             # không có cửa sổ để bảng bị sắp lại giữa chừng (đúng bài học
             # row-index đã gây lỗi trước đây).
             deleted_rows.append(row_i)
+            # TASK-035 — trước đây dòng CONTENT của topic bị xoá tự biến mất ở
+            # lượt render_content_to_sheet() KẾ TIẾP (hàm đó dựng lại TOÀN BỘ
+            # tab từ store, topic đã xoá khỏi store thì không còn xuất hiện).
+            # render_content_to_sheet() giờ CHỈ update/append, KHÔNG BAO GIỜ tự
+            # suy luận "thiếu trong store = xoá dòng" -- phải xoá TƯỜNG MINH
+            # ngay tại đây, đối xứng với CONTEXT phía trên (cùng sự kiện
+            # DELETE, cùng topic_key, `ds.delete_topic()` đã xoá cascade
+            # content_output nên store KHÔNG còn gì để đối chiếu nữa).
+            if content_rows_cache is None:
+                content_header, content_rows_cache = _read_sheet_rows(board, "CONTENT")
+                j_tk = _col_index(content_header, "TopicKey")
+            if j_tk is not None:
+                content_deleted_rows.extend(
+                    i + 2 for i, r in enumerate(content_rows_cache) if _cell(r, j_tk) == topic_key)
             print(f"[sync] ĐÃ XOÁ chủ đề {topic_key[:8]} khỏi DB ({n} document) "
                   f"và khỏi Sheet. KHÔNG hoàn tác được.")
             writes += 1
@@ -860,6 +939,14 @@ def ingest_context_from_sheet(board: SheetsBoard, *, db_path=None) -> int:
         except Exception as e:   # noqa: BLE001
             print(f"[sync] Không xoá được dòng {r} trên Sheet ({e!r}) — "
                   f"dữ liệu đã xoá khỏi DB, dòng sẽ biến mất ở lượt render sau.")
+    for r in sorted(set(content_deleted_rows), reverse=True):   # cùng lý do, đối xứng CONTENT
+        try:
+            board.delete_row("CONTENT", r)
+        except AttributeError:
+            pass
+        except Exception as e:   # noqa: BLE001
+            print(f"[sync] Không xoá được dòng CONTENT {r} trên Sheet ({e!r}) — "
+                  f"dữ liệu đã xoá khỏi DB, dòng sẽ còn sót tới khi chạy --from-store.")
     return writes
 
 
@@ -1000,18 +1087,16 @@ def ingest_content_from_sheet(board: SheetsBoard, *, db_path=None) -> int:
 # =============================================================================
 
 def sync_all(board: SheetsBoard, *, db_path=None) -> dict:
-    """Ingest TRƯỚC (không mất thao tác người vừa bấm giữa 2 lượt), rồi render
-    LẠI cả 2 tab từ store đã cập nhật. Đây là lệnh CHẠY DUY NHẤT cho vận hành
-    bình thường lẫn "phục hồi khi xoá nhầm" (Bước 5.4).
-
-    `rebuild=False` (TASK-032) -- đây LÀ lượt sync tự động (ingest xong render
-    ngay), đúng kịch bản có race thật giữa nhiều tiến trình (TASK-029) nên
-    PHẢI qua CAS, không được bỏ qua như default của render_context_to_sheet()
-    (xem docstring hàm đó). Đường phục hồi Bước 5.4 khi Sheet bị XOÁ vẫn đúng
-    dưới CAS -- sheet_row=None luôn để store thắng, không phụ thuộc rebuild."""
+    """Ingest TRƯỚC (không mất thao tác người vừa bấm giữa 2 lượt), rồi
+    render_*_to_sheet() (KHÔNG PHẢI restore_*_from_store() -- xem docstring
+    module) từ store đã cập nhật. Lệnh CHẠY THƯỜNG NGÀY cho vận hành tự động
+    (`scripts/sync_store_sheet.py` mặc định, `queue_worker.py`). KHÔNG phải
+    lệnh phục hồi Bước 5.4 -- đường đó giờ là `restore_context_from_store()`/
+    `restore_content_from_store()`, gọi qua `sync_store_sheet.py --from-store`
+    (TASK-035, thay CAS đã gỡ)."""
     n_ingest_ctx = ingest_context_from_sheet(board, db_path=db_path)
     n_ingest_content = ingest_content_from_sheet(board, db_path=db_path)
-    n_render_ctx = render_context_to_sheet(board, db_path=db_path, rebuild=False)
+    n_render_ctx = render_context_to_sheet(board, db_path=db_path)
     n_render_content = render_content_to_sheet(board, db_path=db_path)
     return {
         "ingested_context": n_ingest_ctx, "ingested_content": n_ingest_content,
