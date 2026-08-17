@@ -12828,11 +12828,12 @@ def test_unanchored_numbers_catches_number_never_extracted_as_any_fact_wc3():
 
 
 def test_unanchored_numbers_known_gap_same_sentence_entity_swap_wc2():
-    """WC2 (sai ngữ cảnh, dựng tay — số THẬT từ bài CTG) — GIỚI HẠN ĐÃ BIẾT
-    (ghi vào docs/hypotheses/...): Composer gán nhầm số sở hữu của CỔ ĐÔNG NHÀ
-    NƯỚC (5 tỷ cp, 64,46%) cho MUFG — cả 2 số đều neo ĐÚNG 1 câu (câu của fact
-    Nhà nước) nên Tầng 2 (chỉ đếm SỐ câu neo, không so khớp nhãn/thực thể)
-    KHÔNG bắt được — test này XÁC NHẬN giới hạn, không phải regression."""
+    """WC2 (sai ngữ cảnh, dựng tay — số THẬT từ bài CTG) — TASK-036 KHOÁ hành
+    vi MỚI (trước là GIỚI HẠN ĐÃ BIẾT, TASK-027): Composer gán nhầm số sở hữu
+    của CỔ ĐÔNG NHÀ NƯỚC (5 tỷ cp, 64,46%) cho MUFG. _context_mismatch bắt
+    được: token chủ thể "MUFG" (_entity_tokens) trong câu body VẮNG MẶT khỏi
+    câu nguồn ĐÃ neo (fact Nhà nước) nhưng CÓ MẶT ở câu nguồn fact MUFG khác
+    trong content_units -> nghi hoán chủ thể, dù số neo ĐÚNG 1 câu."""
     from twmkt.agents.production import unanchored_numbers
 
     content_units = [
@@ -12844,13 +12845,16 @@ def test_unanchored_numbers_known_gap_same_sentence_entity_swap_wc2():
     ]
     body = "MUFG Bank hiện nắm hơn 5 tỷ cổ phiếu CTG, tương ứng 64,46% vốn điều lệ VietinBank."
     warn = unanchored_numbers(body, content_units)
-    assert warn == []   # GIỚI HẠN ĐÃ BIẾT: neo đúng 1 câu (đúng SỐ, sai THỰC THỂ) -> lọt
+    assert "5 tỷ" in warn and "64,46%" in warn   # TASK-036: hoán chủ thể BỊ bắt
 
 
 def test_unanchored_numbers_known_gap_same_sentence_period_swap_wc4():
-    """WC4 (sai ngữ cảnh, dựng tay — số THẬT từ bài BSR) — cùng nhóm giới hạn
-    WC2: gán %tăng trưởng 6 tháng (47%) cho câu nói về quý II (đáng lẽ 50%) —
-    "47%" vẫn neo đúng 1 câu (câu 6 tháng) nên KHÔNG bị cảnh báo."""
+    """WC4 (sai ngữ cảnh, dựng tay — số THẬT từ bài BSR) — TASK-036 KHOÁ hành
+    vi MỚI (trước là GIỚI HẠN ĐÃ BIẾT, cùng nhóm WC2): gán %tăng trưởng 6
+    tháng (47%) cho câu nói về quý II (đáng lẽ 50%). _context_mismatch bắt
+    được: token kỳ "quý 2/2026" (_period_tokens) trong câu body VẮNG MẶT khỏi
+    câu nguồn ĐÃ neo (fact 6 tháng, không có mốc kỳ tường minh) nhưng CÓ MẶT ở
+    câu nguồn fact quý II khác -> nghi hoán kỳ."""
     from twmkt.agents.production import unanchored_numbers
 
     content_units = [
@@ -12861,7 +12865,190 @@ def test_unanchored_numbers_known_gap_same_sentence_period_swap_wc4():
     ]
     body = "Quý II/2026, BSR ghi nhận doanh thu tăng 47% so với cùng kỳ."
     warn = unanchored_numbers(body, content_units)
-    assert warn == []   # GIỚI HẠN ĐÃ BIẾT — xem WC2
+    assert warn == ["47%"]   # TASK-036: hoán kỳ BỊ bắt
+
+
+def test_unanchored_numbers_entity_swap_wc5_cross_company_revenue():
+    """WC5 (dựng tay, số THẬT — BSR + CTG, mô phỏng bài tổng hợp nhiều mã):
+    doanh thu quý II CỦA BSR (55.000 tỷ, tăng 50%) bị gán cho CTG. "55.000 tỷ
+    đồng" chỉ neo được câu nguồn BSR (CTG không có số này) -> neo đúng 1 câu,
+    nhưng token chủ thể "CTG" trong body vắng mặt khỏi câu nguồn BSR, có mặt ở
+    câu nguồn CTG khác -> hoán chủ thể bị bắt."""
+    from twmkt.agents.production import unanchored_numbers
+
+    content_units = [
+        _src_fact(55e9, "Riêng quý II/2026, BSR đạt doanh thu hơn 55.000 tỷ đồng, tăng 50% so với "
+                       "cùng kỳ; lợi nhuận sau thuế đạt 4.097 tỷ đồng, tăng hơn 384%.",
+                 label="Doanh thu BSR quý II/2026"),
+        _src_fact(32500, "cổ phiếu CTG kết phiên 7/8 tại 32.500 đồng/cp, tăng 3,7% so với tham chiếu.",
+                 label="Giá CTG phiên 7/8"),
+    ]
+    body = "CTG ghi nhận doanh thu hơn 55.000 tỷ đồng, tăng 50% so với cùng kỳ."
+    warn = unanchored_numbers(body, content_units)
+    assert "55.000 tỷ đồng" in warn
+
+
+def test_unanchored_numbers_entity_swap_wc6_cross_company_ownership():
+    """WC6 (dựng tay, số THẬT — BSR + CTG): số sở hữu MUFG (1.228.981.747 cp,
+    15,82%) bị gán cho doanh thu BSR — hoán chủ thể ngược hướng WC5, xác nhận
+    luật diff==1 hoạt động cả 2 chiều."""
+    from twmkt.agents.production import unanchored_numbers
+
+    content_units = [
+        _src_fact(100.922e9, "BSR ghi nhận doanh thu hợp nhất 100.922 tỷ đồng, tăng 47% so với cùng "
+                            "kỳ năm trước.", label="Doanh thu BSR 6T/2026"),
+        _src_fact(1228981747, "MUFG Bank đang sở hữu 1.228.981.747 cổ phiếu CTG, tương ứng 15,82% "
+                            "vốn điều lệ.", label="Sở hữu MUFG tại VietinBank"),
+    ]
+    body = "MUFG Bank ghi nhận doanh thu hợp nhất 100.922 tỷ đồng, tăng 47% so với cùng kỳ năm trước."
+    warn = unanchored_numbers(body, content_units)
+    assert "100.922 tỷ đồng" in warn
+
+
+def test_unanchored_numbers_entity_swap_wc7_price_figure_reassigned():
+    """WC7 (dựng tay, số THẬT — BSR + CTG): giá đóng cửa CTG (32.500 đồng,
+    3,7%) bị gán cho BSR — hoán chủ thể lần thứ 3, số liệu GIÁ (không phải
+    doanh thu/sở hữu), xác nhận luật KHÔNG phụ thuộc loại chỉ số."""
+    from twmkt.agents.production import unanchored_numbers
+
+    content_units = [
+        _src_fact(32500, "cổ phiếu CTG kết phiên 7/8 tại 32.500 đồng/cp, tăng 3,7% so với tham chiếu.",
+                 label="Giá CTG phiên 7/8"),
+        _src_fact(100.922e9, "BSR ghi nhận doanh thu hợp nhất 100.922 tỷ đồng, tăng 47% so với cùng "
+                            "kỳ năm trước.", label="Doanh thu BSR 6T/2026"),
+    ]
+    body = "BSR đóng cửa phiên 7/8 ở mức 32.500 đồng, tăng 3,7% so với tham chiếu."
+    warn = unanchored_numbers(body, content_units)
+    assert "32.500 đồng" in warn
+
+
+def test_unanchored_numbers_period_swap_ps2_lnst_quarter_to_half_year():
+    """PS2 (dựng tay, số THẬT — BSR): % tăng LNST quý II (384%) bị gán cho câu
+    nói về 6 tháng đầu năm — hoán kỳ lần 2, số liệu LNST (khác doanh thu ở
+    WC4/PS1)."""
+    from twmkt.agents.production import unanchored_numbers
+
+    content_units = [
+        _src_fact(100.922e9, "Trong 6 tháng đầu năm 2026, BSR ghi nhận doanh thu hợp nhất 100.922 "
+                            "tỷ đồng, tăng 47% so với cùng kỳ năm trước.", label="Doanh thu BSR 6T/2026"),
+        _src_fact(4.097e9, "Riêng quý II/2026, BSR đạt doanh thu hơn 55.000 tỷ đồng, tăng 50% so "
+                          "với cùng kỳ; lợi nhuận sau thuế đạt 4.097 tỷ đồng, tăng hơn 384%.",
+                 label="LNST BSR quý II/2026"),
+    ]
+    body = "Trong 6 tháng đầu năm 2026, lợi nhuận sau thuế BSR tăng hơn 384% so với cùng kỳ."
+    warn = unanchored_numbers(body, content_units)
+    assert "384%" in warn
+
+
+def test_unanchored_numbers_period_swap_ps3_annual_plan_to_quarter():
+    """PS3 (dựng tay, số THẬT — BSR): doanh thu KẾ HOẠCH CẢ NĂM 2026 (154.140
+    tỷ) bị gán cho câu nói về quý II — hoán kỳ theo hướng năm/quý, khác hướng
+    6 tháng/quý ở WC4/PS1/PS2."""
+    from twmkt.agents.production import unanchored_numbers
+
+    content_units = [
+        _src_fact(154.140e9, "Năm 2026, doanh nghiệp đặt kế hoạch doanh thu hợp nhất 154.140 tỷ "
+                            "đồng và lợi nhuận sau thuế 2.162 tỷ đồng.", label="Kế hoạch doanh thu 2026"),
+        _src_fact(55e9, "Riêng quý II/2026, BSR đạt doanh thu hơn 55.000 tỷ đồng, tăng 50% so với "
+                       "cùng kỳ.", label="Doanh thu BSR quý II/2026"),
+    ]
+    body = "Quý II/2026, BSR ghi nhận doanh thu hợp nhất 154.140 tỷ đồng."
+    warn = unanchored_numbers(body, content_units)
+    assert "154.140 tỷ đồng" in warn
+
+
+def test_unanchored_numbers_period_swap_ps4_half_year_to_annual_plan():
+    """PS4 (dựng tay, số THẬT — BSR): % tăng doanh thu 6 tháng (47%) bị gán
+    cho câu nói về kế hoạch CẢ NĂM 2026 — hoán kỳ ngược hướng PS3."""
+    from twmkt.agents.production import unanchored_numbers
+
+    content_units = [
+        _src_fact(100.922e9, "Trong 6 tháng đầu năm 2026, BSR ghi nhận doanh thu hợp nhất 100.922 "
+                            "tỷ đồng, tăng 47% so với cùng kỳ năm trước.", label="Doanh thu BSR 6T/2026"),
+        _src_fact(154.140e9, "Năm 2026, doanh nghiệp đặt kế hoạch doanh thu hợp nhất 154.140 tỷ "
+                            "đồng và lợi nhuận sau thuế 2.162 tỷ đồng.", label="Kế hoạch doanh thu 2026"),
+    ]
+    body = "Năm 2026, BSR đặt kế hoạch doanh thu tăng 47% so với cùng kỳ."
+    warn = unanchored_numbers(body, content_units)
+    assert "47%" in warn
+
+
+# --- TASK-036 — đối chứng ĐÚNG (gán ĐÚNG chủ thể + ĐÚNG kỳ, TUYỆT ĐỐI không
+# được báo động; xem rang_buoc_thiet_ke.khong_duoc_danh_doi) -----------------
+def test_unanchored_numbers_control_correct_half_year_figures_stay_clean():
+    """Đối chứng 1 — câu 6 tháng viết ĐÚNG nguyên câu nguồn: KHÔNG được báo."""
+    from twmkt.agents.production import unanchored_numbers
+
+    content_units = [
+        _src_fact(100.922e9, "Trong 6 tháng đầu năm 2026, BSR ghi nhận doanh thu hợp nhất 100.922 "
+                            "tỷ đồng, tăng 47% so với cùng kỳ năm trước.", label="Doanh thu BSR 6T/2026"),
+    ]
+    body = ("Trong 6 tháng đầu năm 2026, BSR ghi nhận doanh thu hợp nhất 100.922 tỷ đồng, "
+            "tăng 47% so với cùng kỳ năm trước.")
+    assert unanchored_numbers(body, content_units) == []
+
+
+def test_unanchored_numbers_control_correct_quarter_figures_stay_clean():
+    """Đối chứng 2 — câu quý II viết ĐÚNG (cả doanh thu lẫn LNST): KHÔNG báo."""
+    from twmkt.agents.production import unanchored_numbers
+
+    content_units = [
+        _src_fact(55e9, "Riêng quý II/2026, BSR đạt doanh thu hơn 55.000 tỷ đồng, tăng 50% so với "
+                      "cùng kỳ; lợi nhuận sau thuế đạt 4.097 tỷ đồng, tăng hơn 384%.",
+                 label="Doanh thu + LNST BSR quý II/2026"),
+    ]
+    body = ("Riêng quý II/2026, BSR đạt doanh thu hơn 55.000 tỷ đồng, tăng 50% so với cùng "
+            "kỳ; lợi nhuận sau thuế đạt 4.097 tỷ đồng, tăng hơn 384%.")
+    assert unanchored_numbers(body, content_units) == []
+
+
+def test_unanchored_numbers_control_correct_state_ownership_stays_clean():
+    """Đối chứng 3 — câu sở hữu Nhà nước viết ĐÚNG chủ thể (KHÔNG nhắc MUFG):
+    KHÔNG báo, dù ticker chung "CTG" xuất hiện ở CẢ 2 fact trong content_units."""
+    from twmkt.agents.production import unanchored_numbers
+
+    content_units = [
+        _src_fact(5e9, "cổ đông Nhà nước, với Ngân hàng Nhà nước là cơ quan đại diện chủ sở hữu, "
+                     "nắm hơn 5 tỷ cổ phiếu CTG, tương ứng 64,46% vốn VietinBank.",
+                 label="Sở hữu Nhà nước tại VietinBank"),
+        _src_fact(1228981747, "MUFG Bank đang sở hữu 1.228.981.747 cổ phiếu CTG, tương ứng 15,82% "
+                            "vốn điều lệ.", label="Sở hữu MUFG tại VietinBank"),
+    ]
+    body = "cổ đông Nhà nước nắm hơn 5 tỷ cổ phiếu CTG, tương ứng 64,46% vốn VietinBank."
+    assert unanchored_numbers(body, content_units) == []
+
+
+def test_unanchored_numbers_control_correct_mufg_ownership_stays_clean():
+    """Đối chứng 4 — câu sở hữu MUFG viết ĐÚNG chủ thể: KHÔNG báo."""
+    from twmkt.agents.production import unanchored_numbers
+
+    content_units = [
+        _src_fact(1228981747, "MUFG Bank đang sở hữu 1.228.981.747 cổ phiếu CTG, tương ứng 15,82% "
+                            "vốn điều lệ.", label="Sở hữu MUFG tại VietinBank"),
+    ]
+    body = "MUFG Bank đang sở hữu 1.228.981.747 cổ phiếu CTG, tương ứng 15,82% vốn điều lệ."
+    assert unanchored_numbers(body, content_units) == []
+
+
+def test_unanchored_numbers_control_multi_entity_enumeration_stays_clean():
+    """Đối chứng 5 (QUAN TRỌNG — rang_buoc_thiet_ke.khong_duoc_danh_doi): câu
+    liệt kê NHIỀU chủ thể đúng thứ tự ("VCB, CTG và BID lần lượt ghi nhận...")
+    — dù mỗi số chỉ neo ĐÚNG 1 câu nguồn (đã bị Brief cắt gọn còn 1 mã/câu),
+    token chủ thể cục bộ quanh MỖI số trong câu liệt kê có >=2 phần tử khác
+    câu nguồn (2 mã CÒN LẠI cũng nằm trong CÙNG câu) -> _context_conflict yêu
+    cầu diff ĐÚNG 1 phần tử, tự động KHÔNG báo — PHẢI giữ vậy, nếu không sẽ
+    đẻ báo động giả hàng loạt cho mọi câu liệt kê nhiều mã CK (rất phổ biến
+    trong tin tài chính VN)."""
+    from twmkt.agents.production import unanchored_numbers
+
+    content_units = [
+        _src_fact(10e9, "VCB ghi nhận lợi nhuận 10.000 tỷ đồng trong quý II/2026.", label="LNST VCB"),
+        _src_fact(8e9, "CTG ghi nhận lợi nhuận 8.000 tỷ đồng trong quý II/2026.", label="LNST CTG"),
+        _src_fact(6e9, "BID ghi nhận lợi nhuận 6.000 tỷ đồng trong quý II/2026.", label="LNST BID"),
+    ]
+    body = ("VCB, CTG và BID lần lượt ghi nhận lợi nhuận 10.000 tỷ đồng, 8.000 tỷ đồng và "
+            "6.000 tỷ đồng trong quý II/2026.")
+    assert unanchored_numbers(body, content_units) == []
 
 
 def test_unanchored_numbers_noop_when_content_units_empty():
