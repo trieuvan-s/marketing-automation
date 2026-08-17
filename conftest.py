@@ -81,4 +81,17 @@ def _block_real_llm_calls(monkeypatch):
     import anthropic
     monkeypatch.setattr(anthropic, "Anthropic", _BlockedAnthropicClient)
 
+    # BUG THẬT lộ ra khi merge 2026-08-17 (Lead): 2 test xanh khi chạy RIÊNG, đỏ
+    # khi chạy CẢ BỘ. Nguyên nhân: `config._load_dotenv()` bơm ANTHROPIC_API_KEY
+    # từ secrets/.env vào `os.environ` ở MỌI lượt `load_settings()` — nên một test
+    # gọi load_settings() là làm bẩn env cho TOÀN BỘ tiến trình pytest. Các test
+    # giả định "thiếu key -> AnthropicLLM lùi mượt" (vd
+    # test_llmclient_complete_old_2arg_call_sites_still_work) sau đó lại thấy CÓ
+    # key -> đi nhánh dựng client THẬT. Kết quả test phụ thuộc THỨ TỰ CHẠY.
+    # Dọn env ở đây, cùng chỗ với cơ chế chặn, để không test nào phụ thuộc/rò
+    # trạng thái ambient. Test nào CỐ Ý cần key thì tự monkeypatch.setenv trong
+    # thân test — chạy SAU fixture autouse này nên vẫn có hiệu lực.
+    for _var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        monkeypatch.delenv(_var, raising=False)
+
     yield
