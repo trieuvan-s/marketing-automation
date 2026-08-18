@@ -943,7 +943,30 @@ queue:
   # read/phút, vẫn cho độ trễ tệ nhất 20s (so với 30 PHÚT của schedule_draft cũ).
   poll_interval_s: 20              # nghỉ giữa 2 lượt poll khi hàng đợi rỗng
   lease_timeout_s: 600             # 10 phút — claim quá hạn coi là worker chết, tự giải phóng (C8)
-  max_attempts: 3                  # số lần requeue tối đa trước khi đánh failed hẳn
+  max_attempts: 3                  # số lần requeue tối đa trước khi đánh failed hẳn (crash lease-timeout,
+                                    # KHÁC produce_retry_max_attempts bên dưới — đây là "worker chết giữa
+                                    # chừng lúc đang claim", không phải "writer hết retry nội bộ")
+
+  # --- TASK-037 (2026-08-17) — job "produce" business Execute=FAILED (writer
+  # hết retry NỘI BỘ, agents/writer.WriterOutcome.FAILED — lỗi TẠM THỜI hạ
+  # tầng gọi LLM: timeout/rate-limit/exit≠0/hết hạn mức/CLI đang thay binary)
+  # trước đây NẰM IM VÔ THỜI HẠN: enqueue chỉ xảy ra khi ingest_context_from_
+  # sheet() thấy Gate1 CHUYỂN TIẾP sang APPROVE — bài đã ở APPROVE sẵn thì
+  # không có chuyển tiếp, không job nào được tạo lại (xem queue_worker.py::
+  # _handle_produce_business_outcome). TUYỆT ĐỐI KHÔNG áp cho NEEDS_HUMAN
+  # (guardrail reject — thử lại vô nghĩa, đốt tiền).
+  produce_retry_max_attempts: 1    # quyết định chủ dự án 17/08: "retry ít nhất 1 lần" -> mặc định 1
+                                    # (không tính lượt đầu). Đếm BỀN qua payload_json của execution_queue
+                                    # (KHÔNG đổi schema, cột đã có sẵn) — sống sót qua khởi động lại worker
+                                    # vì lưu trong SQLite trên đĩa, không phải RAM tiến trình.
+  produce_retry_backoff_s: 60      # chờ TRƯỚC KHI tạo lại job — ca thật Lead đo 14-15/08 là cửa sổ CLI
+                                    # đang thay binary hoặc hạn mức LLM chưa reset; 60s dài hơn hẳn
+                                    # writer.retry_backoff_s (3s, cho lỗi tức thời TRONG CÙNG 1 job) vì đây
+                                    # là khoảng cách GIỮA HAI LƯỢT DISPATCH job riêng biệt, cần đủ xa để có
+                                    # cơ hội thật sự khác so với lượt vừa hỏng.
+  notify_on_retry_success: false   # ĐỀ XUẤT (chưa tự quyết bật): báo Telegram khi 1 job từng FAILED rồi
+                                    # tự retry THÀNH CÔNG — mặc định TẮT để không tự ý làm ồn hộp thư
+                                    # (Lead có thể bật khi muốn thấy tín hiệu "tự phục hồi" trên kênh).
 
 # --- Production Factory: seam gọi AIGEN pipeline thật (media_factory/aigen_seam.py) --
 # CÙNG NẾP với storage.data_root: đường dẫn SIBLING NGOÀI repo, đọc qua

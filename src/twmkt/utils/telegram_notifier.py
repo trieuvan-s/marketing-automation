@@ -55,6 +55,11 @@ _EMOJI = {
     # Phase 4.12: bỏ qua HỢP LỆ (vd infographic cho tin thuần định tính,
     # KHÔNG phải lỗi) — tách khỏi "error"/"needs_human" (🚨) để không báo động giả.
     "skipped": "ℹ️",
+    # TASK-037 (2026-08-17) — job-level auto-retry (scripts/queue_worker.py::
+    # _handle_produce_business_outcome), KHÁC "failed"/"retry" ở trên (đó là
+    # bên TRONG 1 lượt gọi run_writer_with_retry, agents/writer.py Phase 4.5).
+    "produce_retry_exhausted": "🚨",   # hết trần tự retry, vẫn FAILED -> cần người xem
+    "produce_retry_recovered": "✅",   # từng FAILED, tự retry rồi THÀNH CÔNG (tắt mặc định, xem settings.yaml queue.notify_on_retry_success)
 }
 
 _UNEXPANDED_ENV_RE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
@@ -73,10 +78,13 @@ _DEFAULT_VI_EVENT_LABELS = {
     "skipped": "Bỏ qua",
     "error": "Lỗi xử lý",
     "draft_changed": "Cập nhật nội dung",
+    "produce_retry_exhausted": "Hết lượt tự thử lại — vẫn lỗi",
+    "produce_retry_recovered": "Tự thử lại thành công",
 }
 _DEFAULT_VI_CTX_KEY_LABELS = {
     "topic": "Chủ đề",
     "reason": "Lý do",
+    "attempts": "Số lần đã thử",
 }
 
 
