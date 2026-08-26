@@ -60,6 +60,10 @@ _EMOJI = {
     # bên TRONG 1 lượt gọi run_writer_with_retry, agents/writer.py Phase 4.5).
     "produce_retry_exhausted": "🚨",   # hết trần tự retry, vẫn FAILED -> cần người xem
     "produce_retry_recovered": "✅",   # từng FAILED, tự retry rồi THÀNH CÔNG (tắt mặc định, xem settings.yaml queue.notify_on_retry_success)
+    # TASK-038 VIỆC 2 — preflight xác thực Claude Code lúc queue_worker khởi
+    # động (scripts/queue_worker.py::run_preflight), CHỈ báo khi trạng thái ĐỔI.
+    "preflight_failed": "🚨",     # phiên hỏng (vd OAuth session expired) -> KHÔNG nhận job
+    "preflight_recovered": "✅",  # từng hỏng, giờ xác thực lại được
 }
 
 _UNEXPANDED_ENV_RE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
@@ -80,6 +84,8 @@ _DEFAULT_VI_EVENT_LABELS = {
     "draft_changed": "Cập nhật nội dung",
     "produce_retry_exhausted": "Hết lượt tự thử lại — vẫn lỗi",
     "produce_retry_recovered": "Tự thử lại thành công",
+    "preflight_failed": "Phiên Claude Code hết hạn — không nhận job mới",
+    "preflight_recovered": "Phiên Claude Code đã xác thực lại được",
 }
 _DEFAULT_VI_CTX_KEY_LABELS = {
     "topic": "Chủ đề",

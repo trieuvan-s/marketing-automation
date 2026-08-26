@@ -3800,6 +3800,108 @@ def test_claude_code_llm_passes_alias_straight_through_no_mapping():
     assert seen["cmd"][i + 1] == "sonnet"   # nguyên văn alias, không đổi thành id
 
 
+def test_claude_code_llm_strips_anthropic_api_key_from_child_env():
+    """Khoá lại bản vá f5ae5ba (TASK-038 — đừng phá khi thêm CLAUDE_CONFIG_DIR):
+    ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN trong os.environ của tiến trình cha
+    KHÔNG được lọt vào env truyền cho tiến trình con `claude -p` -- CLI thấy
+    key này sẽ chuyển sang xác thực API thay vì phiên Pro/Max đã đăng nhập."""
+    from twmkt.agents.base import ClaudeCodeLLM
+    import json as _json
+
+    seen_kwargs = {}
+
+    def fake_run(cmd, **kwargs):
+        seen_kwargs.update(kwargs)
+        return _FakeProc(0, _json.dumps({"is_error": False, "result": "OK"}), "")
+
+    old_key = os.environ.get("ANTHROPIC_API_KEY")
+    old_token = os.environ.get("ANTHROPIC_AUTH_TOKEN")
+    os.environ["ANTHROPIC_API_KEY"] = "sk-should-not-leak"
+    os.environ["ANTHROPIC_AUTH_TOKEN"] = "tok-should-not-leak"
+    try:
+        ClaudeCodeLLM(run_fn=fake_run).complete("s", "p")
+    finally:
+        if old_key is None:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+        else:
+            os.environ["ANTHROPIC_API_KEY"] = old_key
+        if old_token is None:
+            os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+        else:
+            os.environ["ANTHROPIC_AUTH_TOKEN"] = old_token
+
+    env = seen_kwargs.get("env") or {}
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "ANTHROPIC_AUTH_TOKEN" not in env
+
+
+def test_claude_code_llm_passes_claude_config_dir_when_configured():
+    """TASK-038 VIỆC 1 — config_dir có giá trị -> CLAUDE_CONFIG_DIR PHẢI có mặt
+    trong env truyền cho tiến trình con `claude -p`, đúng giá trị đã cấu hình."""
+    from twmkt.agents.base import ClaudeCodeLLM
+    import json as _json
+
+    seen_kwargs = {}
+
+    def fake_run(cmd, **kwargs):
+        seen_kwargs.update(kwargs)
+        return _FakeProc(0, _json.dumps({"is_error": False, "result": "OK"}), "")
+
+    ClaudeCodeLLM(run_fn=fake_run, config_dir="D:/some/claude/profile").complete("s", "p")
+    assert seen_kwargs.get("env", {}).get("CLAUDE_CONFIG_DIR") == "D:/some/claude/profile"
+
+
+def test_claude_code_llm_omits_claude_config_dir_when_not_configured():
+    """config_dir mặc định rỗng ("") -> KHÔNG truyền CLAUDE_CONFIG_DIR vào env
+    con -- giữ NGUYÊN hành vi cũ (tiến trình con tự lùi về mặc định hệ điều
+    hành), kể cả khi biến này TÌNH CỜ có sẵn trong os.environ của tiến trình
+    cha (KHÔNG lọc/kế thừa ngầm — chỉ set khi config tường minh có giá trị)."""
+    from twmkt.agents.base import ClaudeCodeLLM
+    import json as _json
+
+    seen_kwargs = {}
+
+    def fake_run(cmd, **kwargs):
+        seen_kwargs.update(kwargs)
+        return _FakeProc(0, _json.dumps({"is_error": False, "result": "OK"}), "")
+
+    old = os.environ.get("CLAUDE_CONFIG_DIR")
+    os.environ["CLAUDE_CONFIG_DIR"] = "C:/some/ambient/profile"
+    try:
+        ClaudeCodeLLM(run_fn=fake_run).complete("s", "p")
+    finally:
+        if old is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old
+
+    env = seen_kwargs.get("env") or {}
+    # KHÔNG tự đặt "" đè lên -- và giá trị ambient của cha VẪN đi qua nguyên
+    # vẹn (dict comprehension chỉ LỌC 2 khoá ANTHROPIC_*, không đụng khoá khác)
+    # vì config_dir="" nghĩa là "không có ý kiến", không phải "xoá".
+    assert env.get("CLAUDE_CONFIG_DIR") == "C:/some/ambient/profile"
+
+
+def test_factory_claude_config_dir_wired_into_claude_code_llm(monkeypatch):
+    """TASK-038 VIỆC 1 — factory._build_llm()/make_llm()/build_writer_llm() đọc
+    `runtime.claude_config_dir` từ settings và truyền vào ClaudeCodeLLM (đúng
+    chỗ conftest.py chặn cứng -- test này KHÔNG gọi .complete(), chỉ kiểm
+    thuộc tính .config_dir sau khi dựng, không lách cơ chế chặn)."""
+    settings = Settings({
+        "llm": {"provider": "claude_code", "mode": "claude_code"},
+        "runtime": {"claude_config_dir": "D:/pinned/profile"},
+    })
+    assert factory.build_llm(settings).config_dir == "D:/pinned/profile"
+    assert factory.make_llm(settings).config_dir == "D:/pinned/profile"
+    assert factory.build_writer_llm(settings).config_dir == "D:/pinned/profile"
+
+
+def test_factory_claude_config_dir_empty_by_default():
+    """runtime.claude_config_dir chưa cấu hình -> config_dir rỗng, hành vi cũ."""
+    settings = Settings({"llm": {"provider": "claude_code", "mode": "claude_code"}})
+    assert factory.build_llm(settings).config_dir == ""
+
+
 def test_fail_loud_true_raises_llm_call_error_on_failure():
     from twmkt.agents.base import AnthropicLLM, ClaudeCodeLLM, LLMCallError, MockLLM
 
@@ -4138,8 +4240,16 @@ def test_run_persists_brief_layer_immediately_after_brief(monkeypatch):
 
 
 def test_run_article_done_writes_content_marks_execute_done_and_notifies():
-    """outcome=DONE: ghi CONTENT (article), Execute=DONE, notify start+draft_changed
-    (+ gate2_done vì written>0). Dùng writer_llm trả JSON sạch (_clean_writer_json)."""
+    """outcome=DONE: ghi CONTENT (article), notify start+draft_changed (+
+    gate2_done vì written>0). Dùng writer_llm trả JSON sạch (_clean_writer_json).
+
+    TASK-038 VIỆC 4 — route_llm mặc định (_EmptyRouteLLM) -> content_units[]
+    rỗng -> infographic đi nhánh SOURCE_BROKEN (ĐÃ CÓ TỪ TRƯỚC, không đổi ở
+    đây) -> Execute giờ ĐÚNG là NEEDS_HUMAN (không còn DONE giả như trước bản
+    vá này — xem ca thật 18/08: infographic rỗng nhưng Execute báo DONE, vì
+    _is_fully_produced_channels() cũ chỉ kiểm "đã ghi dòng nào chưa", không
+    kiểm dòng đó DONE hay ERROR). article TỰ NÓ vẫn DONE (per-content-type
+    Status, không đổi)."""
     class _CleanWriterLLM:
         def complete(self, system, prompt, *, model=None, fail_loud=False):
             return _clean_writer_json()
@@ -4147,7 +4257,7 @@ def test_run_article_done_writes_content_marks_execute_done_and_notifies():
     result, board, notifier = _run_produce_scenario(
         _CleanWriterLLM(), _approved_row("Bài test 4.9 DONE", row=2))
 
-    assert board.execute_updates.get(2) == "DONE"
+    assert board.execute_updates.get(2) == "NEEDS_HUMAN"
     article_rows = [r for r in board.appended_content if r[2] == "Article"]  # Context|Type|Status|...
     assert len(article_rows) == 1 and article_rows[0][3] == "DONE"           # Status
     events = [e for e, _ in notifier.events]
@@ -5123,10 +5233,14 @@ def test_run_article_idempotent_skips_writer_when_already_in_content():
     article_rows = [r for r in board.appended_content if r[2] == "Article"]
     assert len(article_rows) == 1 and article_rows[0][4] == "x"
     # video/infographic vẫn được xử lý bình thường (pre_seed_content chỉ có
-    # article) -> lượt này sinh đủ CẢ 3 loại (article đã có từ trước + video/
-    # infographic mới) -> Execute=DONE ĐÚNG theo logic cũ (_is_fully_produced),
-    # KHÔNG phải vì writer chạy lại.
-    assert board.execute_updates.get(2) == "DONE"
+    # article) -> lượt này sinh CẢ 2 loại còn lại. article đã DONE từ trước ->
+    # write_article=False -> Brief KHÔNG chạy lượt này (chỉ chạy khi
+    # write_article=True) -> content_units=[] cho video/infographic ->
+    # infographic đi nhánh SOURCE_BROKEN (content_units[] rỗng, ĐÃ CÓ TỪ
+    # TRƯỚC). TASK-038 VIỆC 4: Execute giờ ĐÚNG là NEEDS_HUMAN (không còn DONE
+    # giả như "logic cũ" — _is_fully_produced_channels() cũ chỉ kiểm "đã ghi
+    # dòng nào chưa", không phân biệt DONE với ERROR).
+    assert board.execute_updates.get(2) == "NEEDS_HUMAN"
 
 
 def test_run_reprocess_force_bypasses_seen_and_writes_new_article_version():
@@ -5349,7 +5463,13 @@ def test_run_twice_same_topic_key_no_duplicate_content_rows():
         assert len(matching) == 1, f"{t}: kỳ vọng đúng 1 dòng sau 2 lượt chạy, thực tế {len(matching)}"
         history = ds.read_history(row["topic_key"], "content_output", t, db_path=board.db_path)
         assert len(history) == 1, f"{t}: kỳ vọng ĐÚNG 1 version sau 2 lượt chạy (không ghi đè), thực tế {len(history)}"
-    assert board.execute_updates.get(2) == "DONE"
+    # TASK-038 VIỆC 4 — route_llm mặc định (_EmptyRouteLLM) -> content_units[]
+    # rỗng -> infographic SOURCE_BROKEN -> Execute=NEEDS_HUMAN sau lượt 1 (ĐÚNG,
+    # không còn DONE giả). ps.list_approved_topics() tự loại NEEDS_HUMAN -> lượt
+    # 2 xử lý 0 topic (đúng ý "chờ người can thiệp") — ĐÂY LÀ LÝ DO THẬT khiến
+    # KHÔNG có version 2: không phải vì existing_content_keys() chặn re-run như
+    # trước, mà vì Execute=NEEDS_HUMAN chặn re-approve tự động.
+    assert board.execute_updates.get(2) == "NEEDS_HUMAN"
 
 
 # test_run_against_already_merged_content_no_duplicate_no_orphan (mergeCells
@@ -5507,7 +5627,12 @@ def test_phase3_adversarial_reorder_insert_delete_sort_topic_key_invariant_and_r
 
     assert board.execute_updates.get(approved_by_key[KEY_A]["row"]) == "DONE"
     assert board.execute_updates.get(approved_by_key[KEY_B]["row"]) == "DONE"
-    assert board.execute_updates.get(approved_by_key[KEY_C]["row"]) == "DONE"
+    # C là topic HOÀN TOÀN MỚI (không pre-seed gì) -> Brief chạy thật với
+    # route_llm mặc định (_EmptyRouteLLM) -> content_units[] rỗng -> infographic
+    # đi nhánh SOURCE_BROKEN (ĐÃ CÓ TỪ TRƯỚC). TASK-038 VIỆC 4: Execute giờ
+    # ĐÚNG là NEEDS_HUMAN (không còn DONE giả — trọng tâm test này là "0 trùng/
+    # 0 mồ côi sau reorder", KHÔNG phải "C phải DONE", xem docstring đầu hàm).
+    assert board.execute_updates.get(approved_by_key[KEY_C]["row"]) == "NEEDS_HUMAN"
 
 
 # =====================================================================
@@ -6032,6 +6157,17 @@ def test_infographic_composer_empty_facts_returns_empty_spec_no_llm_call():
     d = agent.run(brief)
     assert d.body.count('"hero": []') == 1 or '"hero":[]' in d.body.replace(" ", "")
     assert "Số liệu" not in d.body
+
+
+def test_infographic_metric_count_sums_hero_and_market():
+    """TASK-038 VIỆC 4 — tiêu chí tối thiểu: hero+market. Hàm THUẦN."""
+    from twmkt.agents.production import infographic_metric_count
+
+    assert infographic_metric_count({"hero": [], "market": []}) == 0
+    assert infographic_metric_count({"hero": [{"label": "a", "value": "1"}], "market": []}) == 1
+    assert infographic_metric_count({"hero": [{"label": "a", "value": "1"}],
+                                     "market": [{"label": "b", "value": "2"}]}) == 2
+    assert infographic_metric_count({}) == 0   # thiếu cả 2 khoá -> 0, không crash
 
 
 # --- Content Factory Phase D: vá rò brand cũ (CTA/disclaimer brand-driven) ---
@@ -10526,6 +10662,97 @@ def test_queue_worker_exhausted_retry_uses_real_notifier_without_crashing(monkey
 
 
 # =============================================================================
+# TASK-038 VIỆC 2 — scripts/queue_worker.py::run_preflight() (kiểm phiên
+# Claude Code lúc khởi động, TRƯỚC khi nhận job)
+# =============================================================================
+
+class _FakeNotifier:
+    def __init__(self):
+        self.events: list[tuple[str, dict]] = []
+
+    def notify(self, event, **ctx):
+        self.events.append((event, ctx))
+        return True
+
+
+def test_run_preflight_ok_does_not_notify_and_allows_start(monkeypatch, tmp_path):
+    from twmkt.config import Settings
+
+    qw = _queue_worker_module()
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path))
+    monkeypatch.setattr(qw.factory, "preflight_claude_auth", lambda settings: (True, ""))
+
+    notifier = _FakeNotifier()
+    settings = Settings({"llm": {"mode": "claude_code"}})
+    assert qw.run_preflight(settings, notifier=notifier) is True
+    assert notifier.events == []   # lần đầu, đã tốt -> không có gì để báo
+
+
+def test_run_preflight_fails_notifies_once_and_blocks_start(monkeypatch, tmp_path):
+    """Hỏng -> trả False (caller KHÔNG được nhận job) + báo Telegram ĐÚNG 1 lần
+    (lần đầu -- chưa có trạng thái trước đó)."""
+    from twmkt.config import Settings
+
+    qw = _queue_worker_module()
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path))
+    monkeypatch.setattr(qw.factory, "preflight_claude_auth",
+                        lambda settings: (False, "OAuth session expired"))
+
+    notifier = _FakeNotifier()
+    settings = Settings({"llm": {"mode": "claude_code"}})
+    assert qw.run_preflight(settings, notifier=notifier) is False
+    assert len(notifier.events) == 1
+    event, ctx = notifier.events[0]
+    assert event == "preflight_failed" and ctx["reason"] == "OAuth session expired"
+
+
+def test_run_preflight_stays_failed_does_not_spam_telegram_on_repeat_restart(monkeypatch, tmp_path):
+    """Watchdog restart worker liên tục trong lúc phiên VẪN đang hỏng -- CHỈ
+    báo Telegram ở LẦN ĐẦU chuyển sang hỏng, các lần sau (vẫn hỏng) im lặng."""
+    from twmkt.config import Settings
+
+    qw = _queue_worker_module()
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path))
+    monkeypatch.setattr(qw.factory, "preflight_claude_auth",
+                        lambda settings: (False, "OAuth session expired"))
+
+    settings = Settings({"llm": {"mode": "claude_code"}})
+    notifier1 = _FakeNotifier()
+    qw.run_preflight(settings, notifier=notifier1)
+    assert len(notifier1.events) == 1
+
+    # Mô phỏng watchdog khởi động lại tiến trình MỚI (module-level state không
+    # còn, nhưng file trạng thái trên đĩa VẪN còn -- đây là lý do phải bền qua
+    # đĩa, không phải biến RAM).
+    notifier2 = _FakeNotifier()
+    assert qw.run_preflight(settings, notifier=notifier2) is False
+    assert notifier2.events == []
+
+
+def test_run_preflight_recovery_notifies_once_after_being_broken(monkeypatch, tmp_path):
+    """Từng hỏng -> giờ tốt trở lại -> báo Telegram 1 lần (preflight_recovered),
+    rồi lần sau (vẫn tốt) không báo lại."""
+    from twmkt.config import Settings
+
+    qw = _queue_worker_module()
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path))
+    settings = Settings({"llm": {"mode": "claude_code"}})
+
+    monkeypatch.setattr(qw.factory, "preflight_claude_auth",
+                        lambda settings: (False, "OAuth session expired"))
+    qw.run_preflight(settings, notifier=_FakeNotifier())
+
+    monkeypatch.setattr(qw.factory, "preflight_claude_auth", lambda settings: (True, ""))
+    notifier = _FakeNotifier()
+    assert qw.run_preflight(settings, notifier=notifier) is True
+    assert len(notifier.events) == 1 and notifier.events[0][0] == "preflight_recovered"
+
+    notifier2 = _FakeNotifier()
+    qw.run_preflight(settings, notifier=notifier2)
+    assert notifier2.events == []   # vẫn tốt lần sau -> không báo lại
+
+
+# =============================================================================
 # scripts/queue_worker_watchdog.py (2026-08-04, Lead: "hệ thống chạy full
 # tính năng mà không cần thông qua agent") — Task Scheduler từ chối đăng ký
 # trigger "At log on"/"At startup" trên máy này (Access is denied, cần quyền
@@ -10569,6 +10796,47 @@ def test_watchdog_does_not_relaunch_when_pid_in_lock_is_alive():
     relaunch, reason = wd.should_relaunch("may-a:4242", is_pid_alive_fn=lambda pid: True)
     assert relaunch is False
     assert "4242" in reason
+
+
+def test_watchdog_log_path_defaults_under_data_root_logs(monkeypatch, tmp_path):
+    """TASK-038 VIỆC 3 — chưa cấu hình queue.watchdog_log_path -> mặc định
+    data_root/logs/queue_worker.log."""
+    from twmkt.config import Settings
+
+    wd = _queue_worker_watchdog_module()
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path))
+    p = wd._watchdog_log_path(Settings({}))
+    assert p == tmp_path / "logs" / "queue_worker.log"
+
+
+def test_watchdog_log_path_reads_config_override(monkeypatch, tmp_path):
+    from twmkt.config import Settings
+
+    wd = _queue_worker_watchdog_module()
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path))
+    p = wd._watchdog_log_path(Settings({"queue": {"watchdog_log_path": "logs/custom.log"}}))
+    assert p == tmp_path / "logs" / "custom.log"
+
+
+def test_watchdog_relaunch_env_pins_claude_config_dir_when_configured():
+    """TASK-038 VIỆC 3 — worker spawn bởi watchdog PHẢI nhận CLAUDE_CONFIG_DIR
+    ĐÃ GHIM (cùng khoá config runtime.claude_config_dir dùng bởi VIỆC 1) —
+    watchdog restart worker liên tục lúc crash-loop, mỗi lần spawn PHẢI dùng
+    ĐÚNG phiên đã chốt, không được ăn theo os.environ tình cờ của watchdog."""
+    from twmkt.config import Settings
+
+    wd = _queue_worker_watchdog_module()
+    env = wd._relaunch_env(Settings({"runtime": {"claude_config_dir": "D:/pinned/profile"}}))
+    assert env["CLAUDE_CONFIG_DIR"] == "D:/pinned/profile"
+
+
+def test_watchdog_relaunch_env_omits_claude_config_dir_when_not_configured(monkeypatch):
+    from twmkt.config import Settings
+
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    wd = _queue_worker_watchdog_module()
+    env = wd._relaunch_env(Settings({}))
+    assert "CLAUDE_CONFIG_DIR" not in env
 
 
 def test_asset_hyperlink_formula_wraps_url_string():
@@ -10947,6 +11215,61 @@ def test_llm_status_banner_active_for_claude_code_no_key_needed():
     finally:
         if old is not None:
             os.environ["ANTHROPIC_API_KEY"] = old
+
+
+def test_preflight_claude_auth_noop_true_for_mock_and_api_modes():
+    """TASK-038 VIỆC 2 — preflight CHỈ có ý nghĩa cho llm.mode=claude_code
+    (phiên OAuth có thể hết hạn); mock/api trả (True, "") ngay, KHÔNG gọi gì
+    (KHÔNG đụng ClaudeCodeLLM/conftest.py chặn cứng)."""
+    assert factory.preflight_claude_auth(Settings({"llm": {"mode": "mock"}})) == (True, "")
+    assert factory.preflight_claude_auth(Settings({"llm": {"mode": "api"}})) == (True, "")
+
+
+def test_preflight_claude_auth_ok_when_client_succeeds():
+    """client (double, KHÔNG PHẢI ClaudeCodeLLM() mặc định -- không lách cơ chế
+    chặn model thật) trả lời bình thường -> (True, "")."""
+    class _OkLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False, temperature=None):
+            return "pong"
+
+    settings = Settings({"llm": {"mode": "claude_code"}})
+    assert factory.preflight_claude_auth(settings, client=_OkLLM()) == (True, "")
+
+
+def test_preflight_claude_auth_fails_when_client_raises_llm_call_error():
+    """client double raise LLMCallError (mô phỏng ca thật: OAuth session
+    expired) -> (False, <lý do thật>), KHÔNG raise ra ngoài preflight_claude_
+    auth() -- caller (queue_worker.run_preflight) tự quyết log/notify."""
+    from twmkt.agents.base import LLMCallError
+
+    class _BrokenLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False, temperature=None):
+            raise LLMCallError(
+                "claude -p lỗi (exit 1): 'Failed to authenticate: OAuth session expired "
+                "and could not be refreshed'")
+
+    settings = Settings({"llm": {"mode": "claude_code"}})
+    ok, reason = factory.preflight_claude_auth(settings, client=_BrokenLLM())
+    assert ok is False
+    assert "OAuth session expired" in reason
+
+
+def test_preflight_claude_auth_calls_with_haiku_model_and_fail_loud():
+    """Lượt gọi RẺ NHẤT có thể: model='haiku' (KHÔNG dùng content_model đắt),
+    fail_loud=True (để lỗi RAISE thay vì lùi mượt trả "" -- preflight cần biết
+    THẬT có lỗi hay không, không thể suy luận từ chuỗi rỗng)."""
+    seen = {}
+
+    class _SpyLLM:
+        def complete(self, system, prompt, *, model=None, fail_loud=False, temperature=None):
+            seen["model"] = model
+            seen["fail_loud"] = fail_loud
+            return "pong"
+
+    settings = Settings({"llm": {"mode": "claude_code"}})
+    factory.preflight_claude_auth(settings, client=_SpyLLM())
+    assert seen["model"] == "haiku"
+    assert seen["fail_loud"] is True
 
 
 def test_model_engine_label_maps_haiku_sonnet_mock():

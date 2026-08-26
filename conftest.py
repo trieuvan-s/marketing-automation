@@ -72,10 +72,10 @@ class _BlockedAnthropicClient:
 def _block_real_llm_calls(monkeypatch):
     from twmkt.agents import base as llm_base
 
-    real_binary, real_timeout, _real_run_fn = llm_base.ClaudeCodeLLM.__init__.__defaults__
+    real_binary, real_timeout, _real_run_fn, real_config_dir = llm_base.ClaudeCodeLLM.__init__.__defaults__
     monkeypatch.setattr(
         llm_base.ClaudeCodeLLM.__init__, "__defaults__",
-        (real_binary, real_timeout, _blocked_run_fn),
+        (real_binary, real_timeout, _blocked_run_fn, real_config_dir),
     )
 
     import anthropic

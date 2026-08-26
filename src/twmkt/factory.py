@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .agents.base import AnthropicLLM, ClaudeCodeLLM, LLMClient, MockLLM
+from .agents.base import AnthropicLLM, ClaudeCodeLLM, LLMCallError, LLMClient, MockLLM
 from .agents.router import LLMRouter, Tier
 from .approval import sheets_gate
 from .approval.gate import ApprovalGate, AutoApproveGate, ConsoleApprovalGate
@@ -31,6 +31,15 @@ from .publishers.base import ConsolePublisher, Publisher
 
 
 # --- LLM: chọn theo llm.provider -------------------------------------------
+def _claude_config_dir(settings: Settings) -> str:
+    """TASK-038 VIỆC 1 — GHIM phiên Claude Code production dùng, đọc từ
+    `runtime.claude_config_dir` (config-first, KHÔNG hard-code đường dẫn máy
+    cụ thể nào trong code). Rỗng (mặc định, chưa cấu hình) -> ClaudeCodeLLM
+    KHÔNG truyền CLAUDE_CONFIG_DIR, giữ hành vi cũ (mặc định hệ điều hành) —
+    Lead tự đặt giá trị thật lúc triển khai (quyết định vận hành)."""
+    return str(settings.get("runtime.claude_config_dir", "") or "").strip()
+
+
 def build_llm(settings: Settings) -> LLMClient:
     return _build_llm(settings, model_key="llm.content_model",
                       default_model="claude-sonnet-4-6")
@@ -57,7 +66,7 @@ def _build_llm(settings: Settings, *, model_key: str, default_model: str) -> LLM
         # thay vì thật. Cùng timeout với make_llm() (`llm.claude_code.timeout_s`)
         # -- 1 cấu hình timeout CLI duy nhất, không tách riêng theo bước.
         timeout_s = float(settings.get("llm.claude_code.timeout_s", 120))
-        return ClaudeCodeLLM(timeout_s=timeout_s)
+        return ClaudeCodeLLM(timeout_s=timeout_s, config_dir=_claude_config_dir(settings))
     raise ValueError(f"llm.provider không hỗ trợ: {provider} (mock|anthropic|claude_code)")
 
 
@@ -141,6 +150,36 @@ def llm_status(settings: Settings) -> LLMStatus:
                      researcher_model=researcher_model, content_model=content_model)
 
 
+def preflight_claude_auth(settings: Settings, *, client: LLMClient | None = None) -> tuple[bool, str]:
+    """TASK-038 VIỆC 2 — kiểm phiên `claude -p` CÒN XÁC THỰC ĐƯỢC KHÔNG bằng
+    lượt gọi RẺ NHẤT có thể (model haiku, prompt 1 chữ) — dùng bởi
+    scripts/queue_worker.py lúc KHỞI ĐỘNG, TRƯỚC khi nhận job (biến "hỏng SAU
+    KHI đốt tiền" thành "biết TRƯỚC khi đốt", xem ca thật 18/08: 2 lượt gọi
+    LLM/bài rồi mới lộ lỗi xác thực).
+
+    CHỈ áp cho `llm.mode == "claude_code"` (provider CÓ khái niệm phiên đăng
+    nhập/OAuth có thể hết hạn) — "mock"/"api" trả (True, "") NGAY, KHÔNG gọi
+    gì (mock không có phiên; api dùng ANTHROPIC_API_KEY, đã có AnthropicLLM.
+    is_available() riêng cho việc đó, KHÔNG phải lỗi OAuth session mà TASK-038
+    chẩn đoán).
+
+    `client` (tiêm được, mặc định None -> tự dựng ClaudeCodeLLM CÙNG cấu hình
+    timeout/config_dir với make_llm()) — test truyền double (fail_loud raise/
+    không raise) để mô phỏng phiên hỏng/tốt, KHÔNG lách cơ chế chặn model thật
+    của conftest.py (double KHÔNG PHẢI ClaudeCodeLLM() mặc định)."""
+    mode = (settings.get("llm.mode", "mock") or "mock").lower()
+    if mode != "claude_code":
+        return True, ""
+    if client is None:
+        timeout_s = float(settings.get("llm.claude_code.timeout_s", 120))
+        client = ClaudeCodeLLM(timeout_s=timeout_s, config_dir=_claude_config_dir(settings))
+    try:
+        client.complete("", "ping", model="haiku", fail_loud=True)
+        return True, ""
+    except LLMCallError as e:
+        return False, str(e)
+
+
 def model_engine_label(model: str, *, use_llm: bool) -> str:
     """Nhãn NGẮN cho cột Engine ở tab LOG (haiku|sonnet|opus|mock) — đối chiếu
     nhanh model nào thực sự chạy mà không cần mở cả tên model đầy đủ."""
@@ -192,7 +231,7 @@ def make_llm(settings: Settings) -> LLMClient:
         return MockLLM()
     if mode == "claude_code":
         timeout_s = float(settings.get("llm.claude_code.timeout_s", 120))
-        return ClaudeCodeLLM(timeout_s=timeout_s)
+        return ClaudeCodeLLM(timeout_s=timeout_s, config_dir=_claude_config_dir(settings))
     if mode == "api":
         return AnthropicLLM(model=settings.get("llm.content_model", "claude-sonnet-4-6"),
                             max_tokens=int(settings.get("llm.max_tokens", 1500)))
@@ -224,7 +263,7 @@ def build_writer_llm(settings: Settings) -> LLMClient:
     if mode == "claude_code":
         timeout_s = float(settings.get("writer.timeout_s", 120))
         print(f"LLM backend (writer): {mode} (timeout_s={timeout_s:.0f})")
-        return ClaudeCodeLLM(timeout_s=timeout_s)
+        return ClaudeCodeLLM(timeout_s=timeout_s, config_dir=_claude_config_dir(settings))
     return make_llm(settings)
 
 

@@ -1495,6 +1495,16 @@ def infographic_spec_from_data(data: dict | None, brief: ProductionBrief) -> dic
     return _fallback_infographic_spec(brief)
 
 
+def infographic_metric_count(spec: dict) -> int:
+    """TASK-038 VIỆC 4 — tiêu chí TỐI THIỂU cho infographic: số metric THẬT
+    (hero + market). 0 -> nội dung RỖNG, KHÔNG được đánh DONE (xem ca thật
+    18/08: infographic ghi Execute=DONE với `hero: []`, `market: []`,
+    `highlights: []`). Hàm THUẦN, chỉ ĐẾM — quyết định ERROR/NEEDS_HUMAN là
+    việc của scripts/produce_from_sheet.run() (điểm biết được brief.content_
+    units có rỗng hay không để phân biệt lý do)."""
+    return len(spec.get("hero") or []) + len(spec.get("market") or [])
+
+
 class InfographicSpecAgent(Agent):
     """PHASE 4.11: KHÔNG còn TẤT ĐỊNH/$0 thuần — giờ là 1 bước LLM Loại B/rẻ
     (caller gán `self.model`/`self.llm` = alias 'composer'/haiku, xem

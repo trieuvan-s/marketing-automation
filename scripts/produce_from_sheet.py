@@ -88,8 +88,8 @@ from twmkt.agents.brief import BriefResult, run_brief  # noqa: E402
 from twmkt.agents.production import (  # noqa: E402
     AnalysisWriterAgent, InfographicSpecAgent, InsufficientScenesError, ProductionBrief,
     VideoScriptAgent, all_production_agents, analysis_fields_from_data, apply_guardrails,
-    build_analysis_prompt, build_video_prompt, render_analysis, render_video,
-    video_fields_from_data,
+    build_analysis_prompt, build_video_prompt, infographic_metric_count, render_analysis,
+    render_video, video_fields_from_data,
 )
 from twmkt.agents.prompts import resolve_prompts  # noqa: E402
 from twmkt.agents.route_once import RouterDecisionStore, get_or_route  # noqa: E402
@@ -528,6 +528,11 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
     written = produced = skipped = flagged = 0
     for item in approved:
         topic_key = item["topic_key"]
+        # TASK-038 VIỆC 4 — True nếu video/infographic của chủ đề NÀY kết thúc
+        # ERROR/NEEDS_HUMAN ở LƯỢT CHẠY NÀY (nội dung rỗng/degenerate/guardrail
+        # reject) — dùng để KHÔNG đánh Execute=DONE dù article riêng vẫn DONE
+        # (xem điểm quyết định Execute cuối vòng lặp item này).
+        secondary_needs_human = False
         notifier.notify("start", topic=item["context"], topic_key=topic_key, actor=_DEFAULT_ACTOR)
 
         evidence = fetch_full_evidence(html_collector, sources, item["source"], item["hook"])
@@ -852,7 +857,14 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                         continue
                     _write_content(topic_key, "video", status="NEEDS_HUMAN", output="", notes=str(e), content_units_json=content_units_json)
                     written += 1
-                    seen.add((topic_key, "video"))
+                    # TASK-038 VIỆC 4 — KHÔNG seen.add: NEEDS_HUMAN CHƯA coi là
+                    # xong (cùng nếp article NEEDS_HUMAN ở trên + existing_
+                    # content_keys() vốn đã loại trừ NEEDS_HUMAN/ERROR khỏi
+                    # "đã xong" giữa CÁC LƯỢT run() — trước bản vá này, seen.add
+                    # ở đây khiến _is_fully_produced_channels() coi video NEEDS_
+                    # HUMAN là "xong" NGAY TRONG LƯỢT NÀY, kéo Execute=DONE dù
+                    # nội dung video rỗng/không dùng được — đúng ca thật 18/08).
+                    secondary_needs_human = True
                     flagged += 1
                     notifier.notify("needs_human", topic=item["context"], type="video", reason=str(e))
                     continue
@@ -872,6 +884,16 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
                     "SOURCE_BROKEN: content_units[] rỗng (Brief chưa trích được số liệu, "
                     "brief_status=FAILED — lỗi hạ tầng thật) -> NEEDS_HUMAN, "
                     "không bịa nhãn 'Số liệu N'")
+            elif (isinstance(agent, InfographicSpecAgent)
+                  and infographic_metric_count(json.loads(draft.body)) == 0):
+                # TASK-038 VIỆC 4 — LƯỚI AN TOÀN THÊM (content_units KHÔNG rỗng
+                # nhưng spec vẫn ra hero+market rỗng, vd composer/fallback đổi
+                # hành vi về sau) — ca thật 18/08: infographic ghi Execute=DONE
+                # với `hero: []`, `market: []`, `highlights: []`. ĐỀ XUẤT tiêu
+                # chí tối thiểu: infographic phải có ≥1 metric thật.
+                draft.compliance_issues.append(
+                    "EMPTY_METRICS: infographic không có metric nào (hero+market rỗng) dù "
+                    "content_units đã có dữ kiện -> NEEDS_HUMAN, không đánh DONE nội dung rỗng")
             type_ = draft.fmt.value
             if (topic_key, type_) in seen:
                 skipped += 1
@@ -889,7 +911,15 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
             fn.write_text(draft.body, encoding="utf-8")
             _write_content(topic_key, type_, status=status, output=draft.body, notes=note, content_units_json=content_units_json)
             written += 1
-            seen.add((topic_key, type_))
+            # TASK-038 VIỆC 4 — CHỈ seen.add khi THẬT SỰ DONE (cùng nếp article
+            # NEEDS_HUMAN + existing_content_keys(), xem comment ở nhánh
+            # InsufficientScenesError phía trên): ERROR (guardrail reject/
+            # EMPTY_METRICS/SOURCE_BROKEN) KHÔNG được tính "xong" cho quyết
+            # định Execute cuối vòng lặp item này.
+            if status == "DONE":
+                seen.add((topic_key, type_))
+            else:
+                secondary_needs_human = True
             produced += 1
             if draft.is_clean:
                 notifier.notify("draft_changed", topic=item["context"], type=type_, status=status)
@@ -905,6 +935,16 @@ def run(*, limit: int = 5, offline: bool = False, model: str | None = None,
             failed_topics.append(topic_key)
             failed_details[topic_key] = {"title": item["context"], "reason": r.reason}
         elif article_outcome == WriterOutcome.NEEDS_HUMAN:
+            needs_human_topics.append(topic_key)
+        elif secondary_needs_human:
+            # TASK-038 VIỆC 4 — video/infographic của chủ đề này kết thúc
+            # ERROR/NEEDS_HUMAN Ở LƯỢT NÀY (nội dung rỗng/degenerate/guardrail
+            # reject) dù article riêng DONE -- KHÔNG được đánh Execute=DONE
+            # (ca thật 18/08: infographic rỗng nhưng Execute vẫn báo DONE, vì
+            # _is_fully_produced_channels() cũ chỉ kiểm "đã ghi dòng nào chưa",
+            # không kiểm dòng đó DONE hay ERROR). Dùng CHUNG nhãn NEEDS_HUMAN
+            # với article (người xem CONTENT.Notes của đúng dòng video/
+            # infographic để biết lý do thật, xem _write_content ở trên).
             needs_human_topics.append(topic_key)
         elif _is_fully_produced_channels(topic_key, seen, channels):
             done_topics.append(topic_key)
