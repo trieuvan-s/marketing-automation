@@ -24,6 +24,7 @@ Dừng: Ctrl+C.
 """
 from __future__ import annotations
 
+import json
 import os
 import socket
 import sys
@@ -48,6 +49,7 @@ ensure_utf8_stdio()
 import system_power_on  # noqa: E402 -- tái dùng acquire_lock()/release_lock()
 import produce_from_sheet  # noqa: E402
 import render_production_assets  # noqa: E402 -- job "render_assets" (Gate 2)
+from twmkt import factory  # noqa: E402 -- TASK-038 VIỆC 2: preflight_claude_auth()
 from twmkt.config import data_path, load_settings  # noqa: E402
 from twmkt.sheets_board import EXECUTE_FAILED, EXECUTE_RUNNING, SheetsBoard  # noqa: E402
 from twmkt.utils.telegram_notifier import make_notifier  # noqa: E402 -- TASK-037
@@ -66,6 +68,56 @@ def _lock_path() -> Path:
 
 def _worker_id() -> str:
     return f"{socket.gethostname()}:{os.getpid()}"
+
+
+def _preflight_state_path(*, settings=None) -> Path:
+    """TASK-038 VIỆC 2 — BỀN qua khởi động lại (SQLite/RAM tiến trình đều
+    KHÔNG sống sót qua restart, mà watchdog restart worker liên tục khi phiên
+    hỏng — cần nhớ 'lần trước ĐÃ hỏng' để chỉ báo Telegram 1 lần lúc CHUYỂN
+    TRẠNG THÁI, không phải mỗi lần restart)."""
+    return data_path("state", "queue_worker_preflight.json", settings=settings)
+
+
+def _read_last_preflight_ok(*, settings=None) -> bool | None:
+    """None = chưa từng ghi (lần đầu chạy, hoặc file hỏng/thiếu) -- coi như
+    'chưa biết', KHÔNG suy diễn là tốt hay xấu."""
+    try:
+        data = json.loads(_preflight_state_path(settings=settings).read_text(encoding="utf-8"))
+        return bool(data.get("ok"))
+    except (OSError, ValueError):
+        return None
+
+
+def _write_last_preflight_ok(ok: bool, reason: str, *, settings=None) -> None:
+    _preflight_state_path(settings=settings).write_text(
+        json.dumps({"ok": ok, "reason": reason}), encoding="utf-8")
+
+
+def run_preflight(settings, *, notifier) -> bool:
+    """TASK-038 VIỆC 2 — kiểm phiên Claude Code MỘT LẦN lúc khởi động, TRƯỚC
+    khi `run_forever()` bắt đầu nhận job (xem factory.preflight_claude_auth —
+    lượt gọi RẺ NHẤT có thể, model haiku). Hỏng -> log rõ + báo Telegram
+    (notifier đã nối ở TASK-037) + trả False (caller KHÔNG được vào vòng nhận
+    job — tránh đốt lượt gọi model cho những bài chắc chắn hỏng, đúng ca thật
+    18/08: 2 lượt gọi/bài rồi mới lộ lỗi xác thực).
+
+    CHỐNG LÀM PHIỀN: chỉ notify khi trạng thái THẬT SỰ ĐỔI (tốt<->hỏng), đọc
+    từ `_read_last_preflight_ok()` (bền qua restart) — watchdog restart worker
+    mỗi ~5 phút trong lúc phiên vẫn đang hỏng KHÔNG được bắn lại Telegram mỗi
+    lần, chỉ 1 lần lúc chuyển từ tốt sang hỏng (và 1 lần khi phục hồi)."""
+    ok, reason = factory.preflight_claude_auth(settings)
+    last_ok = _read_last_preflight_ok(settings=settings)
+    if not ok:
+        print(f"[queue-worker] PREFLIGHT XÁC THỰC HỎNG: {reason} -- KHÔNG nhận job.")
+        if last_ok is not False:
+            notifier.notify("preflight_failed", reason=reason)
+        _write_last_preflight_ok(False, reason, settings=settings)
+        return False
+    print("[queue-worker] Preflight xác thực OK.")
+    if last_ok is False:
+        notifier.notify("preflight_recovered")
+    _write_last_preflight_ok(True, "", settings=settings)
+    return True
 
 
 def _open_board(settings) -> SheetsBoard:
@@ -268,6 +320,12 @@ def run_once(*, settings, worker_id: str, board=None) -> bool:
 def run_forever() -> None:
     settings = load_settings()
     system_power_on.acquire_lock(_lock_path())
+    notifier = make_notifier(settings)
+    if not run_preflight(settings, notifier=notifier):
+        print("[queue-worker] Dừng khởi động do preflight xác thực hỏng -- sửa phiên "
+             "Claude Code (runtime.claude_config_dir) rồi chạy lại. KHÔNG nhận job.")
+        system_power_on.release_lock(_lock_path())
+        return
     board = _open_board(settings)
     poll_interval_s = float(settings.get("queue.poll_interval_s", 3))
     worker_id = _worker_id()

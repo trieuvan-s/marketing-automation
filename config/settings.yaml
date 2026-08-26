@@ -602,6 +602,25 @@ knowledge:
   top_k: 5
   vector_store: "memory"          # memory | qdrant
 
+# --- Runtime: phiên Claude Code production dùng (TASK-038) -----------------
+# CHẨN ĐOÁN THẬT (Lead xác minh, 08/2026): production gọi `claude -p` KHÔNG
+# đặt CLAUDE_CONFIG_DIR -> luôn dùng profile MẶC ĐỊNH hệ điều hành
+# (`C:\Users\<user>\.claude` trên Windows). Team hiện tại chạy Claude Code
+# trên profile KHÁC (vd ổ D) để phát triển -> profile mặc định mất người giữ
+# ấm -> token OAuth của nó không được refresh -> hết hạn sau vài ngày ->
+# production lỗi "OAuth session expired" mà không ai biết TRƯỚC khi job chết.
+runtime:
+  # Đường dẫn thư mục cấu hình Claude Code (chứa .credentials.json) mà
+  # production PHẢI dùng — truyền thẳng vào biến môi trường CLAUDE_CONFIG_DIR
+  # của tiến trình con `claude -p` (xem agents/base.py::ClaudeCodeLLM,
+  # factory._claude_config_dir()). ĐỂ TRỐNG (mặc định) -> KHÔNG truyền biến
+  # này, tiến trình con tự lùi về mặc định hệ điều hành (hành vi cũ). Đặt giá
+  # trị thật là QUYẾT ĐỊNH VẬN HÀNH của Lead lúc triển khai (profile nào đang
+  # được người dùng chủ động giữ ấm/refresh token thường xuyên), KHÔNG phải
+  # quyết định code — vd 'C:\Users\may99\.claude' hoặc 1 profile khác đã xác
+  # nhận được refresh đều đặn.
+  claude_config_dir: ""
+
 # --- LLM: phân tầng token -------------------------------------------
 # BẬT LLM thật CHỈ cho Researcher + Hook (tầng rẻ Haiku) để nếm chất lượng trên
 # dữ liệu CafeF thật + đo token. Producers (article/video) tầng đắt (content_model)
@@ -967,6 +986,13 @@ queue:
   notify_on_retry_success: false   # ĐỀ XUẤT (chưa tự quyết bật): báo Telegram khi 1 job từng FAILED rồi
                                     # tự retry THÀNH CÔNG — mặc định TẮT để không tự ý làm ồn hộp thư
                                     # (Lead có thể bật khi muốn thấy tín hiệu "tự phục hồi" trên kênh).
+
+  # TASK-038 VIỆC 3 — đường dẫn (tương đối trong data_root) mà
+  # scripts/queue_worker_watchdog.py ghi stdout/stderr của queue_worker.py nó
+  # spawn. Bản cũ Popen(..., stdout=DEVNULL) làm MẤT TRẮNG mọi print() của
+  # worker (banner LLM/preflight/lỗi claude -p thật) — Lead mất nhiều giờ
+  # chẩn đoán mù đúng vì lỗ hổng này.
+  watchdog_log_path: "logs/queue_worker.log"
 
 # --- Production Factory: seam gọi AIGEN pipeline thật (media_factory/aigen_seam.py) --
 # CÙNG NẾP với storage.data_root: đường dẫn SIBLING NGOÀI repo, đọc qua

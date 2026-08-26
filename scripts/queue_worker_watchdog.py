@@ -35,7 +35,7 @@ from twmkt._encoding import ensure_utf8_stdio  # noqa: E402
 ensure_utf8_stdio()
 
 import system_power_on as spo  # noqa: E402 -- tái dùng is_pid_alive()/_read_lock()
-from twmkt.config import data_path  # noqa: E402
+from twmkt.config import data_path, load_settings  # noqa: E402
 
 
 def _queue_worker_lock_path() -> Path:
@@ -43,6 +43,32 @@ def _queue_worker_lock_path() -> Path:
     lại hằng số riêng, lệch tên là watchdog kiểm nhầm lock của tiến trình
     khác."""
     return data_path("logs", "queue_worker.lock")
+
+
+def _watchdog_log_path(settings) -> Path:
+    """TASK-038 VIỆC 3 — đường dẫn (qua config `queue.watchdog_log_path`, mặc
+    định `data_root/logs/queue_worker.log`) mà watchdog GHI stdout/stderr của
+    worker vào. Trước bản vá này, `Popen(..., stdout=DEVNULL)` khiến MỌI
+    print() của worker (banner LLM/preflight/lỗi claude -p thật) MẤT TRẮNG --
+    Lead đã mất nhiều giờ chẩn đoán mù đúng vì lỗ hổng này, phải tự dựng
+    launcher VBS ngoài repo để có log."""
+    rel = str(settings.get("queue.watchdog_log_path", "logs/queue_worker.log") or "logs/queue_worker.log")
+    return data_path(*Path(rel).parts, settings=settings)
+
+
+def _relaunch_env(settings) -> dict:
+    """TASK-038 VIỆC 3 — env cho tiến trình `queue_worker.py` do watchdog
+    spawn: kế thừa NGUYÊN VẸN os.environ của watchdog + GHIM CLAUDE_CONFIG_DIR
+    (đọc `runtime.claude_config_dir`, CÙNG khoá config VIỆC 1 -- ClaudeCodeLLM
+    tự đọc lại từ settings khi worker khởi động, đây là NGOÀI, chỉ pin session
+    watchdog TRUYỀN XUỐNG worker giống hệt worker sẽ tự truyền xuống `claude
+    -p`) khi config có giá trị. Rỗng -> KHÔNG thêm biến này, giữ nguyên hành
+    vi cũ (worker tự lùi về mặc định hệ điều hành)."""
+    env = dict(os.environ)
+    config_dir = str(settings.get("runtime.claude_config_dir", "") or "").strip()
+    if config_dir:
+        env["CLAUDE_CONFIG_DIR"] = config_dir
+    return env
 
 
 def should_relaunch(lock_content: str | None, *, is_pid_alive_fn=spo.is_pid_alive) -> tuple[bool, str]:
@@ -62,6 +88,7 @@ def should_relaunch(lock_content: str | None, *, is_pid_alive_fn=spo.is_pid_aliv
 
 
 def main() -> None:
+    settings = load_settings()
     lock_path = _queue_worker_lock_path()
     try:
         lock_content = lock_path.read_text(encoding="utf-8")
@@ -75,14 +102,21 @@ def main() -> None:
 
     python_exe = sys.executable
     script = str(REPO_ROOT / "scripts" / "queue_worker.py")
-    subprocess.Popen(
-        [python_exe, script],
-        cwd=str(REPO_ROOT),
-        creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,  # type: ignore[attr-defined]
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
-        close_fds=True,
-    )
-    print("[watchdog] Đã khởi động lại queue_worker.py.")
+    log_path = _watchdog_log_path(settings)
+    # TASK-038 VIỆC 3 — "a" (append): giữ log XUYÊN SUỐT nhiều lần watchdog
+    # khởi động lại (crash loop lúc phiên hỏng vẫn cần thấy lịch sử), KHÔNG
+    # ghi đè mỗi lần restart. Giữ NGUYÊN chạy ẩn (CREATE_NO_WINDOW |
+    # DETACHED_PROCESS) -- chỉ đổi ĐÍCH của stdout/stderr, không đổi tính chất
+    # chạy nền.
+    with open(log_path, "a", encoding="utf-8") as log_file:
+        subprocess.Popen(
+            [python_exe, script],
+            cwd=str(REPO_ROOT),
+            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,  # type: ignore[attr-defined]
+            stdout=log_file, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            env=_relaunch_env(settings), close_fds=True,
+        )
+    print(f"[watchdog] Đã khởi động lại queue_worker.py (log: {log_path}).")
 
 
 if __name__ == "__main__":

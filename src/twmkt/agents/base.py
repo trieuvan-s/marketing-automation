@@ -161,12 +161,25 @@ class ClaudeCodeLLM(LLMClient):
     LLMCallError. `timeout_s` đọc từ config (llm.claude_code.timeout_s, xem
     factory.make_llm) — mặc định 120s nếu không truyền. `run_fn` tiêm được
     (mặc định subprocess.run) để test không gọi CLI thật.
+
+    TASK-038 VIỆC 1 — `config_dir` (đọc từ `runtime.claude_config_dir`, xem
+    factory._claude_config_dir()) GHIM tường minh phiên Claude Code production
+    dùng, thay vì ăn theo mặc định hệ điều hành (`C:\\Users\\<user>\\.claude`
+    trên Windows nếu KHÔNG set `CLAUDE_CONFIG_DIR`). Chẩn đoán thật (Lead xác
+    minh): production không đặt biến này -> luôn dùng profile MẶC ĐỊNH, không
+    ai chủ động refresh token -> phiên hết hạn 5 ngày mới lộ ra qua lỗi "OAuth
+    session expired". `config_dir=""` (mặc định) -> KHÔNG truyền
+    CLAUDE_CONFIG_DIR vào tiến trình con, giữ NGUYÊN hành vi cũ (dùng mặc định
+    hệ điều hành) — tương thích ngược tuyệt đối cho mọi call site chưa cấu
+    hình `runtime.claude_config_dir`.
     """
 
-    def __init__(self, binary: str = "claude", timeout_s: float = 120.0, run_fn=subprocess.run):
+    def __init__(self, binary: str = "claude", timeout_s: float = 120.0, run_fn=subprocess.run,
+                config_dir: str = ""):
         self.binary = binary
         self.timeout_s = timeout_s
         self._run_fn = run_fn
+        self.config_dir = config_dir
         self._warned = False
         self._temp_warned = False
 
@@ -211,6 +224,14 @@ class ClaudeCodeLLM(LLMClient):
         # API"). Xoá key khỏi env CON (không đụng os.environ của tiến trình cha, nên
         # AnthropicLLM ở đường khác VẪN dùng key bình thường).
         child_env = {k: v for k, v in os.environ.items() if k not in _CLI_STRIPPED_ENV}
+        # TASK-038 VIỆC 1 — GHIM phiên tường minh: config_dir rỗng (mặc định)
+        # -> KHÔNG thêm key này, tiến trình con tự lùi về mặc định hệ điều hành
+        # (hành vi cũ, tương thích ngược). Có giá trị -> ĐÈ CLAUDE_CONFIG_DIR
+        # bất kể os.environ của tiến trình cha có sẵn biến này hay không (config
+        # là NGUỒN SỰ THẬT cho phiên production dùng, không phải môi trường ai
+        # đó tình cờ set sẵn ở shell).
+        if self.config_dir:
+            child_env["CLAUDE_CONFIG_DIR"] = self.config_dir
         try:
             proc = self._run_fn(cmd, input=full_prompt, capture_output=True, text=True,
                                 encoding="utf-8", timeout=self.timeout_s, env=child_env)
